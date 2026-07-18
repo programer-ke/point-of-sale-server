@@ -40,7 +40,11 @@ async function startServer() {
         port: Number(PORT),
       },
       context: async ({ req }) => {
-        return contextFromAuthorization(req.headers.authorization);
+        const requestedRole = req.headers["x-tomkondi-role"];
+        return contextFromAuthorization(
+          req.headers.authorization,
+          Array.isArray(requestedRole) ? requestedRole[0] : requestedRole,
+        );
       },
     });
 

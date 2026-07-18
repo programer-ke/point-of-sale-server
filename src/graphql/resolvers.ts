@@ -36,6 +36,8 @@ import {
 const requireStaff = (context: GraphQLContext) => requireRole(context, ["admin", "staff"]);
 const requireAdmin = (context: GraphQLContext) => requireRole(context, ["admin"]);
 const actor = (context: GraphQLContext) => ({ id: context.auth.id, name: context.auth.username });
+const activeRole = (user: GraphQLContext["auth"]) =>
+  user.activeRole ?? (user.roles.includes("admin") ? "admin" : "staff");
 
 const parseRoles = (roles: string[]): UserRole[] => {
   const normalized = [...new Set(roles)];
@@ -86,7 +88,9 @@ export const resolvers = {
     onPromotion: (product: ProductRecord) => effectiveProductPrice(product) < product.price,
   },
   Sale: {
-    receiptBranding: (sale: SaleRecord) => sale.receiptBranding ?? getBusinessSettings(),
+    // Regenerated receipts intentionally use current branding. Sale prices and
+    // payment facts remain immutable snapshots on the sale record.
+    receiptBranding: () => getBusinessSettings(),
   },
   Query: {
     me: async (_: unknown, _args: unknown, context: GraphQLContext) => {
@@ -134,7 +138,7 @@ export const resolvers = {
     ) => {
       const authenticated = requireStaff(context);
       const safeLimit = Math.min(Math.max(limit, 1), 100);
-      const personalView = personal || !authenticated.roles.includes("admin");
+      const personalView = personal || activeRole(authenticated) !== "admin";
       const sales = personalView
         ? await listSalesByStaff(authenticated.id, safeLimit)
         : await listSales(safeLimit);
@@ -147,7 +151,7 @@ export const resolvers = {
     ) => {
       const authenticated = requireStaff(context);
       const sale = await getSale(id);
-      const personalView = personal || !authenticated.roles.includes("admin");
+      const personalView = personal || activeRole(authenticated) !== "admin";
       if (sale && personalView && sale.createdBy !== authenticated.id) {
         throw forbiddenError();
       }
@@ -161,21 +165,21 @@ export const resolvers = {
       requireStaff(context);
       return getBusinessSettings();
     },
-    dashboard: async (_: unknown, { days, personal }: { days: number; personal: boolean }, context: GraphQLContext) => {
+    dashboard: async (_: unknown, { days, personal, compact }: { days: number; personal: boolean; compact: boolean }, context: GraphQLContext) => {
       const authenticated = requireStaff(context);
-      const isAdmin = authenticated.roles.includes("admin");
+      const isAdmin = activeRole(authenticated) === "admin";
       const personalView = personal || !isAdmin;
-      const summary = await dashboardSummary(days, personalView ? authenticated.id : undefined);
+      const summary = await dashboardSummary(days, personalView ? authenticated.id : undefined, !compact);
       const [names, recentSales] = await Promise.all([
-        cashierNames(),
-        resolveCashierNames(summary.recentSales),
+        compact ? Promise.resolve(new Map<string, string>()) : cashierNames(),
+        compact ? Promise.resolve(summary.recentSales) : resolveCashierNames(summary.recentSales),
       ]);
       return {
         ...summary,
         grossProfit: isAdmin && !personalView ? summary.grossProfit : 0,
         recentSales,
-        recentAudits: isAdmin && !personalView ? summary.recentAudits : [],
-        cashierPerformance: summary.cashierPerformance
+        recentAudits: !compact && isAdmin && !personalView ? summary.recentAudits : [],
+        cashierPerformance: (compact ? [] : summary.cashierPerformance)
           .filter((staff) => !personalView || staff.staffId === authenticated.id)
           .map((staff) => ({ ...staff, grossProfit: isAdmin && !personalView ? staff.grossProfit : 0, staffName: names.get(staff.staffId) ?? staff.staffName })),
       };
@@ -185,13 +189,14 @@ export const resolvers = {
   Mutation: {
     inviteUser: async (
       _: unknown,
-      args: { email: string; name: string; roles: string[]; employeeCode: string; jobTitle: string; phone: string },
+      args: { email: string; name: string; roles: string[]; employeeCode: string; jobTitle: string; department: string; phone: string },
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
       if (!args.email.trim() || !args.name.trim()) throw new Error("Name and email are required");
+      if (args.department.trim().replace(/\s+/g, " ").length > 80) throw new Error("Department must be 80 characters or fewer");
       const user = await inviteCognitoUser({ email: args.email, name: args.name, roles: parseRoles(args.roles) });
-      await upsertStaffProfile(user.id, { employeeCode: args.employeeCode, jobTitle: args.jobTitle, phone: args.phone });
+      await upsertStaffProfile(user.id, { employeeCode: args.employeeCode, jobTitle: args.jobTitle, department: args.department, phone: args.phone });
       return mergeProfile(user);
     },
     resendUserInvitation: async (_: unknown, { username }: { username: string }, context: GraphQLContext) => {
@@ -214,16 +219,18 @@ export const resolvers = {
       return upsertStaffProfile(user.id, {
         employeeCode: current?.employeeCode ?? "",
         jobTitle: current?.jobTitle ?? "",
+        department: current?.department ?? "",
         phone: input.phone,
       });
     },
-    updateStaffProfile: (
+    updateStaffProfile: async (
       _: unknown,
-      { userId, ...input }: { userId: string; employeeCode: string; jobTitle: string; phone: string },
+      { userId, ...input }: { userId: string; employeeCode: string; jobTitle: string; department?: string; phone: string },
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
-      return upsertStaffProfile(userId, input);
+      const current = input.department === undefined ? await getStaffProfile(userId) : null;
+      return upsertStaffProfile(userId, { ...input, department: input.department ?? current?.department ?? "" });
     },
     updateBusinessSettings: (
       _: unknown,
@@ -299,7 +306,7 @@ export const resolvers = {
       const authenticated = requireStaff(context);
       if (!(args.paymentMethod === "cash" || args.paymentMethod === "mpesa")) throw new Error("Payment method must be cash or M-Pesa");
       const [user, profile] = await Promise.all([getCognitoUser(authenticated.username), getStaffProfile(authenticated.id)]);
-      return completeSale(args, { id: authenticated.id, name: user.name, employeeCode: profile?.employeeCode });
+      return completeSale(args, { id: authenticated.id, name: user.name, employeeCode: profile?.employeeCode, department: profile?.department });
     },
   },
 };

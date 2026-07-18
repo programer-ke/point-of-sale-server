@@ -96,9 +96,14 @@ and the first name from Cognito.
 
 Cognito remains the identity source for name, email, verification state,
 password, enabled state, and `admin`/`staff` roles. Employment metadata that is
-owned by the business (`employeeCode`, `jobTitle`, and a non-authentication
-phone number) is stored in DynamoDB at `USER#<cognito-sub>/PROFILE`. Staff can
-change their own phone; an administrator manages employment fields.
+owned by the business (`employeeCode`, `jobTitle`, `department`, and a
+non-authentication phone number) is stored in DynamoDB at
+`USER#<cognito-sub>/PROFILE`. Staff can
+change their own phone; an administrator manages employment fields. Department
+is a flat staff-profile label (there is no department hierarchy). Each new sale
+snapshots that label as `sellerDepartment`, so moving a staff member later does
+not alter historical department reporting. Sales created before this field was
+introduced remain unassigned rather than being inferred from current profiles.
 
 ## Seed the MVP catalog
 

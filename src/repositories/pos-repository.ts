@@ -66,6 +66,7 @@ export interface SaleRecord {
   paymentReference?: string | null;
   createdBy: string;
   createdByName: string;
+  sellerDepartment?: string | null;
   cashierDisplayName?: string;
   receiptBranding?: BusinessSettingsRecord;
   createdAt: string;
@@ -92,6 +93,7 @@ export interface StaffProfileRecord {
   userId: string;
   employeeCode: string;
   jobTitle: string;
+  department: string;
   phone: string;
   createdAt: string;
   updatedAt: string;
@@ -363,7 +365,17 @@ export const updateProduct = async (
   }
   transaction.push(
     { Put: { TableName: TABLE_NAME, Item: { ...productKey(id), GSI1PK: "CATALOG#PRODUCT", GSI1SK: `${next.name.toLowerCase()}#${id}`, entityType: "product", ...next }, ConditionExpression: "attribute_exists(PK)" } },
-    auditPut({ action: "product.updated", entityType: "product", entityId: id, productName: next.name, reason: "Product details updated", actorId: actor.id, actorName: actor.name }, now),
+    auditPut({
+      action: current.price !== next.price ? "product.price.updated" : "product.updated",
+      entityType: "product",
+      entityId: id,
+      productName: next.name,
+      reason: current.price !== next.price
+        ? `Selling price changed from ${current.price.toFixed(2)} to ${next.price.toFixed(2)}`
+        : "Product details updated",
+      actorId: actor.id,
+      actorName: actor.name,
+    }, now),
   );
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: transaction }));
   return next;
@@ -423,7 +435,7 @@ export const completeSale = async (
     mpesaReference?: string | null;
     items: Array<{ productId: string; quantity: number }>;
   },
-  actor: { id: string; name: string; employeeCode?: string },
+  actor: { id: string; name: string; employeeCode?: string; department?: string },
 ) => {
   const grouped = new Map<string, number>();
   for (const item of input.items) grouped.set(item.productId, (grouped.get(item.productId) ?? 0) + item.quantity);
@@ -482,6 +494,7 @@ export const completeSale = async (
     paymentReference,
     createdBy: actor.id,
     createdByName: actor.name,
+    sellerDepartment: actor.department?.trim() || null,
     cashierDisplayName: [actor.name.trim().split(/\s+/)[0], actor.employeeCode ? `(${actor.employeeCode})` : ""].filter(Boolean).join(" "),
     receiptBranding,
     createdAt: now,
@@ -503,7 +516,7 @@ export const completeSale = async (
   return sale;
 };
 
-export const dashboardSummary = async (requestedDays = 1, staffId?: string) => {
+export const dashboardSummary = async (requestedDays = 1, staffId?: string, includeDetails = true) => {
   const days = Math.min(Math.max(requestedDays, 1), 90);
   const startDate = new Date(`${businessDate()}T00:00:00+03:00`);
   startDate.setUTCDate(startDate.getUTCDate() - (days - 1));
@@ -511,7 +524,7 @@ export const dashboardSummary = async (requestedDays = 1, staffId?: string) => {
   const [products, allSales, audits] = await Promise.all([
     listProducts(),
     queryCollection<SaleRecord>("SALE", { from: start }),
-    listAudits(8),
+    includeDetails ? listAudits(8) : Promise.resolve([]),
   ]);
   const sales = staffId ? allSales.filter((sale) => sale.createdBy === staffId) : allSales;
   const revenue = roundMoney(sales.reduce((sum, sale) => sum + sale.totalAmount, 0));
@@ -553,7 +566,8 @@ export const dashboardSummary = async (requestedDays = 1, staffId?: string) => {
 
 export const getStaffProfile = async (userId: string) => {
   const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: profileKey(userId) }));
-  return stripKeys<StaffProfileRecord>(response.Item);
+  const profile = stripKeys<StaffProfileRecord>(response.Item);
+  return profile ? { ...profile, department: profile.department ?? "" } : null;
 };
 
 export const getStaffProfiles = async (userIds: string[]) => {
@@ -561,17 +575,19 @@ export const getStaffProfiles = async (userIds: string[]) => {
   const response = await dynamoDB.send(new BatchGetCommand({ RequestItems: { [TABLE_NAME]: { Keys: userIds.map(profileKey) } } }));
   return new Map((response.Responses?.[TABLE_NAME] ?? []).map((item) => {
     const profile = stripKeys<StaffProfileRecord>(item)!;
-    return [profile.userId, profile];
+    return [profile.userId, { ...profile, department: profile.department ?? "" }];
   }));
 };
 
 export const upsertStaffProfile = async (
   userId: string,
-  input: Pick<StaffProfileRecord, "employeeCode" | "jobTitle" | "phone">,
+  input: Pick<StaffProfileRecord, "employeeCode" | "jobTitle" | "department" | "phone">,
 ) => {
   const current = await getStaffProfile(userId);
   const now = new Date().toISOString();
-  const profile: StaffProfileRecord = { userId, employeeCode: input.employeeCode.trim(), jobTitle: input.jobTitle.trim(), phone: input.phone.trim(), createdAt: current?.createdAt ?? now, updatedAt: now };
+  const department = input.department.trim().replace(/\s+/g, " ");
+  if (department.length > 80) throw new Error("Department must be 80 characters or fewer");
+  const profile: StaffProfileRecord = { userId, employeeCode: input.employeeCode.trim(), jobTitle: input.jobTitle.trim(), department, phone: input.phone.trim(), createdAt: current?.createdAt ?? now, updatedAt: now };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [{ Put: { TableName: TABLE_NAME, Item: { ...profileKey(userId), entityType: "staff_profile", ...profile } } }] }));
   return profile;
 };

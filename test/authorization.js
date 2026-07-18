@@ -22,6 +22,7 @@ async function main() {
       id: "staff-1",
       username: "staff@example.com",
       roles: ["staff"],
+      activeRole: "staff",
     },
   };
 
@@ -64,7 +65,7 @@ async function main() {
   assert.equal(ownReceipt.body.singleResult.errors, undefined);
 
   const adminContext = {
-    auth: { id: "admin-1", username: "admin@example.com", roles: ["admin"] },
+    auth: { id: "admin-1", username: "admin@example.com", roles: ["admin"], activeRole: "admin" },
   };
   const allAdminSales = await server.executeOperation(
     { query: "query { sales { id } }" },
@@ -74,11 +75,18 @@ async function main() {
   assert.equal(allAdminSales.body.singleResult.data.sales.length, 2);
 
   const personalAdminSales = await server.executeOperation(
-    { query: "query { sales(personal: true) { id } }" },
-    { contextValue: { auth: { ...adminContext.auth, id: "staff-1", roles: ["admin", "staff"] } } },
+    { query: "query { sales(personal: false) { id } }" },
+    { contextValue: { auth: { ...adminContext.auth, id: "staff-1", roles: ["admin", "staff"], activeRole: "staff" } } },
   );
   assert.equal(personalAdminSales.body.kind, "single");
   assert.deepEqual(JSON.parse(JSON.stringify(personalAdminSales.body.singleResult.data.sales)), [{ id: "sale-1" }]);
+
+  const dualRoleStaffDenied = await server.executeOperation(
+    { query: "query { users { id } }" },
+    { contextValue: { auth: { ...adminContext.auth, roles: ["admin", "staff"], activeRole: "staff" } } },
+  );
+  assert.equal(dualRoleStaffDenied.body.kind, "single");
+  assert.equal(dualRoleStaffDenied.body.singleResult.errors[0].extensions.code, "FORBIDDEN");
 
   await server.stop();
 }

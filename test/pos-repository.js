@@ -57,7 +57,7 @@ async function main() {
       amountTendered: 300,
       items: [{ productId: "product-1", quantity: 2 }],
     },
-    { id: "cashier-1", name: "Cashier Name", employeeCode: "EMP-001" },
+    { id: "cashier-1", name: "Cashier Name", employeeCode: "EMP-001", department: "Front End" },
   );
 
   assert.equal(sale.items[0].price, 125, "server price must be authoritative");
@@ -65,10 +65,20 @@ async function main() {
   assert.equal(sale.amountTendered, 300);
   assert.equal(sale.changeDue, 50);
   assert.equal(sale.cashierDisplayName, "Cashier (EMP-001)");
+  assert.equal(sale.sellerDepartment, "Front End", "sales must retain the seller department at checkout time");
   assert.equal(sale.receiptBranding.businessName, "Tomkondi Supermarket");
   assert.equal(transaction.length, 3, "stock update, audit event, and receipt must be atomic");
   assert.match(transaction[0].Update.ConditionExpression, /stock.*>=/);
   assert.equal(transaction[2].Put.Item.orderNumber, sale.orderNumber);
+
+  const belowCostProduct = await repository.updateProduct(
+    "product-1",
+    { price: 60 },
+    { id: "admin", name: "Admin" },
+  );
+  assert.equal(belowCostProduct.price, 60, "below-cost prices warn in the UI but remain valid");
+  assert.match(transaction[1].Put.Item.reason, /Selling price changed from 125.00 to 60.00/);
+  assert.equal(sale.items[0].price, 125, "product price updates must not rewrite completed sales");
 
   const firstPage = await repository.getProductPage({ limit: 1 });
   assert.equal(firstPage.items.length, 1);
@@ -152,6 +162,35 @@ async function main() {
   );
   assert.equal(settings.thankYouMessage, "Asante sana");
   assert.equal(transaction.length, 2, "settings update and its audit event must be atomic");
+
+  const legacyProfile = {
+    PK: "USER#cashier-1",
+    SK: "PROFILE",
+    entityType: "staff_profile",
+    userId: "cashier-1",
+    employeeCode: "EMP-001",
+    jobTitle: "Cashier",
+    phone: "+254700000000",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return { Item: legacyProfile };
+    if (command.constructor.name === "TransactWriteCommand") {
+      transaction = command.input.TransactItems;
+      return {};
+    }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  assert.equal((await repository.getStaffProfile("cashier-1")).department, "", "legacy staff profiles remain readable");
+  const updatedProfile = await repository.upsertStaffProfile("cashier-1", {
+    employeeCode: "EMP-001",
+    jobTitle: "Cashier",
+    department: "  Front   End  ",
+    phone: "+254700000000",
+  });
+  assert.equal(updatedProfile.department, "Front End");
+  assert.equal(transaction[0].Put.Item.department, "Front End");
 
   const saleFor = (cashierId, amount) => ({
     id: `sale-${cashierId}`,

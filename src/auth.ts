@@ -7,6 +7,7 @@ export interface AuthenticatedUser {
   id: string;
   username: string;
   roles: UserRole[];
+  activeRole: UserRole;
 }
 
 export interface GraphQLContext {
@@ -45,6 +46,7 @@ const parseRoles = (groups: unknown): UserRole[] => {
 
 const authenticatedUserFromClaims = (
   claims: Record<string, unknown>,
+  requestedRole?: string,
 ): AuthenticatedUser => {
   const id = claims.sub;
   const username = claims.username ?? claims["cognito:username"];
@@ -53,8 +55,16 @@ const authenticatedUserFromClaims = (
   if (typeof id !== "string" || typeof username !== "string" || roles.length === 0) {
     throw unauthenticatedError();
   }
+  if (requestedRole !== undefined && requestedRole !== "admin" && requestedRole !== "staff") {
+    throw forbiddenError();
+  }
 
-  return { id, username, roles };
+  const activeRole = requestedRole === "admin" || requestedRole === "staff"
+    ? requestedRole
+    : roles.includes("admin") ? "admin" : "staff";
+  if (!roles.includes(activeRole)) throw forbiddenError();
+
+  return { id, username, roles, activeRole };
 };
 
 export const unauthenticatedError = () =>
@@ -69,13 +79,14 @@ export const forbiddenError = () =>
 
 export const contextFromAuthorization = async (
   authorization: string | undefined,
+  requestedRole?: string,
 ): Promise<GraphQLContext> => {
   const match = authorization?.match(/^Bearer\s+(.+)$/i);
   if (!match) throw unauthenticatedError();
 
   try {
     const claims = await configuredVerifier().verify(match[1]);
-    return { auth: authenticatedUserFromClaims(claims) };
+    return { auth: authenticatedUserFromClaims(claims, requestedRole) };
   } catch (error) {
     if (error instanceof GraphQLError) throw error;
     throw unauthenticatedError();
@@ -92,20 +103,22 @@ export const contextFromApiGatewayEvent = async (
     };
   };
   const claims = request.requestContext?.authorizer?.jwt?.claims;
+  const requestedRole = request.headers?.["x-tomkondi-role"] ?? request.headers?.["X-Tomkondi-Role"];
   if (process.env.TRUST_API_GATEWAY_JWT_AUTHORIZER === "true" && claims) {
-    return { auth: authenticatedUserFromClaims(claims) };
+    return { auth: authenticatedUserFromClaims(claims, requestedRole) };
   }
 
   const authorization =
     request.headers?.authorization ?? request.headers?.Authorization;
-  return contextFromAuthorization(authorization);
+  return contextFromAuthorization(authorization, requestedRole);
 };
 
 export const requireRole = (
   context: GraphQLContext,
   allowedRoles: UserRole[],
 ) => {
-  if (!context.auth.roles.some((role) => allowedRoles.includes(role))) {
+  const activeRole = context.auth.activeRole ?? (context.auth.roles.includes("admin") ? "admin" : "staff");
+  if (!allowedRoles.includes(activeRole)) {
     throw forbiddenError();
   }
   return context.auth;

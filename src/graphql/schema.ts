@@ -2,6 +2,7 @@ export const typeDefs = `#graphql
   type StaffProfile {
     employeeCode: String!
     jobTitle: String!
+    department: String!
     phone: String!
   }
 
@@ -85,6 +86,7 @@ export const typeDefs = `#graphql
     paymentReference: String
     createdBy: String!
     createdByName: String!
+    sellerDepartment: String
     cashierDisplayName: String!
     receiptBranding: BusinessSettings!
     createdAt: String!
@@ -166,17 +168,17 @@ export const typeDefs = `#graphql
     sales(limit: Int = 50, personal: Boolean = false): [Sale!]!
     sale(id: ID!, personal: Boolean = false): Sale
     stockAudits(limit: Int = 100): [AuditEvent!]!
-    dashboard(days: Int = 1, personal: Boolean = false): DashboardSummary!
+    dashboard(days: Int = 1, personal: Boolean = false, compact: Boolean = false): DashboardSummary!
     businessSettings: BusinessSettings!
   }
 
   type Mutation {
-    inviteUser(email: String!, name: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", phone: String = ""): User!
+    inviteUser(email: String!, name: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", department: String = "", phone: String = ""): User!
     resendUserInvitation(username: String!): User!
     updateUserRoles(username: String!, roles: [String!]!): User!
     setUserEnabled(username: String!, enabled: Boolean!): User!
     updateMyProfile(phone: String!): StaffProfile!
-    updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, phone: String!): StaffProfile!
+    updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, department: String, phone: String!): StaffProfile!
     updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
 
     createCategory(code: String!, name: String!, description: String = ""): Category!
