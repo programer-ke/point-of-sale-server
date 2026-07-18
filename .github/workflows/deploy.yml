@@ -82,7 +82,7 @@ jobs:
           fi
 
       - name: Download Lambda artifact
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: server-lambda-${{ github.sha }}
 
