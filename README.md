@@ -21,6 +21,8 @@ configuration like this:
 ```dotenv
 AWS_REGION=us-east-1
 AWS_DYNAMODB_TABLE=pos_system
+COGNITO_USER_POOL_ID=us-east-1_example
+COGNITO_USER_POOL_CLIENT_ID=exampleclientid
 HOST=127.0.0.1
 PORT=4000
 ```
@@ -36,12 +38,22 @@ integration. Terraform configures the deployed handler as
 `dist/lambda.handler` and supplies:
 
 - `AWS_DYNAMODB_TABLE`
+- `COGNITO_USER_POOL_ID`
+- `COGNITO_USER_POOL_CLIENT_ID`
+- `TRUST_API_GATEWAY_JWT_AUTHORIZER=true`
 - `NODE_ENV=production`
 - AWS-generated region and temporary execution-role credentials
 
 No application secret is currently required. GitHub Actions assumes only the
 deployment role through OIDC; the running function uses its separate,
 least-privilege Lambda execution role.
+
+API Gateway validates Cognito access tokens before Lambda invocation. The
+server also builds an authenticated GraphQL context from the signed authorizer
+claims and enforces `admin` or `staff` roles in every resolver. Local standalone
+execution validates bearer tokens directly against Cognito JWKS. Cognito—not
+DynamoDB—is the source of truth for passwords, groups, email verification, and
+account status.
 
 For an existing Web Adapter deployment, deploy the server package before
 applying the native-handler infrastructure change. The package retains the old

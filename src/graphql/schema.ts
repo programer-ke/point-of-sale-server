@@ -2,9 +2,13 @@ export const typeDefs = `#graphql
   # Types
   type User {
     id: ID!
+    username: String!
     email: String!
     name: String!
     role: String!
+    roles: [String!]!
+    status: String!
+    emailVerified: Boolean!
     createdAt: String!
     updatedAt: String!
   }
@@ -64,11 +68,6 @@ export const typeDefs = `#graphql
     updatedAt: String!
   }
 
-  type AuthPayload {
-    token: String!
-    user: User!
-  }
-
   type Query {
     # User queries
     me: User
@@ -93,13 +92,10 @@ export const typeDefs = `#graphql
 
   type Mutation {
     # User mutations
-    register(
-      email: String!
-      password: String!
-      name: String!
-      role: String!
-    ): AuthPayload!
-    login(email: String!, password: String!): AuthPayload!
+    inviteUser(email: String!, name: String!, roles: [String!]!): User!
+    resendUserInvitation(username: String!): User!
+    updateUserRoles(username: String!, roles: [String!]!): User!
+    setUserEnabled(username: String!, enabled: Boolean!): User!
 
     # Product mutations
     createProduct(

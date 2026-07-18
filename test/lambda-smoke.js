@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 
 process.env.NODE_ENV = "test";
 process.env.AWS_DYNAMODB_TABLE = "test-table";
+process.env.TRUST_API_GATEWAY_JWT_AUTHORIZER = "true";
 
 const database = require("../dist/config/db.js");
 database.verifyAwsConnection = async () => true;
@@ -34,6 +35,16 @@ const event = {
     stage: "$default",
     time: "18/Jul/2026:00:00:00 +0000",
     timeEpoch: 0,
+    authorizer: {
+      jwt: {
+        claims: {
+          sub: "test-user-id",
+          username: "test-user",
+          "cognito:groups": ["staff"],
+        },
+        scopes: [],
+      },
+    },
   },
   body: JSON.stringify({ query: "query SmokeTest { __typename }" }),
   isBase64Encoded: false,

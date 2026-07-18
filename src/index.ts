@@ -3,6 +3,7 @@ import { startStandaloneServer } from "@apollo/server/standalone";
 import dotenv from "dotenv";
 import { createApolloServer } from "./app";
 import { verifyAwsConnection } from "./config/db";
+import { contextFromAuthorization } from "./auth";
 
 dotenv.config();
 
@@ -39,7 +40,7 @@ async function startServer() {
         port: Number(PORT),
       },
       context: async ({ req }) => {
-        return { req };
+        return contextFromAuthorization(req.headers.authorization);
       },
     });
 

@@ -17,7 +17,6 @@ export interface User extends BaseEntity {
   email: string;
   name: string;
   role: "admin" | "staff" | "manager";
-  passwordHash: string;
   tenantId: string;
   status: "active" | "inactive" | "suspended";
   lastLogin?: string;

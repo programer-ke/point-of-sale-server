@@ -7,8 +7,7 @@
   "scripts": {
     "start": "node dist/index.js",
     "dev": "nodemon src/index.ts",
-    "seed:users": "ts-node src/scripts/seed-users.ts",
-    "test": "yarn build && node test/lambda-smoke.js",
+    "test": "yarn build && node test/auth.js && node test/authorization.js && node test/lambda-smoke.js",
     "build": "tsc",
     "watch": "tsc --watch"
   },
@@ -23,20 +22,16 @@
   "dependencies": {
     "@apollo/server": "^5.5.1",
     "@as-integrations/aws-lambda": "^4.1.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1090.0",
     "@aws-sdk/client-dynamodb": "^3.1089.0",
     "@aws-sdk/client-s3": "^3.1089.0",
     "@aws-sdk/lib-dynamodb": "^3.1089.0",
-    "body-parser": "^2.3.0",
-    "cors": "^2.8.6",
+    "aws-jwt-verify": "^5.1.1",
     "dotenv": "^16.3.1",
-    "express": "^5.2.1",
     "graphql": "^16.8.1"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.162",
-    "@types/body-parser": "^1.19.6",
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
     "@types/node": "^20.10.0",
     "nodemon": "^3.0.2",
     "ts-node": "^10.9.2",

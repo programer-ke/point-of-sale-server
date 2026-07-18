@@ -1,58 +1,27 @@
-import { randomUUID, scryptSync, timingSafeEqual } from "crypto";
+import { randomUUID } from "crypto";
+import { requireRole, type GraphQLContext, type UserRole } from "../auth";
 import {
-  createUser,
-  getAdminsAndStaff,
-  getItem,
-  getUserByEmail,
-} from "../utils/db-helpers";
-import { Keys } from "../config/db";
+  getCognitoUser,
+  inviteCognitoUser,
+  listCognitoUsers,
+  resendCognitoInvitation,
+  setCognitoUserEnabled,
+  setCognitoUserRoles,
+} from "../services/cognito";
 
-const tenantId = process.env.SEED_TENANT_ID || "tenant_001";
+const requireStaff = (context: GraphQLContext) =>
+  requireRole(context, ["admin", "staff"]);
+const requireAdmin = (context: GraphQLContext) => requireRole(context, ["admin"]);
 
-const getPermissionsForRole = (role: string) => {
-  if (role === "admin") return ["*"];
-  if (role === "staff") {
-    return ["orders:read", "orders:create", "products:read"];
+const parseRoles = (roles: string[]): UserRole[] => {
+  const normalized = [...new Set(roles)];
+  if (
+    normalized.length === 0 ||
+    normalized.some((role) => role !== "admin" && role !== "staff")
+  ) {
+    throw new Error("Roles must contain admin, staff, or both");
   }
-
-  return [];
-};
-
-const hashPassword = (password: string) => {
-  const salt = randomUUID();
-  const hash = scryptSync(password, salt, 64).toString("hex");
-
-  return `${salt}:${hash}`;
-};
-
-const verifyPassword = (password: string, passwordHash: string) => {
-  const [salt, storedHash] = passwordHash.split(":");
-
-  if (!salt || !storedHash) {
-    return false;
-  }
-
-  const hash = scryptSync(password, salt, 64);
-  const stored = Buffer.from(storedHash, "hex");
-
-  return stored.length === hash.length && timingSafeEqual(stored, hash);
-};
-
-const sanitizeUser = (user: any) => {
-  if (!user) return null;
-
-  const {
-    PK,
-    SK,
-    GSI1PK,
-    GSI1SK,
-    GSI2PK,
-    GSI2SK,
-    passwordHash,
-    ...safeUser
-  } = user;
-
-  return safeUser;
+  return normalized as UserRole[];
 };
 
 type MockOrder = {
@@ -60,11 +29,7 @@ type MockOrder = {
   orderNumber: string;
   customerId: string | null;
   customerName: string;
-  items: Array<{
-    productId: string;
-    quantity: number;
-    price: number;
-  }>;
+  items: Array<{ productId: string; quantity: number; price: number }>;
   totalAmount: number;
   tax: number;
   discount: number;
@@ -77,26 +42,7 @@ type MockOrder = {
   updatedAt: string;
 };
 
-// Mock data (replace with actual AWS DynamoDB operations)
-const mockUsers = [
-  {
-    id: "1",
-    email: "admin@example.com",
-    name: "Admin User",
-    role: "admin",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-  {
-    id: "2",
-    email: "staff@example.com",
-    name: "Staff User",
-    role: "staff",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-];
-
+// The remaining POS domain data is still in memory until its DynamoDB migration.
 const mockProducts = [
   {
     id: "1",
@@ -119,165 +65,201 @@ const mockOrders: MockOrder[] = [];
 
 export const resolvers = {
   Query: {
-    // User queries
-    me: async () => null,
-    users: async () => {
-      const users = await getAdminsAndStaff();
-      return users.map(sanitizeUser);
+    me: async (_: unknown, _args: unknown, context: GraphQLContext) => {
+      const auth = requireStaff(context);
+      return getCognitoUser(auth.username);
     },
-    user: async (_: any, { id }: { id: string }) => {
-      const user = await getItem(Keys.user(id).PK, Keys.user(id).SK);
-      return sanitizeUser(user);
+    users: async (_: unknown, _args: unknown, context: GraphQLContext) => {
+      requireAdmin(context);
+      return listCognitoUsers();
+    },
+    user: async (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      return getCognitoUser(id);
     },
 
-    // Product queries
-    products: () => mockProducts,
-    product: (_: any, { id }: { id: string }) =>
-      mockProducts.find((product) => product.id === id),
-    productsByCategory: (_: any, { category }: { category: string }) =>
-      mockProducts.filter((product) => product.category === category),
+    products: (_: unknown, _args: unknown, context: GraphQLContext) => {
+      requireStaff(context);
+      return mockProducts;
+    },
+    product: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
+      requireStaff(context);
+      return mockProducts.find((product) => product.id === id);
+    },
+    productsByCategory: (
+      _: unknown,
+      { category }: { category: string },
+      context: GraphQLContext,
+    ) => {
+      requireStaff(context);
+      return mockProducts.filter((product) => product.category === category);
+    },
 
-    // Order queries
-    orders: () => mockOrders,
-    order: (_: any, { id }: { id: string }) =>
-      mockOrders.find((order) => order.id === id),
-    ordersByCustomer: (_: any, { customerId }: { customerId: string }) =>
-      mockOrders.filter((order) => order.customerId === customerId),
-    todayOrders: () =>
-      mockOrders.filter((order) => {
-        const today = new Date().toDateString();
-        return new Date(order.createdAt).toDateString() === today;
-      }),
+    orders: (_: unknown, _args: unknown, context: GraphQLContext) => {
+      requireStaff(context);
+      return mockOrders;
+    },
+    order: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
+      requireStaff(context);
+      return mockOrders.find((order) => order.id === id);
+    },
+    ordersByCustomer: (
+      _: unknown,
+      { customerId }: { customerId: string },
+      context: GraphQLContext,
+    ) => {
+      requireStaff(context);
+      return mockOrders.filter((order) => order.customerId === customerId);
+    },
+    todayOrders: (_: unknown, _args: unknown, context: GraphQLContext) => {
+      requireStaff(context);
+      const today = new Date().toDateString();
+      return mockOrders.filter(
+        (order) => new Date(order.createdAt).toDateString() === today,
+      );
+    },
 
-    // Customer queries
-    customers: () => [],
-    customer: (_: any, { id }: { id: string }) => null,
+    customers: (_: unknown, _args: unknown, context: GraphQLContext) => {
+      requireStaff(context);
+      return [];
+    },
+    customer: (_: unknown, _args: unknown, context: GraphQLContext) => {
+      requireStaff(context);
+      return null;
+    },
   },
 
   Mutation: {
-    // Auth mutations
-    register: async (_: any, { email, password, name, role }: any) => {
-      const existingUser = await getUserByEmail(email);
-
-      if (existingUser) {
-        throw new Error("User already exists");
+    inviteUser: async (
+      _: unknown,
+      { email, name, roles }: { email: string; name: string; roles: string[] },
+      context: GraphQLContext,
+    ) => {
+      requireAdmin(context);
+      if (!email.trim() || !name.trim()) throw new Error("Name and email are required");
+      return inviteCognitoUser({ email, name, roles: parseRoles(roles) });
+    },
+    resendUserInvitation: async (
+      _: unknown,
+      { username }: { username: string },
+      context: GraphQLContext,
+    ) => {
+      requireAdmin(context);
+      return resendCognitoInvitation(username);
+    },
+    updateUserRoles: async (
+      _: unknown,
+      { username, roles }: { username: string; roles: string[] },
+      context: GraphQLContext,
+    ) => {
+      const admin = requireAdmin(context);
+      if (admin.username === username && !roles.includes("admin")) {
+        throw new Error("Administrators cannot remove their own admin role");
       }
-
-      const user = await createUser({
-        email,
-        name,
-        role,
-        tenantId,
-        status: "active",
-        permissions: getPermissionsForRole(role),
-        passwordHash: hashPassword(password),
-      });
-
-      return {
-        token: "mock-jwt-token",
-        user: sanitizeUser(user),
-      };
+      return setCognitoUserRoles(username, parseRoles(roles));
+    },
+    setUserEnabled: async (
+      _: unknown,
+      { username, enabled }: { username: string; enabled: boolean },
+      context: GraphQLContext,
+    ) => {
+      const admin = requireAdmin(context);
+      if (admin.username === username && !enabled) {
+        throw new Error("Administrators cannot disable their own account");
+      }
+      return setCognitoUserEnabled(username, enabled);
     },
 
-    login: async (_: any, { email, password }: any) => {
-      const user = await getUserByEmail(email);
-
-      if (!user) {
-        throw new Error("User not found");
-      }
-
-      if (!verifyPassword(password, user.passwordHash)) {
-        throw new Error("Invalid password");
-      }
-
-      return {
-        token: "mock-jwt-token",
-        user: sanitizeUser(user),
-      };
-    },
-
-    // Product mutations
-    createProduct: (_: any, args: any) => {
+    createProduct: (_: unknown, args: Record<string, unknown>, context: GraphQLContext) => {
+      requireAdmin(context);
       const product = {
         id: randomUUID(),
         ...args,
         status: "active",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-      };
+      } as (typeof mockProducts)[number];
       mockProducts.push(product);
       return product;
     },
-
-    updateProduct: (_: any, { id, ...updates }: any) => {
-      const index = mockProducts.findIndex((p) => p.id === id);
+    updateProduct: (
+      _: unknown,
+      { id, ...updates }: { id: string } & Record<string, unknown>,
+      context: GraphQLContext,
+    ) => {
+      requireAdmin(context);
+      const index = mockProducts.findIndex((product) => product.id === id);
       if (index === -1) throw new Error("Product not found");
       mockProducts[index] = {
         ...mockProducts[index],
         ...updates,
         updatedAt: new Date().toISOString(),
-      };
+      } as (typeof mockProducts)[number];
       return mockProducts[index];
     },
-
-    deleteProduct: (_: any, { id }: { id: string }) => {
-      const index = mockProducts.findIndex((p) => p.id === id);
+    deleteProduct: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      const index = mockProducts.findIndex((product) => product.id === id);
       if (index === -1) return false;
       mockProducts.splice(index, 1);
       return true;
     },
 
-    // Order mutations
     createOrder: (
-      _: any,
+      _: unknown,
       { customerId, customerName, items, paymentMethod }: any,
+      context: GraphQLContext,
     ) => {
+      const auth = requireStaff(context);
       const subtotal = items.reduce(
         (sum: number, item: any) => sum + item.price * item.quantity,
         0,
       );
-      const tax = subtotal * 0.16; // 16% tax
-      const totalAmount = subtotal + tax;
-
-      const order = {
+      const tax = subtotal * 0.16;
+      const now = new Date().toISOString();
+      const order: MockOrder = {
         id: randomUUID(),
         orderNumber: `ORD-${Date.now()}`,
         customerId: customerId || null,
         customerName,
         items,
-        totalAmount,
+        totalAmount: subtotal + tax,
         tax,
         discount: 0,
         subtotal,
         status: "pending",
         paymentMethod,
         paymentStatus: "unpaid",
-        createdBy: "1", // Mock user ID
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdBy: auth.id,
+        createdAt: now,
+        updatedAt: now,
       };
       mockOrders.push(order);
       return order;
     },
-
-    updateOrderStatus: (_: any, { id, status }: any) => {
-      const order = mockOrders.find((o) => o.id === id);
+    updateOrderStatus: (
+      _: unknown,
+      { id, status }: { id: string; status: string },
+      context: GraphQLContext,
+    ) => {
+      requireAdmin(context);
+      const order = mockOrders.find((candidate) => candidate.id === id);
       if (!order) throw new Error("Order not found");
       order.status = status;
       order.updatedAt = new Date().toISOString();
       return order;
     },
-
-    cancelOrder: (_: any, { id }: { id: string }) => {
-      const order = mockOrders.find((o) => o.id === id);
+    cancelOrder: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      const order = mockOrders.find((candidate) => candidate.id === id);
       if (!order) throw new Error("Order not found");
       order.status = "cancelled";
       order.updatedAt = new Date().toISOString();
       return order;
     },
 
-    // Customer mutations
-    createCustomer: (_: any, args: any) => {
+    createCustomer: (_: unknown, args: Record<string, unknown>, context: GraphQLContext) => {
+      requireStaff(context);
       return {
         id: randomUUID(),
         ...args,
@@ -287,14 +269,13 @@ export const resolvers = {
         updatedAt: new Date().toISOString(),
       };
     },
-
-    updateCustomer: (_: any, { id, ...updates }: any) => {
-      // Mock implementation
-      return {
-        id,
-        ...updates,
-        updatedAt: new Date().toISOString(),
-      };
+    updateCustomer: (
+      _: unknown,
+      { id, ...updates }: { id: string } & Record<string, unknown>,
+      context: GraphQLContext,
+    ) => {
+      requireStaff(context);
+      return { id, ...updates, updatedAt: new Date().toISOString() };
     },
   },
 };
