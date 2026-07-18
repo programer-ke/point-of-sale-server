@@ -45,6 +45,7 @@ async function main() {
       transaction = command.input.TransactItems;
       return {};
     }
+    if (command.constructor.name === "QueryCommand") return { Items: [product, secondProduct] };
     throw new Error(`Unexpected command ${command.constructor.name}`);
   };
 
@@ -62,6 +63,15 @@ async function main() {
   assert.equal(transaction.length, 3, "stock update, audit event, and receipt must be atomic");
   assert.match(transaction[0].Update.ConditionExpression, /stock.*>=/);
   assert.equal(transaction[2].Put.Item.orderNumber, sale.orderNumber);
+
+  const firstPage = await repository.getProductPage({ limit: 1 });
+  assert.equal(firstPage.items.length, 1);
+  assert.equal(firstPage.totalCount, 2);
+  assert.ok(firstPage.nextCursor, "a further product page must have a cursor");
+  const secondPage = await repository.getProductPage({ limit: 1, cursor: firstPage.nextCursor });
+  assert.equal(secondPage.items[0].id, "product-2");
+  const searchPage = await repository.getProductPage({ search: "coffee", limit: 20 });
+  assert.deepEqual(searchPage.items.map(({ id }) => id), ["product-2"]);
 
   const adjusted = await repository.adjustStocks(
     [{ productId: "product-1", delta: 2 }, { productId: "product-2", delta: -1 }],

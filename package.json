@@ -8,7 +8,7 @@
     "start": "node dist/index.js",
     "dev": "nodemon src/index.ts",
     "seed:mvp": "ts-node src/scripts/seed-mvp.ts",
-    "test": "yarn build && ts-node src/scripts/seed-mvp.ts seed-data/mvp.json --validate-only && node test/auth.js && node test/authorization.js && node test/pos-repository.js && node test/lambda-smoke.js",
+    "test": "yarn build && ts-node src/scripts/seed-mvp.ts --validate-only && node test/seed-catalog.js && node test/auth.js && node test/authorization.js && node test/pos-repository.js && node test/lambda-smoke.js",
     "build": "tsc",
     "watch": "tsc --watch"
   },

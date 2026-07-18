@@ -7,21 +7,7 @@ import {
   updateProduct,
 } from "../repositories/pos-repository";
 import { verifyAwsConnection } from "../config/db";
-
-interface SeedFile {
-  categories: Array<{ code: string; name: string; description?: string }>;
-  products: Array<{
-    name: string;
-    description?: string;
-    sku: string;
-    barcode: string;
-    categoryCode: string;
-    price: number;
-    cost: number;
-    initialStock: number;
-    minStock: number;
-  }>;
-}
+import { buildMvpSeed, type SeedFile } from "../seed/mvp-catalog";
 
 const actor = { id: "system-seed", name: "MVP seed loader" };
 
@@ -53,8 +39,8 @@ const assertSeedFile: (value: unknown) => asserts value is SeedFile = (value) =>
 };
 
 async function main() {
-  const file = process.argv[2] ?? "seed-data/mvp.json";
-  const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
+  const file = process.argv.find((argument, index) => index > 1 && !argument.startsWith("--"));
+  const parsed: unknown = file ? JSON.parse(await readFile(file, "utf8")) : buildMvpSeed();
   assertSeedFile(parsed);
   if (process.argv.includes("--validate-only")) {
     console.log(`Validated ${parsed.categories.length} categories and ${parsed.products.length} products`);
@@ -75,36 +61,40 @@ async function main() {
     }
   }
 
-  for (const product of parsed.products) {
-    const category = categoriesByCode.get(product.categoryCode.trim().toUpperCase())!;
-    const existing = await findProduct(product.sku);
-    if (existing) {
-      await updateProduct(existing.id, {
-        name: product.name.trim(),
-        description: product.description?.trim() ?? "",
-        sku: product.sku,
-        barcode: product.barcode,
-        categoryId: category.id,
-        price: product.price,
-        cost: product.cost,
-        minStock: product.minStock,
-        status: "active",
-      }, actor);
-      console.log(`Updated product ${product.sku}; preserved stock ${existing.stock}`);
-    } else {
-      await createProduct({
-        name: product.name.trim(),
-        description: product.description?.trim() ?? "",
-        sku: product.sku,
-        barcode: product.barcode,
-        categoryId: category.id,
-        price: product.price,
-        cost: product.cost,
-        initialStock: product.initialStock,
-        minStock: product.minStock,
-      }, actor);
-      console.log(`Created product ${product.sku}`);
-    }
+  // Keep concurrency deliberately bounded to make a 200-product seed fast
+  // without creating a burst that can overwhelm a small on-demand table.
+  for (let offset = 0; offset < parsed.products.length; offset += 5) {
+    await Promise.all(parsed.products.slice(offset, offset + 5).map(async (product) => {
+      const category = categoriesByCode.get(product.categoryCode.trim().toUpperCase())!;
+      const existing = await findProduct(product.sku);
+      if (existing) {
+        await updateProduct(existing.id, {
+          name: product.name.trim(),
+          description: product.description?.trim() ?? "",
+          sku: product.sku,
+          barcode: product.barcode,
+          categoryId: category.id,
+          price: product.price,
+          cost: product.cost,
+          minStock: product.minStock,
+          status: "active",
+        }, actor);
+        console.log(`Updated product ${product.sku}; preserved stock ${existing.stock}`);
+      } else {
+        await createProduct({
+          name: product.name.trim(),
+          description: product.description?.trim() ?? "",
+          sku: product.sku,
+          barcode: product.barcode,
+          categoryId: category.id,
+          price: product.price,
+          cost: product.cost,
+          initialStock: product.initialStock,
+          minStock: product.minStock,
+        }, actor);
+        console.log(`Created product ${product.sku}`);
+      }
+    }));
   }
 }
 

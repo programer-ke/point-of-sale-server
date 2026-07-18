@@ -46,6 +46,12 @@ export const typeDefs = `#graphql
     updatedAt: String!
   }
 
+  type ProductPage {
+    items: [Product!]!
+    totalCount: Int!
+    nextCursor: String
+  }
+
   type SaleItem {
     productId: ID!
     productName: String!
@@ -117,6 +123,7 @@ export const typeDefs = `#graphql
     user(username: String!): User
     categories: [Category!]!
     products: [Product!]!
+    productPage(search: String = "", limit: Int = 20, cursor: String, activeOnly: Boolean = false): ProductPage!
     product(id: ID!): Product
     productLookup(term: String!): Product
     sales(limit: Int = 50): [Sale!]!

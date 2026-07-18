@@ -90,10 +90,16 @@ export AWS_DYNAMODB_TABLE="$(aws ssm get-parameter --name /prod/server/dynamodb-
 yarn seed:mvp
 ```
 
-The version-controlled input is `seed-data/mvp.json`. Re-running the loader is
-safe: it updates existing product metadata by SKU but preserves current stock;
-only new products receive `initialStock`. Validate changes without AWS access:
+The default catalog is generated deterministically from the version-controlled
+specification in `src/seed/mvp-catalog.ts`. It contains 10 categories and 200
+realistic Kenyan retail products with EAN-13 test barcodes, SKU values, KES
+prices and costs, reorder thresholds, and varied opening stock. Re-running the
+loader is safe: it updates existing product metadata by SKU but preserves
+current stock; only new products receive `initialStock`. Validate it without
+AWS access:
 
 ```sh
-yarn seed:mvp seed-data/mvp.json --validate-only
+yarn seed:mvp --validate-only
 ```
+
+You can still pass a custom JSON seed file as the first argument.

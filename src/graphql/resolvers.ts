@@ -16,6 +16,7 @@ import {
   dashboardSummary,
   findProduct,
   getProduct,
+  getProductPage,
   getStaffProfile,
   getStaffProfiles,
   listAudits,
@@ -74,6 +75,14 @@ export const resolvers = {
     products: (_: unknown, _args: unknown, context: GraphQLContext) => {
       requireStaff(context);
       return listProducts();
+    },
+    productPage: (
+      _: unknown,
+      args: { search?: string; limit?: number; cursor?: string; activeOnly?: boolean },
+      context: GraphQLContext,
+    ) => {
+      requireStaff(context);
+      return getProductPage(args);
     },
     product: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
       requireStaff(context);

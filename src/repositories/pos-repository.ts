@@ -149,6 +149,32 @@ export const listProducts = () => queryCollection<ProductRecord>("CATALOG#PRODUC
 export const listSales = (limit = 50) => queryCollection<SaleRecord>("SALE", { limit });
 export const listAudits = (limit = 100) => queryCollection<AuditRecord>("AUDIT", { limit });
 
+export const getProductPage = async (options: {
+  search?: string;
+  limit?: number;
+  cursor?: string;
+  activeOnly?: boolean;
+}) => {
+  const limit = Math.min(Math.max(options.limit ?? 20, 1), 50);
+  const search = options.search?.trim().toLowerCase() ?? "";
+  const offsetValue = options.cursor
+    ? Number.parseInt(Buffer.from(options.cursor, "base64url").toString("utf8"), 10)
+    : 0;
+  const offset = Number.isSafeInteger(offsetValue) && offsetValue >= 0 ? offsetValue : 0;
+  const products = (await listProducts()).filter((product) => {
+    if (options.activeOnly && product.status !== "active") return false;
+    if (!search) return true;
+    return [product.name, product.sku, product.barcode, product.categoryName]
+      .some((value) => value.toLowerCase().includes(search));
+  });
+  const end = Math.min(offset + limit, products.length);
+  return {
+    items: products.slice(offset, end),
+    totalCount: products.length,
+    nextCursor: end < products.length ? Buffer.from(String(end)).toString("base64url") : null,
+  };
+};
+
 export const getCategory = async (id: string) => {
   const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: categoryKey(id) }));
   return stripKeys<CategoryRecord>(response.Item);
