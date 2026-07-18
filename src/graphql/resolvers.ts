@@ -14,9 +14,11 @@ import {
   createCategory,
   createProduct,
   dashboardSummary,
+  effectiveProductPrice,
   findProduct,
   getProduct,
   getProductPage,
+  getSale,
   getStaffProfile,
   getStaffProfiles,
   listAudits,
@@ -28,9 +30,6 @@ import {
   type ProductRecord,
   type SaleRecord,
 } from "../repositories/pos-repository";
-import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { dynamoDB, TABLE_NAME } from "../config/db";
-
 const requireStaff = (context: GraphQLContext) => requireRole(context, ["admin", "staff"]);
 const requireAdmin = (context: GraphQLContext) => requireRole(context, ["admin"]);
 const actor = (context: GraphQLContext) => ({ id: context.auth.id, name: context.auth.username });
@@ -52,7 +51,32 @@ const mergeProfile = async <T extends { id: string }>(user: T) => ({
   profile: await getStaffProfile(user.id),
 });
 
+let cashierDirectory: { expiresAt: number; names: Map<string, string> } | undefined;
+const cashierNames = async () => {
+  if (cashierDirectory && cashierDirectory.expiresAt > Date.now()) return cashierDirectory.names;
+  const users = await listCognitoUsers();
+  const names = new Map<string, string>();
+  for (const user of users) {
+    names.set(user.id, user.name);
+    names.set(user.username, user.name);
+  }
+  cashierDirectory = { expiresAt: Date.now() + 5 * 60 * 1000, names };
+  return names;
+};
+
+const resolveCashierNames = async <T extends SaleRecord>(sales: T[]) => {
+  const names = await cashierNames();
+  return sales.map((sale) => ({
+    ...sale,
+    createdByName: names.get(sale.createdBy) ?? sale.createdByName,
+  }));
+};
+
 export const resolvers = {
+  Product: {
+    effectivePrice: (product: ProductRecord) => effectiveProductPrice(product),
+    onPromotion: (product: ProductRecord) => effectiveProductPrice(product) < product.price,
+  },
   Query: {
     me: async (_: unknown, _args: unknown, context: GraphQLContext) => {
       const auth = requireStaff(context);
@@ -92,24 +116,33 @@ export const resolvers = {
       requireStaff(context);
       return findProduct(term);
     },
-    sales: (_: unknown, { limit }: { limit: number }, context: GraphQLContext) => {
+    sales: async (_: unknown, { limit }: { limit: number }, context: GraphQLContext) => {
       requireStaff(context);
-      return listSales(Math.min(Math.max(limit, 1), 100));
+      return resolveCashierNames(await listSales(Math.min(Math.max(limit, 1), 100)));
     },
     sale: async (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
       requireStaff(context);
-      const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: { PK: `SALE#${id}`, SK: "RECEIPT" } }));
-      if (!response.Item) return null;
-      const { PK: _pk, SK: _sk, GSI1PK: _gsiPk, GSI1SK: _gsiSk, entityType: _type, ...sale } = response.Item;
-      return sale as unknown as SaleRecord;
+      const sale = await getSale(id);
+      return sale ? (await resolveCashierNames([sale]))[0] : null;
     },
     stockAudits: (_: unknown, { limit }: { limit: number }, context: GraphQLContext) => {
       requireAdmin(context);
       return listAudits(Math.min(Math.max(limit, 1), 200));
     },
-    dashboard: (_: unknown, _args: unknown, context: GraphQLContext) => {
-      requireStaff(context);
-      return dashboardSummary();
+    dashboard: async (_: unknown, { days }: { days: number }, context: GraphQLContext) => {
+      const authenticated = requireStaff(context);
+      const isAdmin = authenticated.roles.includes("admin");
+      const summary = await dashboardSummary(days);
+      const names = await cashierNames();
+      return {
+        ...summary,
+        grossProfit: isAdmin ? summary.grossProfit : 0,
+        recentSales: summary.recentSales.map((sale) => ({ ...sale, createdByName: names.get(sale.createdBy) ?? sale.createdByName })),
+        recentAudits: isAdmin ? summary.recentAudits : [],
+        cashierPerformance: summary.cashierPerformance
+          .filter((staff) => isAdmin || staff.staffId === authenticated.id)
+          .map((staff) => ({ ...staff, grossProfit: isAdmin ? staff.grossProfit : 0, staffName: names.get(staff.staffId) ?? staff.staffName })),
+      };
     },
   },
 
@@ -172,7 +205,7 @@ export const resolvers = {
       if (!Number.isInteger(args.initialStock) || args.initialStock < 0 || !Number.isInteger(args.minStock) || args.minStock < 0) throw new Error("Stock values must be whole numbers of zero or greater");
       return createProduct(args, actor(context));
     },
-    updateProduct: (
+    updateProduct: async (
       _: unknown,
       { id, ...updates }: { id: string } & Partial<ProductRecord>,
       context: GraphQLContext,
@@ -180,6 +213,15 @@ export const resolvers = {
       requireAdmin(context);
       if (updates.price !== undefined) validateMoney(updates.price, "Price");
       if (updates.cost !== undefined) validateMoney(updates.cost, "Cost");
+      if (updates.promotionPrice !== undefined && updates.promotionPrice !== null) {
+        validateMoney(updates.promotionPrice, "Promotion price");
+        const current = await getProduct(id);
+        if (!current) throw new Error("Product not found");
+        if (updates.promotionPrice >= (updates.price ?? current.price)) throw new Error("Promotion price must be lower than the regular selling price");
+      }
+      if (updates.promotionStartsAt && Number.isNaN(Date.parse(updates.promotionStartsAt))) throw new Error("Promotion start date is invalid");
+      if (updates.promotionEndsAt && Number.isNaN(Date.parse(updates.promotionEndsAt))) throw new Error("Promotion end date is invalid");
+      if (updates.promotionStartsAt && updates.promotionEndsAt && Date.parse(updates.promotionEndsAt) <= Date.parse(updates.promotionStartsAt)) throw new Error("Promotion end must be after its start");
       return updateProduct(id, updates, actor(context));
     },
     archiveProduct: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
@@ -194,14 +236,21 @@ export const resolvers = {
       requireAdmin(context);
       return adjustStocks(args.adjustments, args.reason, actor(context));
     },
-    completeSale: (
+    completeSale: async (
       _: unknown,
-      args: { customerName?: string; paymentMethod: SaleRecord["paymentMethod"]; items: Array<{ productId: string; quantity: number }> },
+      args: {
+        customerName?: string;
+        paymentMethod: "cash" | "mpesa";
+        amountTendered?: number | null;
+        mpesaReference?: string | null;
+        items: Array<{ productId: string; quantity: number }>;
+      },
       context: GraphQLContext,
     ) => {
-      requireStaff(context);
-      if (!(["cash", "card", "mobile_money"] as const).includes(args.paymentMethod)) throw new Error("Unsupported payment method");
-      return completeSale(args, actor(context));
+      const authenticated = requireStaff(context);
+      if (!(args.paymentMethod === "cash" || args.paymentMethod === "mpesa")) throw new Error("Payment method must be cash or M-Pesa");
+      const user = await getCognitoUser(authenticated.username);
+      return completeSale(args, { id: authenticated.id, name: user.name });
     },
   },
 };

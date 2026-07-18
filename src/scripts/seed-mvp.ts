@@ -35,6 +35,9 @@ const assertSeedFile: (value: unknown) => asserts value is SeedFile = (value) =>
     for (const [field, amount] of [["price", product.price], ["cost", product.cost], ["initialStock", product.initialStock], ["minStock", product.minStock]] as const) {
       if (!Number.isFinite(amount) || amount < 0) throw new Error(`${product.name} has invalid ${field}`);
     }
+    if (product.promotionPrice != null && (!Number.isFinite(product.promotionPrice) || product.promotionPrice < 0 || product.promotionPrice >= product.price)) {
+      throw new Error(`${product.name} has an invalid promotion price`);
+    }
   }
 };
 
@@ -76,6 +79,7 @@ async function main() {
           categoryId: category.id,
           price: product.price,
           cost: product.cost,
+          promotionPrice: product.promotionPrice ?? null,
           minStock: product.minStock,
           status: "active",
         }, actor);
@@ -89,6 +93,7 @@ async function main() {
           categoryId: category.id,
           price: product.price,
           cost: product.cost,
+          promotionPrice: product.promotionPrice ?? null,
           initialStock: product.initialStock,
           minStock: product.minStock,
         }, actor);

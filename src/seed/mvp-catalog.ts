@@ -8,6 +8,7 @@ export interface SeedFile {
     categoryCode: string;
     price: number;
     cost: number;
+    promotionPrice?: number | null;
     initialStock: number;
     minStock: number;
   }>;
@@ -146,6 +147,7 @@ export const buildMvpSeed = (): SeedFile => {
         categoryCode: category.code,
         price,
         cost: Math.round(price * costRatio),
+        promotionPrice: index % 10 === 0 ? Math.max(1, Math.round(price * 0.9)) : null,
         initialStock,
         minStock,
       };

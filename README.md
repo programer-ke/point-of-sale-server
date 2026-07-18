@@ -76,6 +76,16 @@ consistent alias records make SKU, barcode, and category code unique without a
 scan. A sale is one DynamoDB transaction containing its immutable receipt,
 conditional stock decrements, and per-product audit events.
 
+Receipts remain in DynamoDB and are fetched by sale ID for viewing or
+reprinting. S3 is deliberately not used for generated receipt files: the
+immutable sale record is the source of truth and the frontend renders the print
+layout on demand. Cash sales store the tendered amount and calculated change;
+M-Pesa sales store the validated transaction code. Product records can carry an
+optional time-bounded promotion price, while every sale item permanently stores
+the server-authoritative price and cost used at checkout.
+M-Pesa codes also receive a conditional payment lookup record in the sale
+transaction, preventing the same code from being accepted twice.
+
 Cognito remains the identity source for name, email, verification state,
 password, enabled state, and `admin`/`staff` roles. Employment metadata that is
 owned by the business (`employeeCode`, `jobTitle`, and a non-authentication
@@ -97,7 +107,8 @@ yarn seed:mvp
 The default catalog is generated deterministically from the version-controlled
 specification in `src/seed/mvp-catalog.ts`. It contains 10 categories and 200
 realistic Kenyan retail products with EAN-13 test barcodes, SKU values, KES
-prices and costs, reorder thresholds, and varied opening stock. Re-running the
+prices and costs, reorder thresholds, varied opening stock, and 20 promotional
+prices for checkout testing. Re-running the
 loader is safe: it updates existing product metadata by SKU but preserves
 current stock; only new products receive `initialStock`. Validate it without
 AWS access:

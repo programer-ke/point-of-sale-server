@@ -53,6 +53,7 @@ async function main() {
     {
       customerName: "Walk-in",
       paymentMethod: "cash",
+      amountTendered: 300,
       items: [{ productId: "product-1", quantity: 2 }],
     },
     { id: "cashier-1", name: "Cashier" },
@@ -60,6 +61,8 @@ async function main() {
 
   assert.equal(sale.items[0].price, 125, "server price must be authoritative");
   assert.equal(sale.totalAmount, 250);
+  assert.equal(sale.amountTendered, 300);
+  assert.equal(sale.changeDue, 50);
   assert.equal(transaction.length, 3, "stock update, audit event, and receipt must be atomic");
   assert.match(transaction[0].Update.ConditionExpression, /stock.*>=/);
   assert.equal(transaction[2].Put.Item.orderNumber, sale.orderNumber);
@@ -86,8 +89,45 @@ async function main() {
     /below zero/,
   );
   await assert.rejects(
-    () => repository.completeSale({ paymentMethod: "cash", items: [{ productId: "product-1", quantity: 6 }] }, { id: "cashier", name: "Cashier" }),
+    () => repository.completeSale({ paymentMethod: "cash", amountTendered: 1_000, items: [{ productId: "product-1", quantity: 6 }] }, { id: "cashier", name: "Cashier" }),
     /only 5 units/,
+  );
+  await assert.rejects(
+    () => repository.completeSale({ paymentMethod: "cash", amountTendered: 100, items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
+    /at least the amount due/,
+  );
+  await assert.rejects(
+    () => repository.completeSale({ paymentMethod: "mpesa", mpesaReference: "BAD", items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
+    /valid M-Pesa transaction code/,
+  );
+
+  const promoted = { ...product, promotionPrice: 100 };
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return command.input.Key.PK.startsWith("PAYMENT#") ? {} : { Item: promoted };
+    if (command.constructor.name === "TransactWriteCommand") {
+      transaction = command.input.TransactItems;
+      return {};
+    }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  const mpesaSale = await repository.completeSale(
+    { paymentMethod: "mpesa", mpesaReference: "QGH1234567", items: [{ productId: "product-1", quantity: 2 }] },
+    { id: "cashier", name: "Cashier Name" },
+  );
+  assert.equal(mpesaSale.subtotal, 250);
+  assert.equal(mpesaSale.discount, 50);
+  assert.equal(mpesaSale.totalAmount, 200);
+  assert.equal(mpesaSale.paymentReference, "QGH1234567");
+  assert.equal(mpesaSale.createdByName, "Cashier Name");
+  assert.equal(transaction[transaction.length - 1].Put.Item.PK, "PAYMENT#MPESA#QGH1234567");
+
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return command.input.Key.PK.startsWith("PAYMENT#") ? { Item: { saleId: "existing-sale" } } : { Item: promoted };
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  await assert.rejects(
+    () => repository.completeSale({ paymentMethod: "mpesa", mpesaReference: "QGH1234567", items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
+    /already been used/,
   );
 }
 

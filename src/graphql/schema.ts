@@ -39,6 +39,11 @@ export const typeDefs = `#graphql
     categoryName: String!
     price: Float!
     cost: Float!
+    promotionPrice: Float
+    promotionStartsAt: String
+    promotionEndsAt: String
+    effectivePrice: Float!
+    onPromotion: Boolean!
     stock: Int!
     minStock: Int!
     status: String!
@@ -75,6 +80,9 @@ export const typeDefs = `#graphql
     status: String!
     paymentMethod: String!
     paymentStatus: String!
+    amountTendered: Float
+    changeDue: Float
+    paymentReference: String
     createdBy: String!
     createdByName: String!
     createdAt: String!
@@ -98,6 +106,12 @@ export const typeDefs = `#graphql
   }
 
   type DashboardSummary {
+    periodDays: Int!
+    periodStart: String!
+    revenue: Float!
+    grossProfit: Float!
+    averageSale: Float!
+    unitsSold: Int!
     salesTotal: Float!
     salesCount: Int!
     itemsSold: Int!
@@ -105,6 +119,16 @@ export const typeDefs = `#graphql
     lowStock: [Product!]!
     recentSales: [Sale!]!
     recentAudits: [AuditEvent!]!
+    cashierPerformance: [CashierPerformance!]!
+  }
+
+  type CashierPerformance {
+    staffId: ID!
+    staffName: String!
+    salesCount: Int!
+    unitsSold: Int!
+    revenue: Float!
+    grossProfit: Float!
   }
 
   input SaleItemInput {
@@ -129,7 +153,7 @@ export const typeDefs = `#graphql
     sales(limit: Int = 50): [Sale!]!
     sale(id: ID!): Sale
     stockAudits(limit: Int = 100): [AuditEvent!]!
-    dashboard: DashboardSummary!
+    dashboard(days: Int = 1): DashboardSummary!
   }
 
   type Mutation {
@@ -142,10 +166,10 @@ export const typeDefs = `#graphql
 
     createCategory(code: String!, name: String!, description: String = ""): Category!
     createProduct(name: String!, description: String = "", sku: String!, barcode: String!, categoryId: ID!, price: Float!, cost: Float!, initialStock: Int!, minStock: Int!): Product!
-    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, price: Float, cost: Float, minStock: Int, status: String): Product!
+    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, price: Float, cost: Float, promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, minStock: Int, status: String): Product!
     archiveProduct(id: ID!): Product!
     adjustStock(productId: ID!, delta: Int!, reason: String!): Product!
     adjustStocks(adjustments: [StockAdjustmentInput!]!, reason: String!): [Product!]!
-    completeSale(customerName: String, paymentMethod: String!, items: [SaleItemInput!]!): Sale!
+    completeSale(customerName: String, paymentMethod: String!, amountTendered: Float, mpesaReference: String, items: [SaleItemInput!]!): Sale!
   }
 `;

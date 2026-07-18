@@ -28,6 +28,9 @@ export interface ProductRecord {
   categoryName: string;
   price: number;
   cost: number;
+  promotionPrice?: number | null;
+  promotionStartsAt?: string | null;
+  promotionEndsAt?: string | null;
   stock: number;
   minStock: number;
   status: "active" | "inactive";
@@ -56,8 +59,11 @@ export interface SaleRecord {
   discount: number;
   totalAmount: number;
   status: "completed";
-  paymentMethod: "cash" | "card" | "mobile_money";
+  paymentMethod: "cash" | "mpesa" | "card" | "mobile_money";
   paymentStatus: "paid";
+  amountTendered?: number | null;
+  changeDue?: number | null;
+  paymentReference?: string | null;
   createdBy: string;
   createdByName: string;
   createdAt: string;
@@ -90,6 +96,7 @@ export interface StaffProfileRecord {
 }
 
 const normalizeLookup = (value: string) => value.trim().toUpperCase();
+const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 const businessDate = (date = new Date()) =>
   new Date(date.getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
 const productKey = (id: string) => ({ PK: `PRODUCT#${id}`, SK: "PROFILE" });
@@ -99,6 +106,7 @@ const lookupKey = (kind: "SKU" | "BARCODE" | "CATEGORY", value: string) => ({
   SK: "PRODUCT",
 });
 const profileKey = (userId: string) => ({ PK: `USER#${userId}`, SK: "PROFILE" });
+const mpesaPaymentKey = (reference: string) => ({ PK: `PAYMENT#MPESA#${reference}`, SK: "SALE" });
 
 const stripKeys = <T>(item: Record<string, unknown> | undefined): T | null => {
   if (!item) return null;
@@ -126,8 +134,10 @@ const auditPut = (audit: Omit<AuditRecord, "id" | "createdAt">, now: string) => 
 };
 
 const queryCollection = async <T>(partition: string, options?: { limit?: number; from?: string }) => {
-  const response = await dynamoDB.send(
-    new QueryCommand({
+  const items: Record<string, unknown>[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const response = await dynamoDB.send(new QueryCommand({
       TableName: TABLE_NAME,
       IndexName: "GSI1",
       KeyConditionExpression: options?.from
@@ -139,9 +149,12 @@ const queryCollection = async <T>(partition: string, options?: { limit?: number;
       },
       ScanIndexForward: options?.limit ? false : true,
       Limit: options?.limit,
-    }),
-  );
-  return (response.Items ?? []).map((item) => stripKeys<T>(item) as T);
+      ExclusiveStartKey: exclusiveStartKey,
+    }));
+    items.push(...(response.Items ?? []));
+    exclusiveStartKey = options?.limit ? undefined : response.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+  return items.map((item) => stripKeys<T>(item) as T);
 };
 
 export const listCategories = () => queryCollection<CategoryRecord>("CATALOG#CATEGORY");
@@ -183,6 +196,25 @@ export const getCategory = async (id: string) => {
 export const getProduct = async (id: string) => {
   const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: productKey(id) }));
   return stripKeys<ProductRecord>(response.Item);
+};
+
+export const getSale = async (id: string) => {
+  const response = await dynamoDB.send(new GetCommand({
+    TableName: TABLE_NAME,
+    Key: { PK: `SALE#${id}`, SK: "RECEIPT" },
+  }));
+  return stripKeys<SaleRecord>(response.Item);
+};
+
+export const effectiveProductPrice = (product: ProductRecord, at = new Date()) => {
+  const promotionalPrice = product.promotionPrice;
+  if (typeof promotionalPrice !== "number" || promotionalPrice < 0 || promotionalPrice >= product.price) {
+    return product.price;
+  }
+  const timestamp = at.getTime();
+  const startsAt = product.promotionStartsAt ? Date.parse(product.promotionStartsAt) : Number.NEGATIVE_INFINITY;
+  const endsAt = product.promotionEndsAt ? Date.parse(product.promotionEndsAt) : Number.POSITIVE_INFINITY;
+  return timestamp >= startsAt && timestamp <= endsAt ? promotionalPrice : product.price;
 };
 
 export const findProduct = async (term: string) => {
@@ -238,7 +270,7 @@ export const createProduct = async (
 
 export const updateProduct = async (
   id: string,
-  updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "price" | "cost" | "minStock" | "status">>,
+  updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "price" | "cost" | "promotionPrice" | "promotionStartsAt" | "promotionEndsAt" | "minStock" | "status">>,
   actor: { id: string; name: string },
 ) => {
   const current = await getProduct(id);
@@ -313,13 +345,19 @@ export const adjustStocks = async (
 };
 
 export const completeSale = async (
-  input: { customerName?: string; paymentMethod: SaleRecord["paymentMethod"]; items: Array<{ productId: string; quantity: number }> },
+  input: {
+    customerName?: string;
+    paymentMethod: "cash" | "mpesa";
+    amountTendered?: number | null;
+    mpesaReference?: string | null;
+    items: Array<{ productId: string; quantity: number }>;
+  },
   actor: { id: string; name: string },
 ) => {
   const grouped = new Map<string, number>();
   for (const item of input.items) grouped.set(item.productId, (grouped.get(item.productId) ?? 0) + item.quantity);
   if (grouped.size === 0) throw new Error("Add at least one product to the sale");
-  if (grouped.size > 10) throw new Error("A sale can contain at most 10 distinct products");
+  if (grouped.size > 40) throw new Error("A sale can contain at most 40 distinct products");
   if ([...grouped.values()].some((quantity) => !Number.isInteger(quantity) || quantity <= 0)) throw new Error("Sale quantities must be positive whole numbers");
   const products = await Promise.all([...grouped.keys()].map(getProduct));
   if (products.some((product) => !product || product.status !== "active")) throw new Error("One or more products are unavailable");
@@ -329,10 +367,52 @@ export const completeSale = async (
     const value = product!;
     const quantity = grouped.get(value.id)!;
     if (value.stock < quantity) throw new Error(`${value.name} has only ${value.stock} units available`);
-    return { productId: value.id, productName: value.name, sku: value.sku, barcode: value.barcode, quantity, price: value.price, cost: value.cost, total: value.price * quantity };
+    const price = effectiveProductPrice(value, new Date(now));
+    return { productId: value.id, productName: value.name, sku: value.sku, barcode: value.barcode, quantity, price, cost: value.cost, total: roundMoney(price * quantity) };
   });
-  const subtotal = saleItems.reduce((sum, item) => sum + item.total, 0);
-  const sale: SaleRecord = { id, orderNumber: `SALE-${businessDate().replaceAll("-", "")}-${id.slice(0, 8).toUpperCase()}`, customerName: input.customerName?.trim() || "Cash customer", items: saleItems, subtotal, tax: 0, discount: 0, totalAmount: subtotal, status: "completed", paymentMethod: input.paymentMethod, paymentStatus: "paid", createdBy: actor.id, createdByName: actor.name, createdAt: now, updatedAt: now };
+  const subtotal = roundMoney(products.reduce((sum, product) => {
+    const value = product!;
+    return sum + value.price * grouped.get(value.id)!;
+  }, 0));
+  const totalAmount = roundMoney(saleItems.reduce((sum, item) => sum + item.total, 0));
+  const discount = roundMoney(subtotal - totalAmount);
+  let amountTendered: number | null = null;
+  let changeDue: number | null = null;
+  let paymentReference: string | null = null;
+  if (input.paymentMethod === "cash") {
+    if (!Number.isFinite(input.amountTendered) || (input.amountTendered ?? 0) < totalAmount) {
+      throw new Error("Cash received must be at least the amount due");
+    }
+    amountTendered = roundMoney(input.amountTendered!);
+    changeDue = roundMoney(amountTendered - totalAmount);
+  } else {
+    paymentReference = input.mpesaReference?.trim().toUpperCase() ?? "";
+    if (!/^[A-Z0-9]{8,12}$/.test(paymentReference)) {
+      throw new Error("Enter a valid M-Pesa transaction code (8 to 12 letters or numbers)");
+    }
+    const existingPayment = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: mpesaPaymentKey(paymentReference) }));
+    if (existingPayment.Item) throw new Error("This M-Pesa transaction code has already been used");
+  }
+  const sale: SaleRecord = {
+    id,
+    orderNumber: `SALE-${businessDate().replaceAll("-", "")}-${id.slice(0, 8).toUpperCase()}`,
+    customerName: input.customerName?.trim() || "Cash customer",
+    items: saleItems,
+    subtotal,
+    tax: 0,
+    discount,
+    totalAmount,
+    status: "completed",
+    paymentMethod: input.paymentMethod,
+    paymentStatus: "paid",
+    amountTendered,
+    changeDue,
+    paymentReference,
+    createdBy: actor.id,
+    createdByName: actor.name,
+    createdAt: now,
+    updatedAt: now,
+  };
   const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
   for (const item of saleItems) {
     const product = products.find((candidate) => candidate?.id === item.productId)!;
@@ -342,25 +422,53 @@ export const completeSale = async (
     );
   }
   transaction.push({ Put: { TableName: TABLE_NAME, Item: { PK: `SALE#${id}`, SK: "RECEIPT", GSI1PK: "SALE", GSI1SK: `${now}#${id}`, entityType: "sale", ...sale }, ConditionExpression: "attribute_not_exists(PK)" } });
+  if (paymentReference) {
+    transaction.push({ Put: { TableName: TABLE_NAME, Item: { ...mpesaPaymentKey(paymentReference), entityType: "payment_lookup", saleId: id, orderNumber: sale.orderNumber, createdAt: now }, ConditionExpression: "attribute_not_exists(PK)" } });
+  }
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: transaction }));
   return sale;
 };
 
-export const dashboardSummary = async () => {
-  const start = new Date(`${businessDate()}T00:00:00+03:00`).toISOString();
+export const dashboardSummary = async (requestedDays = 1) => {
+  const days = Math.min(Math.max(requestedDays, 1), 90);
+  const startDate = new Date(`${businessDate()}T00:00:00+03:00`);
+  startDate.setUTCDate(startDate.getUTCDate() - (days - 1));
+  const start = startDate.toISOString();
   const [products, sales, audits] = await Promise.all([
     listProducts(),
     queryCollection<SaleRecord>("SALE", { from: start }),
     listAudits(8),
   ]);
+  const revenue = roundMoney(sales.reduce((sum, sale) => sum + sale.totalAmount, 0));
+  const unitsSold = sales.flatMap((sale) => sale.items).reduce((sum, item) => sum + item.quantity, 0);
+  const grossProfit = roundMoney(sales.flatMap((sale) => sale.items).reduce(
+    (sum, item) => sum + (item.price - item.cost) * item.quantity,
+    0,
+  ));
+  const byCashier = new Map<string, { staffId: string; staffName: string; salesCount: number; unitsSold: number; revenue: number; grossProfit: number }>();
+  for (const sale of sales) {
+    const current = byCashier.get(sale.createdBy) ?? { staffId: sale.createdBy, staffName: sale.createdByName, salesCount: 0, unitsSold: 0, revenue: 0, grossProfit: 0 };
+    current.salesCount += 1;
+    current.unitsSold += sale.items.reduce((sum, item) => sum + item.quantity, 0);
+    current.revenue = roundMoney(current.revenue + sale.totalAmount);
+    current.grossProfit = roundMoney(current.grossProfit + sale.items.reduce((sum, item) => sum + (item.price - item.cost) * item.quantity, 0));
+    byCashier.set(sale.createdBy, current);
+  }
   return {
-    salesTotal: sales.reduce((sum, sale) => sum + sale.totalAmount, 0),
+    periodDays: days,
+    periodStart: start,
+    revenue,
+    grossProfit,
+    averageSale: sales.length ? roundMoney(revenue / sales.length) : 0,
+    unitsSold,
+    salesTotal: revenue,
     salesCount: sales.length,
-    itemsSold: sales.flatMap((sale) => sale.items).reduce((sum, item) => sum + item.quantity, 0),
+    itemsSold: unitsSold,
     productCount: products.filter((product) => product.status === "active").length,
     lowStock: products.filter((product) => product.status === "active" && product.stock <= product.minStock),
     recentSales: [...sales].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 8),
     recentAudits: audits,
+    cashierPerformance: [...byCashier.values()].sort((a, b) => b.revenue - a.revenue),
   };
 };
 
