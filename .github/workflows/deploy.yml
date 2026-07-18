@@ -41,26 +41,31 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: npm
+          cache: yarn
 
       - name: Install dependencies
-        run: npm ci
+        run: yarn install --frozen-lockfile --non-interactive
 
       - name: Test
-        run: npm test --if-present
-
-      - name: Build
-        run: npm run build
-
-      - name: Keep production dependencies only
-        run: npm prune --omit=dev
+        run: yarn test
 
       - name: Package Lambda
         run: |
           test -f dist/lambda.js
-          printf '#!/bin/sh\nexec node dist/index.js\n' > run.sh
-          chmod +x run.sh
-          zip -qr function.zip dist node_modules package.json run.sh
+          mkdir lambda-package
+          cp package.json yarn.lock lambda-package/
+          cp -R dist lambda-package/dist
+          printf '#!/bin/sh\nexec node dist/index.js\n' > lambda-package/run.sh
+          chmod +x lambda-package/run.sh
+          yarn install \
+            --cwd lambda-package \
+            --production=true \
+            --frozen-lockfile \
+            --ignore-scripts \
+            --non-interactive
+          cd lambda-package
+          zip -qr ../function.zip dist node_modules package.json run.sh yarn.lock
+          cd ..
           package_size=$(stat --format='%s' function.zip)
           if [ "$package_size" -gt 52428800 ]; then
             echo "::error::Lambda package exceeds the 50 MB direct-upload limit"

@@ -1,13 +1,14 @@
 {
   "name": "pos-server",
   "version": "1.0.0",
+  "packageManager": "yarn@1.22.22",
   "description": "POS GraphQL Server with Apollo and AWS",
   "main": "dist/index.js",
   "scripts": {
     "start": "node dist/index.js",
     "dev": "nodemon src/index.ts",
     "seed:users": "ts-node src/scripts/seed-users.ts",
-    "test": "npm run build && node test/lambda-smoke.js",
+    "test": "yarn build && node test/lambda-smoke.js",
     "build": "tsc",
     "watch": "tsc --watch"
   },

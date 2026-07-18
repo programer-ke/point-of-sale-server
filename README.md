@@ -8,8 +8,8 @@ Lambda.
 Local commands are unchanged:
 
 ```sh
-npm ci
-npm run dev
+yarn install --frozen-lockfile
+yarn dev
 ```
 
 The local entry point is `src/index.ts`. `dotenv` loads `.env`, and the AWS SDK
