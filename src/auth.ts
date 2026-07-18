@@ -1,5 +1,6 @@
 import { GraphQLError } from "graphql";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
+import { getTenantMembership } from "./repositories/tenant-repository";
 
 export type UserRole = "admin" | "staff";
 
@@ -8,6 +9,8 @@ export interface AuthenticatedUser {
   username: string;
   roles: UserRole[];
   activeRole: UserRole;
+  tenantId?: string;
+  tenantName?: string;
 }
 
 export interface GraphQLContext {
@@ -52,7 +55,7 @@ const authenticatedUserFromClaims = (
   const username = claims.username ?? claims["cognito:username"];
   const roles = parseRoles(claims["cognito:groups"]);
 
-  if (typeof id !== "string" || typeof username !== "string" || roles.length === 0) {
+  if (typeof id !== "string" || typeof username !== "string") {
     throw unauthenticatedError();
   }
   if (requestedRole !== undefined && requestedRole !== "admin" && requestedRole !== "staff") {
@@ -62,9 +65,20 @@ const authenticatedUserFromClaims = (
   const activeRole = requestedRole === "admin" || requestedRole === "staff"
     ? requestedRole
     : roles.includes("admin") ? "admin" : "staff";
-  if (!roles.includes(activeRole)) throw forbiddenError();
+  if (roles.length > 0 && !roles.includes(activeRole)) throw forbiddenError();
 
   return { id, username, roles, activeRole };
+};
+
+const attachTenantMembership = async (identity: AuthenticatedUser): Promise<AuthenticatedUser> => {
+  const membership = await getTenantMembership(identity.id);
+  if (membership) {
+    const activeRole = membership.roles.includes(identity.activeRole)
+      ? identity.activeRole
+      : membership.roles.includes("admin") ? "admin" : "staff";
+    return { ...identity, roles: membership.roles, activeRole, tenantId: membership.tenantId, tenantName: membership.tenantName };
+  }
+  return identity;
 };
 
 export const unauthenticatedError = () =>
@@ -86,7 +100,7 @@ export const contextFromAuthorization = async (
 
   try {
     const claims = await configuredVerifier().verify(match[1]);
-    return { auth: authenticatedUserFromClaims(claims, requestedRole) };
+    return { auth: await attachTenantMembership(authenticatedUserFromClaims(claims, requestedRole)) };
   } catch (error) {
     if (error instanceof GraphQLError) throw error;
     throw unauthenticatedError();
@@ -105,7 +119,7 @@ export const contextFromApiGatewayEvent = async (
   const claims = request.requestContext?.authorizer?.jwt?.claims;
   const requestedRole = request.headers?.["x-tomkondi-role"] ?? request.headers?.["X-Tomkondi-Role"];
   if (process.env.TRUST_API_GATEWAY_JWT_AUTHORIZER === "true" && claims) {
-    return { auth: authenticatedUserFromClaims(claims, requestedRole) };
+    return { auth: await attachTenantMembership(authenticatedUserFromClaims(claims, requestedRole)) };
   }
 
   const authorization =
@@ -118,8 +132,10 @@ export const requireRole = (
   allowedRoles: UserRole[],
 ) => {
   const activeRole = context.auth.activeRole ?? (context.auth.roles.includes("admin") ? "admin" : "staff");
-  if (!allowedRoles.includes(activeRole)) {
+  if (!context.auth.tenantId || !allowedRoles.includes(activeRole)) {
     throw forbiddenError();
   }
   return context.auth;
 };
+
+export const requireIdentity = (context: GraphQLContext) => context.auth;

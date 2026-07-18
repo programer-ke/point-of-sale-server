@@ -6,6 +6,15 @@ process.env.TRUST_API_GATEWAY_JWT_AUTHORIZER = "true";
 
 const database = require("../dist/config/db.js");
 database.verifyAwsConnection = async () => true;
+database.dynamoDB.send = async () => ({ Item: {
+  partitionKey: "IDENTITY#test-user-id",
+  sortKey: "MEMBERSHIP",
+  userId: "test-user-id",
+  username: "test-user",
+  tenantId: "test-tenant",
+  tenantName: "Test Business",
+  roles: ["staff"],
+} });
 
 const { handler } = require("../dist/lambda.js");
 

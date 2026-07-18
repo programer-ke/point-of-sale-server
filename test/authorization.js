@@ -6,16 +6,32 @@ const sales = [
   { id: "sale-2", createdBy: "staff-2", createdByName: "Staff Two" },
 ];
 repository.listSales = async () => sales;
-repository.listSalesByStaff = async (staffId) => sales.filter((sale) => sale.createdBy === staffId);
-repository.getSale = async (id) => sales.find((sale) => sale.id === id) ?? null;
+repository.listSalesByStaff = async (_tenantId, staffId) => sales.filter((sale) => sale.createdBy === staffId);
+repository.getSale = async (_tenantId, id) => sales.find((sale) => sale.id === id) ?? null;
 repository.getStaffProfiles = async () => new Map();
 const cognito = require("../dist/services/cognito.js");
-cognito.listCognitoUsers = async () => [];
+cognito.getCognitoUser = async (username) => ({ id: username.startsWith("staff-1") ? "staff-1" : "staff-2", username, name: username });
+const tenants = require("../dist/repositories/tenant-repository.js");
+tenants.listTenantMemberships = async () => [
+  { userId: "staff-1", username: "staff-1@example.com", roles: ["staff"] },
+  { userId: "staff-2", username: "staff-2@example.com", roles: ["staff"] },
+];
 const { createApolloServer } = require("../dist/app.js");
 
 async function main() {
   const server = createApolloServer();
   await server.start();
+
+  const schemaContract = await server.executeOperation({ query: `query SchemaContract {
+    dashboard: __type(name: "DashboardSummary") { fields { name } }
+    stock: __type(name: "StockReportProduct") { fields { name } }
+    report: __type(name: "ReportProduct") { fields { name } }
+  }` });
+  assert.equal(schemaContract.body.kind, "single");
+  const schemaFields = JSON.parse(JSON.stringify(schemaContract.body.singleResult.data));
+  assert.ok(schemaFields.dashboard.fields.some(({ name }) => name === "averageSale"));
+  assert.ok(!schemaFields.stock.fields.some(({ name }) => name === "averageSale"));
+  assert.ok(schemaFields.report.fields.some(({ name }) => name === "savings"));
 
   const staffContext = {
     auth: {
@@ -23,6 +39,7 @@ async function main() {
       username: "staff@example.com",
       roles: ["staff"],
       activeRole: "staff",
+      tenantId: "tenant-1",
     },
   };
 
@@ -65,7 +82,7 @@ async function main() {
   assert.equal(ownReceipt.body.singleResult.errors, undefined);
 
   const adminContext = {
-    auth: { id: "admin-1", username: "admin@example.com", roles: ["admin"], activeRole: "admin" },
+    auth: { id: "admin-1", username: "admin@example.com", roles: ["admin"], activeRole: "admin", tenantId: "tenant-1" },
   };
   const allAdminSales = await server.executeOperation(
     { query: "query { sales { id } }" },

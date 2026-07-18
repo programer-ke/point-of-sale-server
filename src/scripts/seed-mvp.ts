@@ -7,6 +7,7 @@ import {
   updateProduct,
 } from "../repositories/pos-repository";
 import { verifyAwsConnection } from "../config/db";
+import { getTenantRecord } from "../repositories/tenant-repository";
 import { buildMvpSeed, type SeedFile } from "../seed/mvp-catalog";
 
 const actor = { id: "system-seed", name: "MVP seed loader" };
@@ -49,14 +50,18 @@ async function main() {
     console.log(`Validated ${parsed.categories.length} categories and ${parsed.products.length} products`);
     return;
   }
+  const tenantArgument = process.argv.find((argument) => argument.startsWith("--tenant="))?.slice("--tenant=".length).trim();
+  const tenantId = tenantArgument || process.env.POS_TENANT_ID;
+  if (!tenantId) throw new Error("Set POS_TENANT_ID or pass --tenant=<business-id> when loading seed data");
   if (!(await verifyAwsConnection())) throw new Error("DynamoDB is not available");
+  if (!(await getTenantRecord(tenantId))) throw new Error(`Business workspace ${tenantId} does not exist`);
 
-  const existingCategories = await listCategories();
+  const existingCategories = await listCategories(tenantId);
   const categoriesByCode = new Map(existingCategories.map((category) => [category.code, category]));
   for (const category of parsed.categories) {
     const code = category.code.trim().toUpperCase();
     if (!categoriesByCode.has(code)) {
-      const created = await createCategory({ code, name: category.name.trim(), description: category.description?.trim() ?? "", status: "active" }, actor);
+      const created = await createCategory(tenantId, { code, name: category.name.trim(), description: category.description?.trim() ?? "", status: "active" }, actor);
       categoriesByCode.set(code, created);
       console.log(`Created category ${code}`);
     } else {
@@ -69,9 +74,9 @@ async function main() {
   for (let offset = 0; offset < parsed.products.length; offset += 5) {
     await Promise.all(parsed.products.slice(offset, offset + 5).map(async (product) => {
       const category = categoriesByCode.get(product.categoryCode.trim().toUpperCase())!;
-      const existing = await findProduct(product.sku);
+      const existing = await findProduct(tenantId, product.sku);
       if (existing) {
-        await updateProduct(existing.id, {
+        await updateProduct(tenantId, existing.id, {
           name: product.name.trim(),
           description: product.description?.trim() ?? "",
           sku: product.sku,
@@ -85,7 +90,7 @@ async function main() {
         }, actor);
         console.log(`Updated product ${product.sku}; preserved stock ${existing.stock}`);
       } else {
-        await createProduct({
+        await createProduct(tenantId, {
           name: product.name.trim(),
           description: product.description?.trim() ?? "",
           sku: product.sku,

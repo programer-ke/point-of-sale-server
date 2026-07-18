@@ -11,6 +11,8 @@ export const typeDefs = `#graphql
     username: String!
     email: String!
     name: String!
+    firstName: String!
+    lastName: String!
     role: String!
     roles: [String!]!
     status: String!
@@ -65,6 +67,8 @@ export const typeDefs = `#graphql
     barcode: String!
     quantity: Int!
     price: Float!
+    regularPrice: Float
+    promotionApplied: Boolean
     cost: Float!
     total: Float!
   }
@@ -114,6 +118,7 @@ export const typeDefs = `#graphql
     periodStart: String!
     revenue: Float!
     grossProfit: Float!
+    savings: Float!
     averageSale: Float!
     unitsSold: Int!
     salesTotal: Float!
@@ -125,6 +130,19 @@ export const typeDefs = `#graphql
     recentSales: [Sale!]!
     recentAudits: [AuditEvent!]!
     cashierPerformance: [CashierPerformance!]!
+  }
+
+  type StockReportProduct {
+    productId: ID!
+    productName: String!
+    sku: String!
+    stock: Int!
+    minStock: Int!
+    cost: Float!
+    price: Float!
+    costValue: Float!
+    retailValue: Float!
+    status: String!
   }
 
   type CashierPerformance {
@@ -141,9 +159,51 @@ export const typeDefs = `#graphql
     address: String!
     phone: String!
     email: String!
+    departments: [String!]!
     thankYouMessage: String!
     returnPolicy: String!
     updatedAt: String!
+  }
+
+  type Business {
+    id: ID!
+    name: String!
+    departments: [String!]!
+  }
+
+  type ReportProduct {
+    productId: ID!
+    productName: String!
+    units: Int!
+    revenue: Float!
+    grossProfit: Float!
+    savings: Float!
+  }
+
+  type BusinessReport {
+    from: String!
+    to: String!
+    salesCount: Int!
+    revenue: Float!
+    grossProfit: Float!
+    unitsSold: Int!
+    promotionUnitsSold: Int!
+    promotionRevenue: Float!
+    promotionSavings: Float!
+    stockUnits: Int!
+    stockCostValue: Float!
+    stockRetailValue: Float!
+    potentialMargin: Float!
+    lowStockCount: Int!
+    outOfStockCount: Int!
+    netStockAdjustment: Int!
+    stockAdjustmentCount: Int!
+    priceChangeCount: Int!
+    topProducts: [ReportProduct!]!
+    promotionProducts: [ReportProduct!]!
+    stockProducts: [StockReportProduct!]!
+    stockAdjustments: [AuditEvent!]!
+    priceChanges: [AuditEvent!]!
   }
 
   input SaleItemInput {
@@ -165,21 +225,26 @@ export const typeDefs = `#graphql
     productPage(search: String = "", limit: Int = 20, cursor: String, activeOnly: Boolean = false): ProductPage!
     product(id: ID!): Product
     productLookup(term: String!): Product
-    sales(limit: Int = 50, personal: Boolean = false): [Sale!]!
+    sales(limit: Int = 50, personal: Boolean = false, from: String, to: String): [Sale!]!
     sale(id: ID!, personal: Boolean = false): Sale
     stockAudits(limit: Int = 100): [AuditEvent!]!
     dashboard(days: Int = 1, personal: Boolean = false, compact: Boolean = false): DashboardSummary!
     businessSettings: BusinessSettings!
+    business: Business!
+    businessReport(from: String!, to: String!): BusinessReport!
   }
 
   type Mutation {
-    inviteUser(email: String!, name: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", department: String = "", phone: String = ""): User!
+    createBusiness(name: String!): User!
+    inviteUser(email: String!, firstName: String!, lastName: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", department: String = "", phone: String = ""): User!
     resendUserInvitation(username: String!): User!
     updateUserRoles(username: String!, roles: [String!]!): User!
     setUserEnabled(username: String!, enabled: Boolean!): User!
+    updateStaffEmail(username: String!, email: String!): User!
+    deleteStaffUser(username: String!): Boolean!
     updateMyProfile(phone: String!): StaffProfile!
     updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, department: String, phone: String!): StaffProfile!
-    updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
+    updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", departments: [String!]!, thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
 
     createCategory(code: String!, name: String!, description: String = ""): Category!
     createProduct(name: String!, description: String = "", sku: String!, barcode: String!, categoryId: ID!, price: Float!, cost: Float!, initialStock: Int!, minStock: Int!): Product!

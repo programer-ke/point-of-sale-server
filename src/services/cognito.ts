@@ -7,6 +7,7 @@ import {
   AdminGetUserCommand,
   AdminListGroupsForUserCommand,
   AdminRemoveUserFromGroupCommand,
+  AdminUpdateUserAttributesCommand,
   CognitoIdentityProviderClient,
   ListUsersCommand,
   ListUsersInGroupCommand,
@@ -43,12 +44,16 @@ const primaryRole = (roles: UserRole[]) =>
 
 const mapUser = (user: UserType, roles: UserRole[]) => {
   const attributes = attributesToRecord(user.Attributes);
+  const firstName = attributes.given_name ?? "";
+  const lastName = attributes.family_name ?? "";
   const createdAt = user.UserCreateDate?.toISOString() ?? new Date(0).toISOString();
   return {
     id: attributes.sub ?? user.Username ?? "",
     username: user.Username ?? "",
     email: attributes.email ?? "",
-    name: attributes.name ?? attributes.email ?? user.Username ?? "",
+    name: attributes.name ?? ([firstName, lastName].filter(Boolean).join(" ") || attributes.email || user.Username || ""),
+    firstName,
+    lastName,
     role: primaryRole(roles),
     roles,
     status: user.Enabled === false ? "DISABLED" : (user.UserStatus ?? "UNKNOWN"),
@@ -125,23 +130,32 @@ export const listCognitoUsers = async () => {
 
 export const inviteCognitoUser = async (input: {
   email: string;
-  name: string;
+  firstName: string;
+  lastName: string;
   roles: UserRole[];
 }) => {
   const roles = normalizeRoles(input.roles);
   if (roles.length === 0) throw new Error("At least one application role is required");
 
-  const response = await cognito.send(
-    new AdminCreateUserCommand({
-      UserPoolId: userPoolId(),
-      Username: input.email.trim().toLowerCase(),
-      DesiredDeliveryMediums: ["EMAIL"],
-      UserAttributes: [
-        { Name: "email", Value: input.email.trim().toLowerCase() },
-        { Name: "name", Value: input.name.trim() },
-      ],
-    }),
-  );
+  const firstName = input.firstName.trim();
+  const lastName = input.lastName.trim();
+  if (!firstName || !lastName) throw new Error("First name and last name are required");
+  const response = await cognito.send(new AdminCreateUserCommand({
+    UserPoolId: userPoolId(),
+    Username: input.email.trim().toLowerCase(),
+    DesiredDeliveryMediums: ["EMAIL"],
+    UserAttributes: [
+      { Name: "email", Value: input.email.trim().toLowerCase() },
+      { Name: "given_name", Value: firstName },
+      { Name: "family_name", Value: lastName },
+      { Name: "name", Value: `${firstName} ${lastName}` },
+    ],
+  })).catch((error: unknown) => {
+    if (error instanceof Error && (error.name === "UsernameExistsException" || error.name === "AliasExistsException")) {
+      throw new Error("An account with this email already exists. Accounts can belong to only one business, so use a different email.");
+    }
+    throw error;
+  });
   const username = response.User?.Username;
   if (!username) throw new Error("Cognito did not return the invited user");
 
@@ -197,4 +211,22 @@ export const setCognitoUserEnabled = async (username: string, enabled: boolean) 
     : new AdminDisableUserCommand({ UserPoolId: userPoolId(), Username: username });
   await cognito.send(command);
   return getCognitoUser(username);
+};
+
+export const updateCognitoUserEmail = async (username: string, email: string) => {
+  const normalized = email.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) throw new Error("Enter a valid email address");
+  await cognito.send(new AdminUpdateUserAttributesCommand({
+    UserPoolId: userPoolId(),
+    Username: username,
+    UserAttributes: [
+      { Name: "email", Value: normalized },
+      { Name: "email_verified", Value: "false" },
+    ],
+  }));
+  return getCognitoUser(username);
+};
+
+export const deleteCognitoUser = async (username: string) => {
+  await cognito.send(new AdminDeleteUserCommand({ UserPoolId: userPoolId(), Username: username }));
 };
