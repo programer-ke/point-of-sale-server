@@ -10,13 +10,6 @@ dotenv.config();
 
 const awsConfig = {
   region: process.env.AWS_REGION || "us-east-1",
-  credentials:
-    process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY
-      ? {
-          accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-        }
-      : undefined,
 };
 
 export const dynamoDBClient = new DynamoDBClient(awsConfig);
@@ -24,8 +17,13 @@ export const dynamoDB = DynamoDBDocumentClient.from(dynamoDBClient);
 
 export const s3 = new S3Client(awsConfig);
 
-// SINGLE TABLE NAME
-export const TABLE_NAME = process.env.AWS_DYNAMODB_TABLE || "pos_system";
+const configuredTableName = process.env.AWS_DYNAMODB_TABLE;
+
+if (process.env.NODE_ENV === "production" && !configuredTableName) {
+  throw new Error("AWS_DYNAMODB_TABLE is required in production");
+}
+
+export const TABLE_NAME = configuredTableName || "pos_system";
 
 // Key helpers for building PK and SK
 export const Keys = {

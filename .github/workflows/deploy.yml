@@ -61,9 +61,15 @@ jobs:
 
       - name: Package Lambda
         run: |
+          test -f dist/lambda.js
           printf '#!/bin/sh\nexec node dist/index.js\n' > run.sh
           chmod +x run.sh
           zip -qr function.zip dist node_modules package.json run.sh
+          package_size=$(stat --format='%s' function.zip)
+          if [ "$package_size" -gt 52428800 ]; then
+            echo "::error::Lambda package exceeds the 50 MB direct-upload limit"
+            exit 1
+          fi
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
@@ -77,3 +83,9 @@ jobs:
 
       - name: Wait for Lambda update
         run: aws lambda wait function-updated --function-name "${{ vars.LAMBDA_FUNCTION_NAME }}"
+
+      - name: Verify Lambda update
+        run: |
+          aws lambda get-function-configuration \
+            --function-name "${{ vars.LAMBDA_FUNCTION_NAME }}" \
+            --query '{State:State,LastUpdateStatus:LastUpdateStatus,Handler:Handler,Runtime:Runtime}'
