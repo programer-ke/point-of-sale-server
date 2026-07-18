@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const repository = require("../dist/repositories/pos-repository.js");
+repository.listProducts = async () => [{ id: "1" }];
 const { createApolloServer } = require("../dist/app.js");
 
 async function main() {

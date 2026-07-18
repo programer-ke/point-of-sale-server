@@ -1,5 +1,10 @@
 export const typeDefs = `#graphql
-  # Types
+  type StaffProfile {
+    employeeCode: String!
+    jobTitle: String!
+    phone: String!
+  }
+
   type User {
     id: ID!
     username: String!
@@ -9,6 +14,17 @@ export const typeDefs = `#graphql
     roles: [String!]!
     status: String!
     emailVerified: Boolean!
+    profile: StaffProfile
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type Category {
+    id: ID!
+    code: String!
+    name: String!
+    description: String!
+    status: String!
     createdAt: String!
     updatedAt: String!
   }
@@ -17,144 +33,112 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     description: String!
+    sku: String!
+    barcode: String!
+    categoryId: ID!
+    categoryName: String!
     price: Float!
     cost: Float!
-    sku: String!
-    category: String!
     stock: Int!
     minStock: Int!
-    maxStock: Int!
-    imageUrl: String
     status: String!
     createdAt: String!
     updatedAt: String!
   }
 
-  type OrderItem {
+  type SaleItem {
     productId: ID!
     productName: String!
+    sku: String!
+    barcode: String!
     quantity: Int!
     price: Float!
+    cost: Float!
     total: Float!
   }
 
-  type Order {
+  type Sale {
     id: ID!
     orderNumber: String!
-    customerId: ID
     customerName: String!
-    items: [OrderItem!]!
-    totalAmount: Float!
+    items: [SaleItem!]!
+    subtotal: Float!
     tax: Float!
     discount: Float!
-    subtotal: Float!
+    totalAmount: Float!
     status: String!
     paymentMethod: String!
     paymentStatus: String!
     createdBy: String!
+    createdByName: String!
     createdAt: String!
     updatedAt: String!
   }
 
-  type Customer {
+  type AuditEvent {
     id: ID!
-    name: String!
-    email: String!
-    phone: String!
-    address: String!
-    totalSpent: Float!
-    orders: Int!
+    action: String!
+    entityType: String!
+    entityId: ID!
+    productName: String
+    quantityBefore: Int
+    quantityAfter: Int
+    quantityDelta: Int
+    reason: String!
+    referenceId: String
+    actorId: String!
+    actorName: String!
     createdAt: String!
-    updatedAt: String!
+  }
+
+  type DashboardSummary {
+    salesTotal: Float!
+    salesCount: Int!
+    itemsSold: Int!
+    productCount: Int!
+    lowStock: [Product!]!
+    recentSales: [Sale!]!
+    recentAudits: [AuditEvent!]!
+  }
+
+  input SaleItemInput {
+    productId: ID!
+    quantity: Int!
+  }
+
+  input StockAdjustmentInput {
+    productId: ID!
+    delta: Int!
   }
 
   type Query {
-    # User queries
-    me: User
+    me: User!
     users: [User!]!
-    user(id: ID!): User
-
-    # Product queries
+    user(username: String!): User
+    categories: [Category!]!
     products: [Product!]!
     product(id: ID!): Product
-    productsByCategory(category: String!): [Product!]!
-
-    # Order queries
-    orders: [Order!]!
-    order(id: ID!): Order
-    ordersByCustomer(customerId: ID!): [Order!]!
-    todayOrders: [Order!]!
-
-    # Customer queries
-    customers: [Customer!]!
-    customer(id: ID!): Customer
+    productLookup(term: String!): Product
+    sales(limit: Int = 50): [Sale!]!
+    sale(id: ID!): Sale
+    stockAudits(limit: Int = 100): [AuditEvent!]!
+    dashboard: DashboardSummary!
   }
 
   type Mutation {
-    # User mutations
-    inviteUser(email: String!, name: String!, roles: [String!]!): User!
+    inviteUser(email: String!, name: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", phone: String = ""): User!
     resendUserInvitation(username: String!): User!
     updateUserRoles(username: String!, roles: [String!]!): User!
     setUserEnabled(username: String!, enabled: Boolean!): User!
+    updateMyProfile(phone: String!): StaffProfile!
+    updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, phone: String!): StaffProfile!
 
-    # Product mutations
-    createProduct(
-      name: String!
-      description: String!
-      price: Float!
-      cost: Float!
-      sku: String!
-      category: String!
-      stock: Int!
-      minStock: Int!
-      maxStock: Int!
-    ): Product!
-
-    updateProduct(
-      id: ID!
-      name: String
-      description: String
-      price: Float
-      cost: Float
-      stock: Int
-      minStock: Int
-      maxStock: Int
-      status: String
-    ): Product!
-
-    deleteProduct(id: ID!): Boolean!
-
-    # Order mutations
-    createOrder(
-      customerId: ID
-      customerName: String!
-      items: [OrderItemInput!]!
-      paymentMethod: String!
-    ): Order!
-
-    updateOrderStatus(id: ID!, status: String!): Order!
-    cancelOrder(id: ID!): Order!
-
-    # Customer mutations
-    createCustomer(
-      name: String!
-      email: String!
-      phone: String!
-      address: String!
-    ): Customer!
-
-    updateCustomer(
-      id: ID!
-      name: String
-      email: String
-      phone: String
-      address: String
-    ): Customer!
-  }
-
-  input OrderItemInput {
-    productId: ID!
-    quantity: Int!
-    price: Float!
+    createCategory(code: String!, name: String!, description: String = ""): Category!
+    createProduct(name: String!, description: String = "", sku: String!, barcode: String!, categoryId: ID!, price: Float!, cost: Float!, initialStock: Int!, minStock: Int!): Product!
+    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, price: Float, cost: Float, minStock: Int, status: String): Product!
+    archiveProduct(id: ID!): Product!
+    adjustStock(productId: ID!, delta: Int!, reason: String!): Product!
+    adjustStocks(adjustments: [StockAdjustmentInput!]!, reason: String!): [Product!]!
+    completeSale(customerName: String, paymentMethod: String!, items: [SaleItemInput!]!): Sale!
   }
 `;

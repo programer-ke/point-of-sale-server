@@ -62,3 +62,38 @@ same release. New environments should deploy infrastructure first.
 
 See Apollo's [AWS Lambda deployment
 guide](https://www.apollographql.com/docs/apollo-server/deployment/lambda).
+
+## Data model
+
+The single DynamoDB table uses `PK`/`SK` entity keys and one sparse, overloaded
+`GSI1` for the access patterns the MVP actually needs: ordered products and
+categories, chronological sales, and chronological audit events. Strongly
+consistent alias records make SKU, barcode, and category code unique without a
+scan. A sale is one DynamoDB transaction containing its immutable receipt,
+conditional stock decrements, and per-product audit events.
+
+Cognito remains the identity source for name, email, verification state,
+password, enabled state, and `admin`/`staff` roles. Employment metadata that is
+owned by the business (`employeeCode`, `jobTitle`, and a non-authentication
+phone number) is stored in DynamoDB at `USER#<cognito-sub>/PROFILE`. Staff can
+change their own phone; an administrator manages employment fields.
+
+## Seed the MVP catalog
+
+Terraform creates the table and publishes its name to Parameter Store. The seed
+loader only writes application records and never creates infrastructure:
+
+```sh
+export AWS_REGION=us-east-1
+export AWS_PROFILE=my-profile # omit when using another standard AWS credential source
+export AWS_DYNAMODB_TABLE="$(aws ssm get-parameter --name /prod/server/dynamodb-table-name --query Parameter.Value --output text)"
+yarn seed:mvp
+```
+
+The version-controlled input is `seed-data/mvp.json`. Re-running the loader is
+safe: it updates existing product metadata by SKU but preserves current stock;
+only new products receive `initialStock`. Validate changes without AWS access:
+
+```sh
+yarn seed:mvp seed-data/mvp.json --validate-only
+```
