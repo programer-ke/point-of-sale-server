@@ -1,26 +1,25 @@
-name: Deploy server
+name: Build and deploy server
 
 on:
+  pull_request:
   push:
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
-  group: deploy-server-production
-  cancel-in-progress: false
+  group: server-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   AWS_REGION: us-east-1
   PROJECT_ENV: prod
 
 jobs:
-  deploy:
-    name: Build and deploy
-    if: github.ref == 'refs/heads/main'
+  build:
+    name: Test and package
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -28,19 +27,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Check deployment configuration
-        env:
-          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-        run: |
-          if [ -z "$AWS_DEPLOY_ROLE_ARN" ]; then
-            echo "::error::Required repository variable AWS_DEPLOY_ROLE_ARN is not configured"
-            exit 1
-          fi
-
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           cache: yarn
 
       - name: Install dependencies
@@ -51,26 +41,50 @@ jobs:
 
       - name: Package Lambda
         run: |
-          test -f dist/lambda.js
-          mkdir lambda-package
-          cp package.json yarn.lock lambda-package/
-          cp -R dist lambda-package/dist
-          printf '#!/bin/sh\nexec node dist/index.js\n' > lambda-package/run.sh
-          chmod +x lambda-package/run.sh
-          yarn install \
-            --cwd lambda-package \
-            --production=true \
-            --frozen-lockfile \
-            --ignore-scripts \
-            --non-interactive
+          yarn bundle:lambda
+          node test/lambda-bundle-smoke.js
           cd lambda-package
-          zip -qr ../function.zip dist node_modules package.json run.sh yarn.lock
+          zip -qr ../function.zip dist
           cd ..
           package_size=$(stat --format='%s' function.zip)
           if [ "$package_size" -gt 52428800 ]; then
             echo "::error::Lambda package exceeds the 50 MB direct-upload limit"
             exit 1
           fi
+
+      - name: Upload Lambda artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-lambda-${{ github.sha }}
+          path: function.zip
+          if-no-files-found: error
+          retention-days: 5
+
+  deploy:
+    name: Deploy production
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check deployment configuration
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          if [ -z "$AWS_DEPLOY_ROLE_ARN" ]; then
+            echo "::error::Required repository variable AWS_DEPLOY_ROLE_ARN is not configured"
+            exit 1
+          fi
+
+      - name: Download Lambda artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: server-lambda-${{ github.sha }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6

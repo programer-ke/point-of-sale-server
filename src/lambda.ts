@@ -6,11 +6,15 @@ import { createApolloServer } from "./app";
 import { TABLE_NAME, verifyAwsConnection } from "./config/db";
 import { contextFromApiGatewayEvent } from "./auth";
 
-const databaseReady = verifyAwsConnection().then((isReady) => {
-  if (!isReady) {
-    throw new Error(`DynamoDB table "${TABLE_NAME}" is not available`);
-  }
-});
+let databaseReady: Promise<void> | undefined;
+const ensureDatabaseReady = () => {
+  databaseReady ??= verifyAwsConnection().then((isReady) => {
+    if (!isReady) {
+      throw new Error(`DynamoDB table "${TABLE_NAME}" is not available`);
+    }
+  });
+  return databaseReady;
+};
 
 const apolloHandler = startServerAndCreateLambdaHandler(
   createApolloServer(),
@@ -29,6 +33,6 @@ export const handler = async (...args: Parameters<typeof apolloHandler>) => {
     // configured Access-Control-Allow-* response headers.
     return { statusCode: 204, body: "" };
   }
-  await databaseReady;
+  await ensureDatabaseReady();
   return apolloHandler(...args);
 };

@@ -1,7 +1,16 @@
 # Point of sale server
 
-Apollo GraphQL server with separate entry points for local development and AWS
-Lambda.
+Apollo GraphQL server with separate entry points for local development and the
+AWS Lambda Node.js 24 runtime.
+
+Pull requests run the complete test/package job and retain `function.zip` for
+five days. The deployment job runs only on `main` and publishes the exact
+artifact produced by that workflow run.
+
+`yarn bundle:lambda` uses esbuild to produce a self-contained Node.js 24 bundle
+at `lambda-package/dist/lambda.js`. Runtime dependencies, including the pinned
+AWS SDK v3 clients, are bundled; Lambda does not rely on its mutable SDK copy.
+The deployment zip contains only the bundle and its external source map.
 
 ## Local development
 
@@ -54,11 +63,6 @@ claims and enforces `admin` or `staff` roles in every resolver. Local standalone
 execution validates bearer tokens directly against Cognito JWKS. Cognito—not
 DynamoDB—is the source of truth for passwords, groups, email verification, and
 account status.
-
-For an existing Web Adapter deployment, deploy the server package before
-applying the native-handler infrastructure change. The package retains the old
-`run.sh` launcher during this migration, so both configurations can execute the
-same release. New environments should deploy infrastructure first.
 
 See Apollo's [AWS Lambda deployment
 guide](https://www.apollographql.com/docs/apollo-server/deployment/lambda).
