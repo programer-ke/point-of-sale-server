@@ -1,4 +1,4 @@
-import { requireRole, type GraphQLContext, type UserRole } from "../auth";
+import { forbiddenError, requireRole, type GraphQLContext, type UserRole } from "../auth";
 import {
   getCognitoUser,
   inviteCognitoUser,
@@ -26,6 +26,7 @@ import {
   listCategories,
   listProducts,
   listSales,
+  listSalesByStaff,
   updateProduct,
   updateBusinessSettings,
   upsertStaffProfile,
@@ -126,13 +127,30 @@ export const resolvers = {
       requireStaff(context);
       return findProduct(term);
     },
-    sales: async (_: unknown, { limit }: { limit: number }, context: GraphQLContext) => {
-      requireStaff(context);
-      return resolveCashierNames(await listSales(Math.min(Math.max(limit, 1), 100)));
+    sales: async (
+      _: unknown,
+      { limit, personal }: { limit: number; personal: boolean },
+      context: GraphQLContext,
+    ) => {
+      const authenticated = requireStaff(context);
+      const safeLimit = Math.min(Math.max(limit, 1), 100);
+      const personalView = personal || !authenticated.roles.includes("admin");
+      const sales = personalView
+        ? await listSalesByStaff(authenticated.id, safeLimit)
+        : await listSales(safeLimit);
+      return resolveCashierNames(sales);
     },
-    sale: async (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
-      requireStaff(context);
+    sale: async (
+      _: unknown,
+      { id, personal }: { id: string; personal: boolean },
+      context: GraphQLContext,
+    ) => {
+      const authenticated = requireStaff(context);
       const sale = await getSale(id);
+      const personalView = personal || !authenticated.roles.includes("admin");
+      if (sale && personalView && sale.createdBy !== authenticated.id) {
+        throw forbiddenError();
+      }
       return sale ? (await resolveCashierNames([sale]))[0] : null;
     },
     stockAudits: (_: unknown, { limit }: { limit: number }, context: GraphQLContext) => {

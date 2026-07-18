@@ -163,8 +163,8 @@ export const typeDefs = `#graphql
     productPage(search: String = "", limit: Int = 20, cursor: String, activeOnly: Boolean = false): ProductPage!
     product(id: ID!): Product
     productLookup(term: String!): Product
-    sales(limit: Int = 50): [Sale!]!
-    sale(id: ID!): Sale
+    sales(limit: Int = 50, personal: Boolean = false): [Sale!]!
+    sale(id: ID!, personal: Boolean = false): Sale
     stockAudits(limit: Int = 100): [AuditEvent!]!
     dashboard(days: Int = 1, personal: Boolean = false): DashboardSummary!
     businessSettings: BusinessSettings!

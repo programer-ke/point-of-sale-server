@@ -182,6 +182,29 @@ const queryCollection = async <T>(partition: string, options?: { limit?: number;
 export const listCategories = () => queryCollection<CategoryRecord>("CATALOG#CATEGORY");
 export const listProducts = () => queryCollection<ProductRecord>("CATALOG#PRODUCT");
 export const listSales = (limit = 50) => queryCollection<SaleRecord>("SALE", { limit });
+export const listSalesByStaff = async (staffId: string, limit = 50) => {
+  const sales: SaleRecord[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const response = await dynamoDB.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      IndexName: "GSI1",
+      KeyConditionExpression: "GSI1PK = :pk",
+      FilterExpression: "createdBy = :staffId",
+      ExpressionAttributeValues: { ":pk": "SALE", ":staffId": staffId },
+      ScanIndexForward: false,
+      Limit: Math.max(limit * 2, 50),
+      ExclusiveStartKey: exclusiveStartKey,
+    }));
+    // Keep the application filter as defense in depth and for local adapters
+    // that do not evaluate DynamoDB FilterExpression.
+    sales.push(...(response.Items ?? [])
+      .map((item) => stripKeys<SaleRecord>(item)!)
+      .filter((sale) => sale.createdBy === staffId));
+    exclusiveStartKey = response.LastEvaluatedKey;
+  } while (sales.length < limit && exclusiveStartKey);
+  return sales.slice(0, limit);
+};
 export const listAudits = (limit = 100) => queryCollection<AuditRecord>("AUDIT", { limit });
 
 export const getProductPage = async (options: {

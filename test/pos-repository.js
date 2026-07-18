@@ -183,6 +183,8 @@ async function main() {
   assert.equal(staffDashboard.revenue, 125);
   assert.equal(staffDashboard.salesCount, 1);
   assert.equal(staffDashboard.cashierPerformance.length, 1);
+  const staffSales = await repository.listSalesByStaff("cashier-1", 100);
+  assert.deepEqual(staffSales.map(({ createdBy }) => createdBy), ["cashier-1"]);
 }
 
 main().catch((error) => {
