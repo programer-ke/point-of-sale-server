@@ -49,7 +49,7 @@ export const listTenantMemberships = async (tenantId: string) => {
     TableName: TABLE_NAME,
     IndexName: "AccessIndex",
     KeyConditionExpression: "accessPartition = :partition",
-    ExpressionAttributeValues: { ":pk": `TENANT#${tenantId}#MEMBER` },
+    ExpressionAttributeValues: { ":partition": `TENANT#${tenantId}#MEMBER` },
   }));
   return (response.Items ?? []).map((item) => clean<TenantMembership>(item)!);
 };

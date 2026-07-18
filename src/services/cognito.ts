@@ -51,7 +51,8 @@ const mapUser = (user: UserType, roles: UserRole[]) => {
     id: attributes.sub ?? user.Username ?? "",
     username: user.Username ?? "",
     email: attributes.email ?? "",
-    name: attributes.name ?? ([firstName, lastName].filter(Boolean).join(" ") || attributes.email || user.Username || ""),
+    // The GraphQL display name is derived so Cognito has one canonical name pair.
+    name: [firstName, lastName].filter(Boolean).join(" ") || attributes.email || user.Username || "",
     firstName,
     lastName,
     role: primaryRole(roles),
@@ -148,7 +149,6 @@ export const inviteCognitoUser = async (input: {
       { Name: "email", Value: input.email.trim().toLowerCase() },
       { Name: "given_name", Value: firstName },
       { Name: "family_name", Value: lastName },
-      { Name: "name", Value: `${firstName} ${lastName}` },
     ],
   })).catch((error: unknown) => {
     if (error instanceof Error && (error.name === "UsernameExistsException" || error.name === "AliasExistsException")) {

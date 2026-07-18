@@ -105,8 +105,9 @@ pre-branding historical sales fall back to the current settings.
 Cashier receipt labels prefer the employee code from the DynamoDB staff profile
 and the first name from Cognito.
 
-Cognito remains the identity source for first name, family name, display name,
-email, verification state, password, and enabled state. Employment metadata that is
+Cognito remains the identity source for first name, family name, email,
+verification state, password, and enabled state. Application display names are
+derived from the two Cognito name attributes. Employment metadata that is
 owned by the business (`employeeCode`, `jobTitle`, `department`, and a
 non-authentication phone number) is stored in DynamoDB at
 `USER#<cognito-sub>/PROFILE`. Staff can

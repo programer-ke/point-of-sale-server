@@ -6,7 +6,8 @@ The product is a multi-tenant SPA and GraphQL API:
 
 - React/Vite is delivered by CloudFront from a private S3 bucket.
 - Cognito owns authentication, passwords, verified email, `given_name`,
-  `family_name`, display `name`, and enabled state.
+  `family_name`, and enabled state. Display names are derived from the two
+  canonical name attributes.
 - API Gateway validates access tokens before invoking Apollo Server on Lambda.
 - DynamoDB stores tenant membership, authorization roles, business settings,
   catalog, inventory, staff employment profiles, sales, and audits.
