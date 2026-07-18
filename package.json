@@ -27,7 +27,7 @@
     "@aws-sdk/client-dynamodb": "^3.1089.0",
     "@aws-sdk/lib-dynamodb": "^3.1089.0",
     "aws-jwt-verify": "^5.1.1",
-    "dotenv": "^16.3.1",
+    "dotenv": "^17.4.2",
     "graphql": "^16.8.1"
   },
   "devDependencies": {
