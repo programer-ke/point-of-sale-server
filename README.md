@@ -86,6 +86,14 @@ the server-authoritative price and cost used at checkout.
 M-Pesa codes also receive a conditional payment lookup record in the sale
 transaction, preventing the same code from being accepted twice.
 
+Admin-managed business name, address, phone, email, thank-you text, and return
+policy are stored at `SETTINGS#BUSINESS/PROFILE`. Updating them writes an audit
+event. New sales snapshot those settings into the immutable receipt so later
+branding or policy changes do not rewrite historical customer records;
+pre-branding historical sales fall back to the current settings.
+Cashier receipt labels prefer the employee code from the DynamoDB staff profile
+and the first name from Cognito.
+
 Cognito remains the identity source for name, email, verification state,
 password, enabled state, and `admin`/`staff` roles. Employment metadata that is
 owned by the business (`employeeCode`, `jobTitle`, and a non-authentication

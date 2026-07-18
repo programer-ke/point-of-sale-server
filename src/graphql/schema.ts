@@ -85,6 +85,8 @@ export const typeDefs = `#graphql
     paymentReference: String
     createdBy: String!
     createdByName: String!
+    cashierDisplayName: String!
+    receiptBranding: BusinessSettings!
     createdAt: String!
     updatedAt: String!
   }
@@ -116,6 +118,7 @@ export const typeDefs = `#graphql
     salesCount: Int!
     itemsSold: Int!
     productCount: Int!
+    lowStockCount: Int!
     lowStock: [Product!]!
     recentSales: [Sale!]!
     recentAudits: [AuditEvent!]!
@@ -129,6 +132,16 @@ export const typeDefs = `#graphql
     unitsSold: Int!
     revenue: Float!
     grossProfit: Float!
+  }
+
+  type BusinessSettings {
+    businessName: String!
+    address: String!
+    phone: String!
+    email: String!
+    thankYouMessage: String!
+    returnPolicy: String!
+    updatedAt: String!
   }
 
   input SaleItemInput {
@@ -153,7 +166,8 @@ export const typeDefs = `#graphql
     sales(limit: Int = 50): [Sale!]!
     sale(id: ID!): Sale
     stockAudits(limit: Int = 100): [AuditEvent!]!
-    dashboard(days: Int = 1): DashboardSummary!
+    dashboard(days: Int = 1, personal: Boolean = false): DashboardSummary!
+    businessSettings: BusinessSettings!
   }
 
   type Mutation {
@@ -163,6 +177,7 @@ export const typeDefs = `#graphql
     setUserEnabled(username: String!, enabled: Boolean!): User!
     updateMyProfile(phone: String!): StaffProfile!
     updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, phone: String!): StaffProfile!
+    updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
 
     createCategory(code: String!, name: String!, description: String = ""): Category!
     createProduct(name: String!, description: String = "", sku: String!, barcode: String!, categoryId: ID!, price: Float!, cost: Float!, initialStock: Int!, minStock: Int!): Product!

@@ -66,6 +66,8 @@ export interface SaleRecord {
   paymentReference?: string | null;
   createdBy: string;
   createdByName: string;
+  cashierDisplayName?: string;
+  receiptBranding?: BusinessSettingsRecord;
   createdAt: string;
   updatedAt: string;
 }
@@ -95,6 +97,16 @@ export interface StaffProfileRecord {
   updatedAt: string;
 }
 
+export interface BusinessSettingsRecord {
+  businessName: string;
+  address: string;
+  phone: string;
+  email: string;
+  thankYouMessage: string;
+  returnPolicy: string;
+  updatedAt: string;
+}
+
 const normalizeLookup = (value: string) => value.trim().toUpperCase();
 const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 const businessDate = (date = new Date()) =>
@@ -107,6 +119,16 @@ const lookupKey = (kind: "SKU" | "BARCODE" | "CATEGORY", value: string) => ({
 });
 const profileKey = (userId: string) => ({ PK: `USER#${userId}`, SK: "PROFILE" });
 const mpesaPaymentKey = (reference: string) => ({ PK: `PAYMENT#MPESA#${reference}`, SK: "SALE" });
+const businessSettingsKey = { PK: "SETTINGS#BUSINESS", SK: "PROFILE" };
+const defaultBusinessSettings: BusinessSettingsRecord = {
+  businessName: "Tomkondi Supermarket",
+  address: "Nairobi, Kenya",
+  phone: "",
+  email: "",
+  thankYouMessage: "Thank you for shopping with us.",
+  returnPolicy: "Goods once sold cannot be returned.",
+  updatedAt: new Date(0).toISOString(),
+};
 
 const stripKeys = <T>(item: Record<string, unknown> | undefined): T | null => {
   if (!item) return null;
@@ -204,6 +226,32 @@ export const getSale = async (id: string) => {
     Key: { PK: `SALE#${id}`, SK: "RECEIPT" },
   }));
   return stripKeys<SaleRecord>(response.Item);
+};
+
+export const getBusinessSettings = async () => {
+  const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: businessSettingsKey }));
+  return stripKeys<BusinessSettingsRecord>(response.Item) ?? defaultBusinessSettings;
+};
+
+export const updateBusinessSettings = async (
+  input: Omit<BusinessSettingsRecord, "updatedAt">,
+  actor: { id: string; name: string },
+) => {
+  const now = new Date().toISOString();
+  const settings: BusinessSettingsRecord = {
+    businessName: input.businessName.trim(),
+    address: input.address.trim(),
+    phone: input.phone.trim(),
+    email: input.email.trim().toLowerCase(),
+    thankYouMessage: input.thankYouMessage.trim(),
+    returnPolicy: input.returnPolicy.trim(),
+    updatedAt: now,
+  };
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
+    { Put: { TableName: TABLE_NAME, Item: { ...businessSettingsKey, entityType: "business_settings", ...settings } } },
+    auditPut({ action: "settings.branding.updated", entityType: "business_settings", entityId: "business", reason: "Receipt branding updated", actorId: actor.id, actorName: actor.name }, now),
+  ] }));
+  return settings;
 };
 
 export const effectiveProductPrice = (product: ProductRecord, at = new Date()) => {
@@ -352,7 +400,7 @@ export const completeSale = async (
     mpesaReference?: string | null;
     items: Array<{ productId: string; quantity: number }>;
   },
-  actor: { id: string; name: string },
+  actor: { id: string; name: string; employeeCode?: string },
 ) => {
   const grouped = new Map<string, number>();
   for (const item of input.items) grouped.set(item.productId, (grouped.get(item.productId) ?? 0) + item.quantity);
@@ -376,6 +424,7 @@ export const completeSale = async (
   }, 0));
   const totalAmount = roundMoney(saleItems.reduce((sum, item) => sum + item.total, 0));
   const discount = roundMoney(subtotal - totalAmount);
+  const receiptBranding = await getBusinessSettings();
   let amountTendered: number | null = null;
   let changeDue: number | null = null;
   let paymentReference: string | null = null;
@@ -410,6 +459,8 @@ export const completeSale = async (
     paymentReference,
     createdBy: actor.id,
     createdByName: actor.name,
+    cashierDisplayName: [actor.name.trim().split(/\s+/)[0], actor.employeeCode ? `(${actor.employeeCode})` : ""].filter(Boolean).join(" "),
+    receiptBranding,
     createdAt: now,
     updatedAt: now,
   };
@@ -429,16 +480,17 @@ export const completeSale = async (
   return sale;
 };
 
-export const dashboardSummary = async (requestedDays = 1) => {
+export const dashboardSummary = async (requestedDays = 1, staffId?: string) => {
   const days = Math.min(Math.max(requestedDays, 1), 90);
   const startDate = new Date(`${businessDate()}T00:00:00+03:00`);
   startDate.setUTCDate(startDate.getUTCDate() - (days - 1));
   const start = startDate.toISOString();
-  const [products, sales, audits] = await Promise.all([
+  const [products, allSales, audits] = await Promise.all([
     listProducts(),
     queryCollection<SaleRecord>("SALE", { from: start }),
     listAudits(8),
   ]);
+  const sales = staffId ? allSales.filter((sale) => sale.createdBy === staffId) : allSales;
   const revenue = roundMoney(sales.reduce((sum, sale) => sum + sale.totalAmount, 0));
   const unitsSold = sales.flatMap((sale) => sale.items).reduce((sum, item) => sum + item.quantity, 0);
   const grossProfit = roundMoney(sales.flatMap((sale) => sale.items).reduce(
@@ -454,6 +506,9 @@ export const dashboardSummary = async (requestedDays = 1) => {
     current.grossProfit = roundMoney(current.grossProfit + sale.items.reduce((sum, item) => sum + (item.price - item.cost) * item.quantity, 0));
     byCashier.set(sale.createdBy, current);
   }
+  const lowStock = products
+    .filter((product) => product.status === "active" && product.stock <= product.minStock)
+    .sort((a, b) => (a.stock - a.minStock) - (b.stock - b.minStock));
   return {
     periodDays: days,
     periodStart: start,
@@ -465,9 +520,10 @@ export const dashboardSummary = async (requestedDays = 1) => {
     salesCount: sales.length,
     itemsSold: unitsSold,
     productCount: products.filter((product) => product.status === "active").length,
-    lowStock: products.filter((product) => product.status === "active" && product.stock <= product.minStock),
-    recentSales: [...sales].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 8),
-    recentAudits: audits,
+    lowStockCount: lowStock.length,
+    lowStock: lowStock.slice(0, 8),
+    recentSales: [...sales].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 6),
+    recentAudits: audits.slice(0, 6),
     cashierPerformance: [...byCashier.values()].sort((a, b) => b.revenue - a.revenue),
   };
 };

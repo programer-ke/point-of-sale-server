@@ -39,6 +39,7 @@ async function main() {
   let transaction;
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") {
+      if (command.input.Key.PK === "SETTINGS#BUSINESS") return {};
       return { Item: command.input.Key.PK === "PRODUCT#product-2" ? secondProduct : product };
     }
     if (command.constructor.name === "TransactWriteCommand") {
@@ -56,13 +57,15 @@ async function main() {
       amountTendered: 300,
       items: [{ productId: "product-1", quantity: 2 }],
     },
-    { id: "cashier-1", name: "Cashier" },
+    { id: "cashier-1", name: "Cashier Name", employeeCode: "EMP-001" },
   );
 
   assert.equal(sale.items[0].price, 125, "server price must be authoritative");
   assert.equal(sale.totalAmount, 250);
   assert.equal(sale.amountTendered, 300);
   assert.equal(sale.changeDue, 50);
+  assert.equal(sale.cashierDisplayName, "Cashier (EMP-001)");
+  assert.equal(sale.receiptBranding.businessName, "Tomkondi Supermarket");
   assert.equal(transaction.length, 3, "stock update, audit event, and receipt must be atomic");
   assert.match(transaction[0].Update.ConditionExpression, /stock.*>=/);
   assert.equal(transaction[2].Put.Item.orderNumber, sale.orderNumber);
@@ -103,7 +106,10 @@ async function main() {
 
   const promoted = { ...product, promotionPrice: 100 };
   dynamoDB.send = async (command) => {
-    if (command.constructor.name === "GetCommand") return command.input.Key.PK.startsWith("PAYMENT#") ? {} : { Item: promoted };
+    if (command.constructor.name === "GetCommand") {
+      if (command.input.Key.PK.startsWith("PAYMENT#") || command.input.Key.PK === "SETTINGS#BUSINESS") return {};
+      return { Item: promoted };
+    }
     if (command.constructor.name === "TransactWriteCommand") {
       transaction = command.input.TransactItems;
       return {};
@@ -129,6 +135,54 @@ async function main() {
     () => repository.completeSale({ paymentMethod: "mpesa", mpesaReference: "QGH1234567", items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
     /already been used/,
   );
+
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return {};
+    if (command.constructor.name === "TransactWriteCommand") {
+      transaction = command.input.TransactItems;
+      return {};
+    }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  const defaults = await repository.getBusinessSettings();
+  assert.equal(defaults.businessName, "Tomkondi Supermarket");
+  const settings = await repository.updateBusinessSettings(
+    { businessName: "Test Market", address: "Nairobi", phone: "+254700000000", email: "hello@example.com", thankYouMessage: "Asante sana", returnPolicy: "Goods once sold cannot be returned." },
+    { id: "admin", name: "Admin" },
+  );
+  assert.equal(settings.thankYouMessage, "Asante sana");
+  assert.equal(transaction.length, 2, "settings update and its audit event must be atomic");
+
+  const saleFor = (cashierId, amount) => ({
+    id: `sale-${cashierId}`,
+    orderNumber: `SALE-${cashierId}`,
+    customerName: "Cash customer",
+    items: [{ productId: "product-1", productName: "Tea", sku: "TEA-1", barcode: "123", quantity: 1, price: amount, cost: 50, total: amount }],
+    subtotal: amount,
+    tax: 0,
+    discount: 0,
+    totalAmount: amount,
+    status: "completed",
+    paymentMethod: "cash",
+    paymentStatus: "paid",
+    createdBy: cashierId,
+    createdByName: cashierId,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "QueryCommand") {
+      const partition = command.input.ExpressionAttributeValues[":pk"];
+      if (partition === "CATALOG#PRODUCT") return { Items: [product] };
+      if (partition === "SALE") return { Items: [saleFor("cashier-1", 125), saleFor("cashier-2", 250)] };
+      if (partition === "AUDIT") return { Items: [] };
+    }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  const staffDashboard = await repository.dashboardSummary(1, "cashier-1");
+  assert.equal(staffDashboard.revenue, 125);
+  assert.equal(staffDashboard.salesCount, 1);
+  assert.equal(staffDashboard.cashierPerformance.length, 1);
 }
 
 main().catch((error) => {

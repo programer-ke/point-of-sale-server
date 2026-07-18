@@ -16,6 +16,7 @@ import {
   dashboardSummary,
   effectiveProductPrice,
   findProduct,
+  getBusinessSettings,
   getProduct,
   getProductPage,
   getSale,
@@ -26,6 +27,7 @@ import {
   listProducts,
   listSales,
   updateProduct,
+  updateBusinessSettings,
   upsertStaffProfile,
   type ProductRecord,
   type SaleRecord,
@@ -66,9 +68,14 @@ const cashierNames = async () => {
 
 const resolveCashierNames = async <T extends SaleRecord>(sales: T[]) => {
   const names = await cashierNames();
+  const profiles = await getStaffProfiles([...new Set(sales.map((sale) => sale.createdBy))]);
   return sales.map((sale) => ({
     ...sale,
     createdByName: names.get(sale.createdBy) ?? sale.createdByName,
+    cashierDisplayName: [
+      (names.get(sale.createdBy) ?? sale.createdByName).trim().split(/\s+/)[0],
+      profiles.get(sale.createdBy)?.employeeCode ? `(${profiles.get(sale.createdBy)!.employeeCode})` : "",
+    ].filter(Boolean).join(" "),
   }));
 };
 
@@ -76,6 +83,9 @@ export const resolvers = {
   Product: {
     effectivePrice: (product: ProductRecord) => effectiveProductPrice(product),
     onPromotion: (product: ProductRecord) => effectiveProductPrice(product) < product.price,
+  },
+  Sale: {
+    receiptBranding: (sale: SaleRecord) => sale.receiptBranding ?? getBusinessSettings(),
   },
   Query: {
     me: async (_: unknown, _args: unknown, context: GraphQLContext) => {
@@ -129,19 +139,27 @@ export const resolvers = {
       requireAdmin(context);
       return listAudits(Math.min(Math.max(limit, 1), 200));
     },
-    dashboard: async (_: unknown, { days }: { days: number }, context: GraphQLContext) => {
+    businessSettings: (_: unknown, _args: unknown, context: GraphQLContext) => {
+      requireStaff(context);
+      return getBusinessSettings();
+    },
+    dashboard: async (_: unknown, { days, personal }: { days: number; personal: boolean }, context: GraphQLContext) => {
       const authenticated = requireStaff(context);
       const isAdmin = authenticated.roles.includes("admin");
-      const summary = await dashboardSummary(days);
-      const names = await cashierNames();
+      const personalView = personal || !isAdmin;
+      const summary = await dashboardSummary(days, personalView ? authenticated.id : undefined);
+      const [names, recentSales] = await Promise.all([
+        cashierNames(),
+        resolveCashierNames(summary.recentSales),
+      ]);
       return {
         ...summary,
-        grossProfit: isAdmin ? summary.grossProfit : 0,
-        recentSales: summary.recentSales.map((sale) => ({ ...sale, createdByName: names.get(sale.createdBy) ?? sale.createdByName })),
-        recentAudits: isAdmin ? summary.recentAudits : [],
+        grossProfit: isAdmin && !personalView ? summary.grossProfit : 0,
+        recentSales,
+        recentAudits: isAdmin && !personalView ? summary.recentAudits : [],
         cashierPerformance: summary.cashierPerformance
-          .filter((staff) => isAdmin || staff.staffId === authenticated.id)
-          .map((staff) => ({ ...staff, grossProfit: isAdmin ? staff.grossProfit : 0, staffName: names.get(staff.staffId) ?? staff.staffName })),
+          .filter((staff) => !personalView || staff.staffId === authenticated.id)
+          .map((staff) => ({ ...staff, grossProfit: isAdmin && !personalView ? staff.grossProfit : 0, staffName: names.get(staff.staffId) ?? staff.staffName })),
       };
     },
   },
@@ -188,6 +206,19 @@ export const resolvers = {
     ) => {
       requireAdmin(context);
       return upsertStaffProfile(userId, input);
+    },
+    updateBusinessSettings: (
+      _: unknown,
+      input: { businessName: string; address: string; phone: string; email: string; thankYouMessage: string; returnPolicy: string },
+      context: GraphQLContext,
+    ) => {
+      requireAdmin(context);
+      if (input.businessName.trim().length < 2) throw new Error("Business name is required");
+      if (input.address.trim().length < 3) throw new Error("Business address is required");
+      if (input.thankYouMessage.trim().length < 3) throw new Error("Thank-you message is required");
+      if (input.returnPolicy.trim().length < 3) throw new Error("Return policy is required");
+      if (input.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email.trim())) throw new Error("Enter a valid contact email");
+      return updateBusinessSettings(input, actor(context));
     },
     createCategory: (_: unknown, args: { code: string; name: string; description: string }, context: GraphQLContext) => {
       requireAdmin(context);
@@ -249,8 +280,8 @@ export const resolvers = {
     ) => {
       const authenticated = requireStaff(context);
       if (!(args.paymentMethod === "cash" || args.paymentMethod === "mpesa")) throw new Error("Payment method must be cash or M-Pesa");
-      const user = await getCognitoUser(authenticated.username);
-      return completeSale(args, { id: authenticated.id, name: user.name });
+      const [user, profile] = await Promise.all([getCognitoUser(authenticated.username), getStaffProfile(authenticated.id)]);
+      return completeSale(args, { id: authenticated.id, name: user.name, employeeCode: profile?.employeeCode });
     },
   },
 };
