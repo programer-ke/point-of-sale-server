@@ -6,9 +6,9 @@
   "main": "dist/index.js",
   "scripts": {
     "start": "node dist/index.js",
-    "dev": "nodemon src/index.ts",
-    "seed:mvp": "ts-node src/scripts/seed-mvp.ts",
-    "test": "yarn build && ts-node src/scripts/seed-mvp.ts --validate-only && node test/seed-catalog.js && node test/auth.js && node test/authorization.js && node test/pos-repository.js && node test/lambda-smoke.js",
+    "dev": "tsx watch src/index.ts",
+    "seed:mvp": "yarn build && node dist/scripts/seed-mvp.js",
+    "test": "yarn build && node dist/scripts/seed-mvp.js --validate-only && node test/seed-catalog.js && node test/auth.js && node test/authorization.js && node test/pos-repository.js && node test/lambda-smoke.js",
     "build": "tsc",
     "watch": "tsc --watch"
   },
@@ -27,14 +27,13 @@
     "@aws-sdk/client-dynamodb": "^3.1089.0",
     "@aws-sdk/lib-dynamodb": "^3.1089.0",
     "aws-jwt-verify": "^5.1.1",
-    "dotenv": "^16.3.1",
-    "graphql": "^16.8.1"
+    "dotenv": "^17.4.2",
+    "graphql": "^16.11.0"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.162",
-    "@types/node": "^20.10.0",
-    "nodemon": "^3.0.2",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.3.2"
+    "@types/node": "^22.0.0",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
   }
 }

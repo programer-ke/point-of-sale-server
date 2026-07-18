@@ -21,6 +21,14 @@ const apolloHandler = startServerAndCreateLambdaHandler(
 );
 
 export const handler = async (...args: Parameters<typeof apolloHandler>) => {
+  const [event] = args;
+  if (event.requestContext.http.method === "OPTIONS") {
+    // The explicit unauthenticated API Gateway preflight route uses this same
+    // integration. Stop here so Apollo's CSRF protection never evaluates an
+    // intentionally body-less browser preflight request. API Gateway adds the
+    // configured Access-Control-Allow-* response headers.
+    return { statusCode: 204, body: "" };
+  }
   await databaseReady;
   return apolloHandler(...args);
 };

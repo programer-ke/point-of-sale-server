@@ -51,6 +51,19 @@ const event = {
 };
 
 async function main() {
+  const preflight = await handler({
+    ...event,
+    routeKey: "OPTIONS /{proxy+}",
+    requestContext: {
+      ...event.requestContext,
+      routeKey: "OPTIONS /{proxy+}",
+      http: { ...event.requestContext.http, method: "OPTIONS" },
+      authorizer: undefined,
+    },
+    body: undefined,
+  }, {}, () => {});
+  assert.equal(preflight.statusCode, 204);
+
   const result = await handler(event, {}, () => {});
 
   assert.equal(result.statusCode, 200);

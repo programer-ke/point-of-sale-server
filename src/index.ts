@@ -5,7 +5,7 @@ import { createApolloServer } from "./app";
 import { verifyAwsConnection } from "./config/db";
 import { contextFromAuthorization } from "./auth";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || "127.0.0.1";
