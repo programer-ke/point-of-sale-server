@@ -1,7 +1,10 @@
-import { DescribeTableCommand, waitUntilTableExists } from "@aws-sdk/client-dynamodb";
+import {
+  DescribeTableCommand,
+  waitUntilTableExists,
+} from "@aws-sdk/client-dynamodb";
 import dotenv from "dotenv";
 import { createUser, getUserByEmail } from "../utils/db-helpers";
-import { createSingleTable, dynamoDBClient, TABLE_NAME } from "../config/db";
+import { dynamoDBClient, TABLE_NAME } from "../config/db";
 
 dotenv.config();
 
@@ -48,14 +51,17 @@ const users = [
 
 async function ensureTableReady() {
   try {
-    await dynamoDBClient.send(new DescribeTableCommand({ TableName: TABLE_NAME }));
+    await dynamoDBClient.send(
+      new DescribeTableCommand({ TableName: TABLE_NAME }),
+    );
   } catch (error: any) {
-    if (error.name !== "ResourceNotFoundException") {
-      throw error;
+    if (error.name === "ResourceNotFoundException") {
+      throw new Error(
+        `Table ${TABLE_NAME} does not exist. Deploy the server Terraform stack before seeding.`,
+        { cause: error },
+      );
     }
-
-    console.log(`Table ${TABLE_NAME} not found. Creating it now.`);
-    await createSingleTable();
+    throw error;
   }
 
   await waitUntilTableExists(

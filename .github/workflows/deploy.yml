@@ -1,0 +1,79 @@
+name: Deploy server
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-server-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  deploy:
+    name: Build and deploy
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Check deployment configuration
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          LAMBDA_FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME }}
+        run: |
+          missing=0
+          for variable in AWS_DEPLOY_ROLE_ARN LAMBDA_FUNCTION_NAME; do
+            if [ -z "$(printenv "$variable")" ]; then
+              echo "::error::Required repository variable $variable is not configured"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test --if-present
+
+      - name: Build
+        run: npm run build
+
+      - name: Keep production dependencies only
+        run: npm prune --omit=dev
+
+      - name: Package Lambda
+        run: |
+          printf '#!/bin/sh\nexec node dist/index.js\n' > run.sh
+          chmod +x run.sh
+          zip -qr function.zip dist node_modules package.json run.sh
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: GitHubActionsServerDeploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Publish Lambda
+        run: aws lambda update-function-code --function-name "${{ vars.LAMBDA_FUNCTION_NAME }}" --zip-file fileb://function.zip
+
+      - name: Wait for Lambda update
+        run: aws lambda wait function-updated --function-name "${{ vars.LAMBDA_FUNCTION_NAME }}"

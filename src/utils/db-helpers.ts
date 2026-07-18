@@ -7,20 +7,6 @@ import {
 import { dynamoDB, TABLE_NAME, Keys } from "../config/db";
 import { randomUUID } from "crypto";
 
-import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
-
-export const testConnection = async (): Promise<boolean> => {
-  try {
-    const command = new ListTablesCommand({ Limit: 1 });
-    await dynamoDB.send(command);
-    console.log("✅ DynamoDB connection successful!");
-    return true;
-  } catch (error) {
-    console.error("❌ DynamoDB connection failed:", error);
-    return false;
-  }
-};
-
 // Generic function to get an item by PK and SK
 export const getItem = async (PK: string, SK: string) => {
   const params = {

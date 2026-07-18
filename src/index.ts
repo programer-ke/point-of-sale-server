@@ -2,48 +2,27 @@
 import { startStandaloneServer } from "@apollo/server/standalone";
 import dotenv from "dotenv";
 import { createApolloServer } from "./app";
-import { testConnection } from "./utils/db-helpers";
+import { verifyAwsConnection } from "./config/db";
 
 dotenv.config();
 
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || "127.0.0.1";
 
-const validateEnvironment = () => {
-  const required = ["AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
-  const missing = required.filter((key) => !process.env[key]);
-
-  if (missing.length > 0) {
-    console.error(`❌ Missing environment variables: ${missing.join(", ")}`);
-    console.error("   Please check your .env file");
-    return false;
-  }
-
-  console.log("✅ Environment variables validated");
-  return true;
-};
-
 async function startServer() {
   console.log("\n" + "=".repeat(60));
   console.log("🚀 Starting Server");
   console.log("=".repeat(60));
 
-  // Validate environment variables
-  if (!validateEnvironment()) {
-    process.exit(1);
-  }
-
   // Test DynamoDB connection
   console.log("\n🔌 Testing DynamoDB connection...");
-  const isConnected = await testConnection();
+  const isConnected = await verifyAwsConnection();
 
   if (!isConnected) {
     console.error("\n❌ Failed to connect to DynamoDB");
-    console.error("💡 Please check:");
-    console.error("   1. AWS credentials are correct");
-    console.error("   2. AWS region is correct");
-    console.error("   3. Table name exists");
-    console.error("   4. Network connectivity to AWS");
+    console.error(
+      "💡 Check the AWS credential provider, region, table name, and network connectivity",
+    );
     process.exit(1);
   }
 

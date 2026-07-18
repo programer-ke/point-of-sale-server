@@ -1,8 +1,6 @@
 import {
-  CreateTableCommand,
   DescribeTableCommand,
   DynamoDBClient,
-  type CreateTableCommandInput,
 } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { S3Client } from "@aws-sdk/client-s3";
@@ -114,79 +112,6 @@ export const Keys = {
   }),
 };
 
-// Single Table Schema
-export const createSingleTable = async () => {
-  const params: CreateTableCommandInput = {
-    TableName: TABLE_NAME,
-    KeySchema: [
-      { AttributeName: "PK", KeyType: "HASH" }, // Partition Key
-      { AttributeName: "SK", KeyType: "RANGE" }, // Sort Key
-    ],
-    AttributeDefinitions: [
-      { AttributeName: "PK", AttributeType: "S" },
-      { AttributeName: "SK", AttributeType: "S" },
-      { AttributeName: "GSI1PK", AttributeType: "S" },
-      { AttributeName: "GSI1SK", AttributeType: "S" },
-      { AttributeName: "GSI2PK", AttributeType: "S" },
-      { AttributeName: "GSI2SK", AttributeType: "S" },
-      { AttributeName: "email", AttributeType: "S" },
-    ],
-    GlobalSecondaryIndexes: [
-      // GSI1: For querying by email, status, etc.
-      {
-        IndexName: "GSI1",
-        KeySchema: [
-          { AttributeName: "GSI1PK", KeyType: "HASH" },
-          { AttributeName: "GSI1SK", KeyType: "RANGE" },
-        ],
-        Projection: {
-          ProjectionType: "ALL",
-        },
-      },
-      // GSI2: For time-based queries (orders by date, etc.)
-      {
-        IndexName: "GSI2",
-        KeySchema: [
-          { AttributeName: "GSI2PK", KeyType: "HASH" },
-          { AttributeName: "GSI2SK", KeyType: "RANGE" },
-        ],
-        Projection: {
-          ProjectionType: "ALL",
-        },
-      },
-      // GSI3: For email lookups (users & customers)
-      {
-        IndexName: "EmailIndex",
-        KeySchema: [{ AttributeName: "email", KeyType: "HASH" }],
-        Projection: {
-          ProjectionType: "ALL",
-        },
-      },
-    ],
-    BillingMode: "PAY_PER_REQUEST",
-  };
-
-  try {
-    await dynamoDBClient.send(new CreateTableCommand(params));
-    console.log(`✅ Created single table: ${TABLE_NAME}`);
-  } catch (error: any) {
-    if (error.name === "ResourceInUseException") {
-      console.log(`ℹ️ Table ${TABLE_NAME} already exists`);
-    } else {
-      console.error(`❌ Failed to create ${TABLE_NAME}:`, error);
-      throw error;
-    }
-  }
-};
-
-// Initialize Database
-export const initializeDatabase = async () => {
-  if (process.env.NODE_ENV === "development") {
-    await createSingleTable();
-    console.log("📊 Single table ready for use");
-  }
-};
-
 export const verifyAwsConnection = async () => {
   const region = process.env.AWS_REGION || "us-east-1";
 
@@ -214,7 +139,7 @@ export const verifyAwsConnection = async () => {
       error.name === "CredentialsProviderError"
     ) {
       console.error(
-        "AWS credentials are invalid or missing. Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in .env",
+        "AWS credentials are invalid or missing. Check the configured AWS credential provider.",
       );
       return false;
     }
@@ -237,6 +162,5 @@ export default {
   s3,
   TABLE_NAME,
   Keys,
-  initializeDatabase,
   verifyAwsConnection,
 };
