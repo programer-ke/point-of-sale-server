@@ -14,7 +14,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  AWS_REGION: us-east-1
+  PROJECT_ENV: prod
 
 jobs:
   deploy:
@@ -30,16 +31,11 @@ jobs:
       - name: Check deployment configuration
         env:
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          LAMBDA_FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME }}
         run: |
-          missing=0
-          for variable in AWS_DEPLOY_ROLE_ARN LAMBDA_FUNCTION_NAME; do
-            if [ -z "$(printenv "$variable")" ]; then
-              echo "::error::Required repository variable $variable is not configured"
-              missing=1
-            fi
-          done
-          exit "$missing"
+          if [ -z "$AWS_DEPLOY_ROLE_ARN" ]; then
+            echo "::error::Required repository variable AWS_DEPLOY_ROLE_ARN is not configured"
+            exit 1
+          fi
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -78,14 +74,26 @@ jobs:
           role-session-name: GitHubActionsServerDeploy
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Load deployment parameters
+        run: |
+          lambda_function_name=$(aws ssm get-parameter \
+            --name "/${PROJECT_ENV}/server/lambda-function-name" \
+            --query 'Parameter.Value' \
+            --output text)
+          if [ -z "$lambda_function_name" ] || [ "$lambda_function_name" = "None" ]; then
+            echo "::error::Lambda function name parameter is empty"
+            exit 1
+          fi
+          echo "LAMBDA_FUNCTION_NAME=$lambda_function_name" >> "$GITHUB_ENV"
+
       - name: Publish Lambda
-        run: aws lambda update-function-code --function-name "${{ vars.LAMBDA_FUNCTION_NAME }}" --zip-file fileb://function.zip
+        run: aws lambda update-function-code --function-name "${LAMBDA_FUNCTION_NAME}" --zip-file fileb://function.zip
 
       - name: Wait for Lambda update
-        run: aws lambda wait function-updated --function-name "${{ vars.LAMBDA_FUNCTION_NAME }}"
+        run: aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME}"
 
       - name: Verify Lambda update
         run: |
           aws lambda get-function-configuration \
-            --function-name "${{ vars.LAMBDA_FUNCTION_NAME }}" \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
             --query '{State:State,LastUpdateStatus:LastUpdateStatus,Handler:Handler,Runtime:Runtime}'
