@@ -45,13 +45,20 @@ export const getTenantRecord = async (tenantId: string) => {
 };
 
 export const listTenantMemberships = async (tenantId: string) => {
-  const response = await dynamoDB.send(new QueryCommand({
-    TableName: TABLE_NAME,
-    IndexName: "AccessIndex",
-    KeyConditionExpression: "accessPartition = :partition",
-    ExpressionAttributeValues: { ":partition": `TENANT#${tenantId}#MEMBER` },
-  }));
-  return (response.Items ?? []).map((item) => clean<TenantMembership>(item)!);
+  const memberships: TenantMembership[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const response = await dynamoDB.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      IndexName: "AccessIndex",
+      KeyConditionExpression: "accessPartition = :partition",
+      ExpressionAttributeValues: { ":partition": `TENANT#${tenantId}#MEMBER` },
+      ExclusiveStartKey: exclusiveStartKey,
+    }));
+    memberships.push(...(response.Items ?? []).map((item) => clean<TenantMembership>(item)!));
+    exclusiveStartKey = response.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+  return memberships;
 };
 
 export const createTenant = async (input: { name: string; ownerUserId: string; ownerUsername: string }) => {

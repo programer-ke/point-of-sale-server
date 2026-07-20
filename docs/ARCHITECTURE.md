@@ -76,11 +76,13 @@ legacy dual-read path.
 
 ## Business configuration and staff
 
-Business setup owns receipt branding and a flat department list. Invite/edit
-forms use that list as a dropdown, and the API rejects values outside it. A
-department cannot be removed while a staff profile still uses it. Sales
-snapshot the seller's department so later reassignment does not rewrite
-historical reports.
+Business settings store receipt branding and a flat department list, but their
+mutations update separate attributes to prevent stale branding forms from
+overwriting department changes. Invite/edit forms use the department list as a
+dropdown, and the API rejects values outside it. Renaming a department and its
+staff assignments is atomic; deletion is rejected while a staff profile still
+uses it. Sales snapshot the seller's department so later reassignment does not
+rewrite historical reports.
 
 ## Product lifecycle
 
@@ -88,6 +90,11 @@ Products are never physically deleted through the application. Archive sets
 `status = inactive`: the item remains available to administrators and historic
 receipts, but is excluded from staff catalog/POS queries and rejected by
 checkout. Administrators may reactivate it from product editing.
+
+Categories can be edited or deleted by administrators. Category name changes
+and denormalized product category names are committed in one transaction. A
+category cannot be deleted while any product, including an archived product,
+still references it.
 
 ## Tenant-specific seed data
 

@@ -26,12 +26,16 @@ async function main() {
     dashboard: __type(name: "DashboardSummary") { fields { name } }
     stock: __type(name: "StockReportProduct") { fields { name } }
     report: __type(name: "ReportProduct") { fields { name } }
+    mutation: __type(name: "Mutation") { fields { name } }
   }` });
   assert.equal(schemaContract.body.kind, "single");
   const schemaFields = JSON.parse(JSON.stringify(schemaContract.body.singleResult.data));
   assert.ok(schemaFields.dashboard.fields.some(({ name }) => name === "averageSale"));
   assert.ok(!schemaFields.stock.fields.some(({ name }) => name === "averageSale"));
   assert.ok(schemaFields.report.fields.some(({ name }) => name === "savings"));
+  for (const mutation of ["updateCategory", "deleteCategory", "createDepartment", "updateDepartment", "deleteDepartment"]) {
+    assert.ok(schemaFields.mutation.fields.some(({ name }) => name === mutation), `${mutation} must be available`);
+  }
 
   const staffContext = {
     auth: {
@@ -49,6 +53,13 @@ async function main() {
   );
   assert.equal(denied.body.kind, "single");
   assert.equal(denied.body.singleResult.errors[0].extensions.code, "FORBIDDEN");
+
+  const deniedCategoryUpdate = await server.executeOperation(
+    { query: `mutation { updateCategory(id: "category-1", code: "BEV", name: "Beverages") { id } }` },
+    { contextValue: staffContext },
+  );
+  assert.equal(deniedCategoryUpdate.body.kind, "single");
+  assert.equal(deniedCategoryUpdate.body.singleResult.errors[0].extensions.code, "FORBIDDEN");
 
   const allowed = await server.executeOperation(
     { query: "query { products { id } }" },

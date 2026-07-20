@@ -114,6 +114,8 @@ export interface BusinessSettingsRecord {
   updatedAt: string;
 }
 
+export type BusinessBrandingInput = Omit<BusinessSettingsRecord, "departments" | "updatedAt">;
+
 export interface ReportProductRecord {
   productId: string;
   productName: string;
@@ -319,8 +321,15 @@ export const getBusinessSettings = async (tenantId: string) => {
   return settings ? { ...settings, departments: settings.departments ?? defaultBusinessSettings.departments } : defaultBusinessSettings;
 };
 
+const normalizeDepartment = (department: string) => department.trim().replace(/\s+/g, " ");
+
 const normalizeDepartments = (departments: string[]) => {
-  const normalized = [...new Set(departments.map((department) => department.trim().replace(/\s+/g, " ")).filter(Boolean))];
+  const normalized = departments
+    .map(normalizeDepartment)
+    .filter(Boolean)
+    .filter((department, index, values) =>
+      values.findIndex((value) => value.toLowerCase() === department.toLowerCase()) === index,
+    );
   if (normalized.length === 0) throw new Error("Add at least one department");
   if (normalized.length > 30) throw new Error("A business can have at most 30 departments");
   if (normalized.some((department) => department.length > 80)) throw new Error("Department names must be 80 characters or fewer");
@@ -347,25 +356,65 @@ export const ensureBusinessSettings = async (tenantId: string, businessName: str
 
 export const updateBusinessSettings = async (
   tenantId: string,
-  input: Omit<BusinessSettingsRecord, "updatedAt">,
+  input: BusinessBrandingInput,
   actor: { id: string; name: string },
 ) => {
+  const current = await getBusinessSettings(tenantId);
   const now = new Date().toISOString();
-  const settings: BusinessSettingsRecord = {
+  const branding = {
     businessName: input.businessName.trim(),
     address: input.address.trim(),
     phone: input.phone.trim(),
     email: input.email.trim().toLowerCase(),
-    departments: normalizeDepartments(input.departments),
     thankYouMessage: input.thankYouMessage.trim(),
     returnPolicy: input.returnPolicy.trim(),
     updatedAt: now,
   };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
-    { Put: { TableName: TABLE_NAME, Item: { ...businessSettingsKey(tenantId), entityType: "business_settings", ...settings } } },
+    { Update: {
+      TableName: TABLE_NAME,
+      Key: businessSettingsKey(tenantId),
+      UpdateExpression: "SET businessName = :businessName, address = :address, phone = :phone, email = :email, thankYouMessage = :thankYouMessage, returnPolicy = :returnPolicy, updatedAt = :updatedAt",
+      ExpressionAttributeValues: Object.fromEntries(Object.entries(branding).map(([key, value]) => [`:${key}`, value])),
+      ConditionExpression: "attribute_exists(partitionKey)",
+    } },
     auditPut(tenantId, { action: "settings.branding.updated", entityType: "business_settings", entityId: "business", reason: "Receipt branding updated", actorId: actor.id, actorName: actor.name }, now),
   ] }));
-  return settings;
+  return { ...branding, departments: current.departments };
+};
+
+export const updateDepartments = async (
+  tenantId: string,
+  currentDepartments: string[],
+  nextDepartments: string[],
+  actor: { id: string; name: string },
+  renamedProfiles: Array<{ userId: string; from: string; to: string }> = [],
+) => {
+  const current = normalizeDepartments(currentDepartments);
+  const next = normalizeDepartments(nextDepartments);
+  const now = new Date().toISOString();
+  const transactionItems: NonNullable<TransactWriteCommandInput["TransactItems"]> = [
+    { Update: {
+      TableName: TABLE_NAME,
+      Key: businessSettingsKey(tenantId),
+      UpdateExpression: "SET departments = :next, updatedAt = :updatedAt",
+      ConditionExpression: "departments = :current",
+      ExpressionAttributeValues: { ":current": current, ":next": next, ":updatedAt": now },
+    } },
+    ...renamedProfiles.map(({ userId, from, to }) => ({ Update: {
+      TableName: TABLE_NAME,
+      Key: profileKey(tenantId, userId),
+      UpdateExpression: "SET department = :next, updatedAt = :updatedAt",
+      ConditionExpression: "department = :current",
+      ExpressionAttributeValues: { ":current": from, ":next": to, ":updatedAt": now },
+    } })),
+    auditPut(tenantId, { action: "settings.departments.updated", entityType: "business_settings", entityId: "departments", reason: "Departments updated", actorId: actor.id, actorName: actor.name }, now),
+  ];
+  if (transactionItems.length > 100) {
+    throw new Error("Too many staff profiles use this department to rename it safely");
+  }
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: transactionItems }));
+  return next;
 };
 
 export const effectiveProductPrice = (product: ProductRecord, at = new Date()) => {
@@ -406,6 +455,70 @@ export const createCategory = async (
     auditPut(tenantId, { action: "category.created", entityType: "category", entityId: id, reason: "Category created", actorId: actor.id, actorName: actor.name }, now),
   ] }));
   return stripKeys<CategoryRecord>(item)!;
+};
+
+export const updateCategory = async (
+  tenantId: string,
+  id: string,
+  input: Pick<CategoryRecord, "code" | "name" | "description">,
+  actor: { id: string; name: string },
+) => {
+  const current = await getCategory(tenantId, id);
+  if (!current) throw new Error("Category not found");
+  const now = new Date().toISOString();
+  const next: CategoryRecord = {
+    ...current,
+    code: normalizeLookup(input.code),
+    name: input.name.trim(),
+    description: input.description.trim(),
+    updatedAt: now,
+  };
+  const products = next.name === current.name
+    ? []
+    : (await listProducts(tenantId)).filter((product) => product.categoryId === id);
+  const codeChanged = next.code !== current.code;
+  const transactionItems: NonNullable<TransactWriteCommandInput["TransactItems"]> = [
+    { Put: {
+      TableName: TABLE_NAME,
+      Item: { ...categoryKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#CATEGORY"), accessSort: `${next.name.toLowerCase()}#${id}`, entityType: "category", tenantId, ...next },
+      ConditionExpression: "attribute_exists(partitionKey)",
+    } },
+    ...(codeChanged ? [
+      { Put: { TableName: TABLE_NAME, Item: { ...lookupKey(tenantId, "CATEGORY", next.code), entityType: "category_lookup", tenantId, categoryId: id }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+      { Delete: { TableName: TABLE_NAME, Key: lookupKey(tenantId, "CATEGORY", current.code) } },
+    ] : []),
+    ...products.map((product) => ({ Update: {
+      TableName: TABLE_NAME,
+      Key: productKey(tenantId, product.id),
+      UpdateExpression: "SET categoryName = :categoryName, updatedAt = :updatedAt",
+      ConditionExpression: "categoryId = :categoryId",
+      ExpressionAttributeValues: { ":categoryId": id, ":categoryName": next.name, ":updatedAt": now },
+    } })),
+    auditPut(tenantId, { action: "category.updated", entityType: "category", entityId: id, reason: "Category updated", actorId: actor.id, actorName: actor.name }, now),
+  ];
+  if (transactionItems.length > 100) {
+    throw new Error("This category has too many products to rename safely in one operation");
+  }
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: transactionItems }));
+  return next;
+};
+
+export const deleteCategory = async (
+  tenantId: string,
+  id: string,
+  actor: { id: string; name: string },
+) => {
+  const current = await getCategory(tenantId, id);
+  if (!current) throw new Error("Category not found");
+  if ((await listProducts(tenantId)).some((product) => product.categoryId === id)) {
+    throw new Error("Move this category's products before deleting it");
+  }
+  const now = new Date().toISOString();
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
+    { Delete: { TableName: TABLE_NAME, Key: categoryKey(tenantId, id), ConditionExpression: "attribute_exists(partitionKey)" } },
+    { Delete: { TableName: TABLE_NAME, Key: lookupKey(tenantId, "CATEGORY", current.code) } },
+    auditPut(tenantId, { action: "category.deleted", entityType: "category", entityId: id, reason: "Category deleted", actorId: actor.id, actorName: actor.name }, now),
+  ] }));
 };
 
 export const createProduct = async (
@@ -743,8 +856,21 @@ export const getStaffProfile = async (tenantId: string, userId: string) => {
 
 export const getStaffProfiles = async (tenantId: string, userIds: string[]) => {
   if (userIds.length === 0) return new Map<string, StaffProfileRecord>();
-  const response = await dynamoDB.send(new BatchGetCommand({ RequestItems: { [TABLE_NAME]: { Keys: userIds.map((userId) => profileKey(tenantId, userId)) } } }));
-  return new Map((response.Responses?.[TABLE_NAME] ?? []).map((item) => {
+  const items: Record<string, unknown>[] = [];
+  const keys = [...new Set(userIds)].map((userId) => profileKey(tenantId, userId));
+  for (let offset = 0; offset < keys.length; offset += 100) {
+    let pending = keys.slice(offset, offset + 100);
+    for (let attempt = 0; pending.length && attempt < 3; attempt += 1) {
+      const response = await dynamoDB.send(new BatchGetCommand({ RequestItems: { [TABLE_NAME]: { Keys: pending } } }));
+      items.push(...(response.Responses?.[TABLE_NAME] ?? []));
+      pending = (response.UnprocessedKeys?.[TABLE_NAME]?.Keys ?? []) as typeof pending;
+      if (pending.length && attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 25 * (2 ** attempt)));
+      }
+    }
+    if (pending.length) throw new Error("Unable to load all staff profiles; try again");
+  }
+  return new Map(items.map((item) => {
     const profile = stripKeys<StaffProfileRecord>(item)!;
     return [profile.userId, { ...profile, department: profile.department ?? "" }];
   }));

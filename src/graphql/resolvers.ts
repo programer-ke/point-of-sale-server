@@ -22,6 +22,7 @@ import {
   completeSale,
   createCategory,
   createProduct,
+  deleteCategory,
   dashboardSummary,
   businessReport,
   effectiveProductPrice,
@@ -40,7 +41,9 @@ import {
   listSales,
   listSalesByStaff,
   updateProduct,
+  updateCategory,
   updateBusinessSettings,
+  updateDepartments,
   upsertStaffProfile,
   type ProductRecord,
   type SaleRecord,
@@ -66,6 +69,25 @@ const parseRoles = (roles: string[]): UserRole[] => {
 
 const validateMoney = (value: number, name: string) => {
   if (!Number.isFinite(value) || value < 0) throw new Error(`${name} must be zero or greater`);
+};
+
+const normalizeDepartment = (value: string) => value.trim().replace(/\s+/g, " ");
+const validateDepartment = (value: string) => {
+  const normalized = normalizeDepartment(value);
+  if (!normalized) throw new Error("Department name is required");
+  if (normalized.length > 80) throw new Error("Department names must be 80 characters or fewer");
+  return normalized;
+};
+const departmentIndex = (departments: string[], name: string) =>
+  departments.findIndex((department) => department.toLowerCase() === name.toLowerCase());
+
+const validateCategory = (input: { code: string; name: string; description: string }) => {
+  const category = { code: input.code.trim().toUpperCase(), name: input.name.trim(), description: input.description.trim() };
+  if (!category.code || !category.name) throw new Error("Category code and name are required");
+  if (category.code.length > 40) throw new Error("Category code must be 40 characters or fewer");
+  if (category.name.length > 80) throw new Error("Category name must be 80 characters or fewer");
+  if (category.description.length > 240) throw new Error("Category description must be 240 characters or fewer");
+  return category;
 };
 
 const validateDateRange = (from?: string, to?: string) => {
@@ -355,7 +377,7 @@ export const resolvers = {
     },
     updateBusinessSettings: async (
       _: unknown,
-      input: { businessName: string; address: string; phone: string; email: string; departments: string[]; thankYouMessage: string; returnPolicy: string },
+      input: { businessName: string; address: string; phone: string; email: string; departments?: string[]; thankYouMessage: string; returnPolicy: string },
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
@@ -364,19 +386,64 @@ export const resolvers = {
       if (input.thankYouMessage.trim().length < 3) throw new Error("Thank-you message is required");
       if (input.returnPolicy.trim().length < 3) throw new Error("Return policy is required");
       if (input.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email.trim())) throw new Error("Enter a valid contact email");
-      const tenantId = tenant(context);
-      const normalizedDepartments = [...new Set(input.departments.map((department) => department.trim().replace(/\s+/g, " ")).filter(Boolean))];
-      const memberships = await listTenantMemberships(tenantId);
-      const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId));
-      const assigned = [...new Set([...profiles.values()].map(({ department }) => department).filter(Boolean))];
-      const removedInUse = assigned.filter((department) => !normalizedDepartments.includes(department));
-      if (removedInUse.length) throw new Error(`Reassign staff before removing: ${removedInUse.join(", ")}`);
-      return updateBusinessSettings(tenantId, { ...input, departments: normalizedDepartments }, actor(context));
+      // The optional departments argument keeps older clients compatible during
+      // rollout. Department writes are intentionally isolated in their CRUD mutations.
+      const { departments: _legacyDepartments, ...branding } = input;
+      return updateBusinessSettings(tenant(context), branding, actor(context));
     },
     createCategory: (_: unknown, args: { code: string; name: string; description: string }, context: GraphQLContext) => {
       requireAdmin(context);
-      if (!args.code.trim() || !args.name.trim()) throw new Error("Category code and name are required");
-      return createCategory(tenant(context), { code: args.code.trim().toUpperCase(), name: args.name.trim(), description: args.description.trim(), status: "active" }, actor(context));
+      return createCategory(tenant(context), { ...validateCategory(args), status: "active" }, actor(context));
+    },
+    updateCategory: (_: unknown, { id, ...input }: { id: string; code: string; name: string; description: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      return updateCategory(tenant(context), id, validateCategory(input), actor(context));
+    },
+    deleteCategory: async (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      await deleteCategory(tenant(context), id, actor(context));
+      return true;
+    },
+    createDepartment: async (_: unknown, { name }: { name: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      const tenantId = tenant(context);
+      const nextName = validateDepartment(name);
+      const current = (await getBusinessSettings(tenantId)).departments;
+      if (departmentIndex(current, nextName) >= 0) throw new Error("A department with this name already exists");
+      return updateDepartments(tenantId, current, [...current, nextName], actor(context));
+    },
+    updateDepartment: async (_: unknown, { currentName, name }: { currentName: string; name: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      const tenantId = tenant(context);
+      const nextName = validateDepartment(name);
+      const current = (await getBusinessSettings(tenantId)).departments;
+      const index = departmentIndex(current, normalizeDepartment(currentName));
+      if (index < 0) throw new Error("Department not found");
+      const duplicate = departmentIndex(current, nextName);
+      if (duplicate >= 0 && duplicate !== index) throw new Error("A department with this name already exists");
+      const previousName = current[index];
+      if (previousName === nextName) return current;
+      const memberships = await listTenantMemberships(tenantId);
+      const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId));
+      const renamedProfiles = [...profiles.values()]
+        .filter(({ department }) => department.toLowerCase() === previousName.toLowerCase())
+        .map(({ userId, department }) => ({ userId, from: department, to: nextName }));
+      const next = current.map((department, departmentPosition) => departmentPosition === index ? nextName : department);
+      return updateDepartments(tenantId, current, next, actor(context), renamedProfiles);
+    },
+    deleteDepartment: async (_: unknown, { name }: { name: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      const tenantId = tenant(context);
+      const current = (await getBusinessSettings(tenantId)).departments;
+      const index = departmentIndex(current, normalizeDepartment(name));
+      if (index < 0) throw new Error("Department not found");
+      const memberships = await listTenantMemberships(tenantId);
+      const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId));
+      const department = current[index];
+      if ([...profiles.values()].some((profile) => profile.department.toLowerCase() === department.toLowerCase())) {
+        throw new Error("Reassign staff before deleting this department");
+      }
+      return updateDepartments(tenantId, current, current.filter((_, position) => position !== index), actor(context));
     },
     createProduct: (
       _: unknown,

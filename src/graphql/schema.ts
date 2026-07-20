@@ -244,9 +244,14 @@ export const typeDefs = `#graphql
     deleteStaffUser(username: String!): Boolean!
     updateMyProfile(phone: String!): StaffProfile!
     updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, department: String, phone: String!): StaffProfile!
-    updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", departments: [String!]!, thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
+    updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", departments: [String!], thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
+    createDepartment(name: String!): [String!]!
+    updateDepartment(currentName: String!, name: String!): [String!]!
+    deleteDepartment(name: String!): [String!]!
 
     createCategory(code: String!, name: String!, description: String = ""): Category!
+    updateCategory(id: ID!, code: String!, name: String!, description: String = ""): Category!
+    deleteCategory(id: ID!): Boolean!
     createProduct(name: String!, description: String = "", sku: String!, barcode: String!, categoryId: ID!, price: Float!, cost: Float!, initialStock: Int!, minStock: Int!): Product!
     updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, price: Float, cost: Float, promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, minStock: Int, status: String): Product!
     archiveProduct(id: ID!): Product!

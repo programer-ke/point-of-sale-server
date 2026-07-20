@@ -163,11 +163,78 @@ async function main() {
   assert.equal(defaults.businessName, "Tomkondi Supermarket");
   const settings = await repository.updateBusinessSettings(
     tenantId,
-    { businessName: "Test Market", address: "Nairobi", phone: "+254700000000", email: "hello@example.com", departments: ["Management", "Sales"], thankYouMessage: "Asante sana", returnPolicy: "Goods once sold cannot be returned." },
+    { businessName: "Test Market", address: "Nairobi", phone: "+254700000000", email: "hello@example.com", thankYouMessage: "Asante sana", returnPolicy: "Goods once sold cannot be returned." },
     { id: "admin", name: "Admin" },
   );
   assert.equal(settings.thankYouMessage, "Asante sana");
+  assert.deepEqual(settings.departments, ["Management", "Sales", "Inventory"]);
   assert.equal(transaction.length, 2, "settings update and its audit event must be atomic");
+  assert.ok(transaction[0].Update, "branding must update only its own fields instead of replacing departments");
+
+  const departmentValues = await repository.updateDepartments(
+    tenantId,
+    ["Management", "Sales"],
+    ["Management", "Customer   Support"],
+    { id: "admin", name: "Admin" },
+    [{ userId: "cashier-1", from: "Sales", to: "Customer Support" }],
+  );
+  assert.deepEqual(departmentValues, ["Management", "Customer Support"]);
+  assert.equal(transaction.length, 3, "department and assigned staff renames must be atomic with their audit event");
+  assert.equal(transaction[0].Update.ConditionExpression, "departments = :current");
+  assert.equal(transaction[1].Update.ExpressionAttributeValues[":next"], "Customer Support");
+  await assert.rejects(
+    () => repository.updateDepartments(tenantId, ["Management"], [], { id: "admin", name: "Admin" }),
+    /at least one department/,
+  );
+
+  const category = {
+    partitionKey: "TENANT#tenant-1#CATEGORY#category-1",
+    sortKey: "PROFILE",
+    accessPartition: "TENANT#tenant-1#CATALOG#CATEGORY",
+    accessSort: "beverages#category-1",
+    entityType: "category",
+    tenantId,
+    id: "category-1",
+    code: "BEV",
+    name: "Beverages",
+    description: "Drinks",
+    status: "active",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return { Item: category };
+    if (command.constructor.name === "QueryCommand") return { Items: [product, secondProduct] };
+    if (command.constructor.name === "TransactWriteCommand") {
+      transaction = command.input.TransactItems;
+      return {};
+    }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  const updatedCategory = await repository.updateCategory(
+    tenantId,
+    "category-1",
+    { code: "DRINK", name: "Drinks", description: "Hot and cold drinks" },
+    { id: "admin", name: "Admin" },
+  );
+  assert.equal(updatedCategory.code, "DRINK");
+  assert.equal(transaction.length, 6, "category, lookup, products, and audit must update atomically");
+  assert.equal(transaction.filter(({ Update }) => Update?.UpdateExpression.includes("categoryName")).length, 2);
+  await assert.rejects(
+    () => repository.deleteCategory(tenantId, "category-1", { id: "admin", name: "Admin" }),
+    /Move this category's products/,
+  );
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return { Item: category };
+    if (command.constructor.name === "QueryCommand") return { Items: [] };
+    if (command.constructor.name === "TransactWriteCommand") {
+      transaction = command.input.TransactItems;
+      return {};
+    }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  await repository.deleteCategory(tenantId, "category-1", { id: "admin", name: "Admin" });
+  assert.equal(transaction.length, 3, "unused category, lookup, and audit must delete atomically");
 
   const profile = {
     partitionKey: "USER#cashier-1",
@@ -197,6 +264,18 @@ async function main() {
   });
   assert.equal(updatedProfile.department, "Front End");
   assert.equal(transaction[0].Put.Item.department, "Front End");
+
+  let batchCount = 0;
+  dynamoDB.send = async (command) => {
+    assert.equal(command.constructor.name, "BatchGetCommand");
+    batchCount += 1;
+    const keys = command.input.RequestItems["test-table"].Keys;
+    assert.ok(keys.length <= 100, "DynamoDB batch reads must not exceed 100 keys");
+    return { Responses: { "test-table": keys.map((key) => ({ ...key, userId: key.partitionKey.split("USER#")[1], employeeCode: "EMP", jobTitle: "Cashier", department: "Sales", phone: "" })) } };
+  };
+  const manyProfiles = await repository.getStaffProfiles(tenantId, Array.from({ length: 101 }, (_, index) => `staff-${index}`));
+  assert.equal(manyProfiles.size, 101);
+  assert.equal(batchCount, 2, "staff profile reads must be chunked across DynamoDB batch limits");
 
   const saleFor = (cashierId, amount) => ({
     id: `sale-${cashierId}`,

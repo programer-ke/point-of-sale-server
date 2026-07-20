@@ -104,8 +104,9 @@ M-Pesa codes also receive a conditional payment lookup record in the sale
 transaction, preventing the same code from being accepted twice.
 
 Admin-managed business name, address, phone, email, departments, thank-you
-text, and return policy are stored at `SETTINGS#BUSINESS/PROFILE`. Updating them writes an audit
-event. New sales snapshot those settings into the immutable receipt so later
+text, and return policy are stored at `SETTINGS#BUSINESS/PROFILE`. Branding and
+department mutations update only their owned fields so one form cannot overwrite
+changes from the other; every change writes an audit event. New sales snapshot those settings into the immutable receipt so later
 branding or policy changes do not rewrite historical customer records;
 pre-branding historical sales fall back to the current settings.
 Cashier receipt labels prefer the employee code from the DynamoDB staff profile
