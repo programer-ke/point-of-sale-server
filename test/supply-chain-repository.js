@@ -6,6 +6,8 @@ const tenantId = "tenant-1";
 const now = "2026-07-20T10:00:00.000Z";
 const store = { id: "store-1", code: "MAIN", name: "Main Store", address: "", status: "active", createdAt: now, updatedAt: now };
 const supplier = { id: "supplier-1", code: "SUP", name: "Supplier", contactName: "", phone: "", email: "", address: "", status: "active", createdAt: now, updatedAt: now };
+const product = { id: "product-1", name: "Tea", sku: "TEA", baseUnit: "item", tracksExpiry: true, status: "active" };
+const supplierProduct = { supplierId: supplier.id, productId: product.id, supplierSku: "TEA-CASE", purchaseUnit: "carton", unitsPerPurchaseUnit: 12, lastPurchasePrice: 960, preferred: true, updatedAt: now };
 
 async function main() {
   let transaction;
@@ -13,8 +15,10 @@ async function main() {
     if (command.constructor.name === "GetCommand") {
       const key = command.input.Key.partitionKey;
       if (key.includes("IDEMPOTENCY#")) return {};
+      if (key.includes("SUPPLIER_PRODUCT#")) return { Item: supplierProduct };
       if (key.includes("SUPPLIER#")) return { Item: supplier };
       if (key.includes("STORE#")) return { Item: store };
+      if (key.includes("PRODUCT#")) return { Item: product };
       return {};
     }
     if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
@@ -44,22 +48,23 @@ async function main() {
     if (command.constructor.name === "GetCommand") {
       if (command.input.Key.partitionKey.includes("IDEMPOTENCY#")) return {};
       if (command.input.Key.partitionKey.includes("PO#")) return { Item: issued };
+      if (command.input.Key.partitionKey.includes("PRODUCT#")) return { Item: product };
       return {};
     }
     if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
     throw new Error(`Unexpected ${command.constructor.name}`);
   };
-  await assert.rejects(() => supply.receivePurchaseOrder(tenantId, po.id, "DN-1", [{
-    purchaseOrderLineId: po.lines[0].id, deliveredBaseQuantity: 12, acceptedBaseQuantity: 12, damagedBaseQuantity: 0, rejectedBaseQuantity: 0,
-  }], { id: "admin", name: "Admin" }, "receive-1", async () => true), /requires an expiry date/);
-  await assert.rejects(() => supply.receivePurchaseOrder(tenantId, po.id, "DN-1", [{
+  await assert.rejects(() => supply.receivePurchaseOrder(tenantId, po.id, "DN-1", "INV-1", [{
+    purchaseOrderLineId: po.lines[0].id, deliveredBaseQuantity: 12, acceptedBaseQuantity: 12, damagedBaseQuantity: 0, rejectedBaseQuantity: 0, actualPricePerPurchaseUnit: 960,
+  }], { id: "admin", name: "Admin" }, "receive-1"), /requires an expiry date/);
+  await assert.rejects(() => supply.receivePurchaseOrder(tenantId, po.id, "DN-1", "INV-1", [{
     purchaseOrderLineId: po.lines[0].id, batchNumber: "OVER", expiryDate: "2027-01-01",
-    deliveredBaseQuantity: 25, acceptedBaseQuantity: 25, damagedBaseQuantity: 0, rejectedBaseQuantity: 0,
-  }], { id: "admin", name: "Admin" }, "receive-over", async () => true), /exceeds the outstanding/);
-  const receipt = await supply.receivePurchaseOrder(tenantId, po.id, "DN-1", [{
+    deliveredBaseQuantity: 25, acceptedBaseQuantity: 25, damagedBaseQuantity: 0, rejectedBaseQuantity: 0, actualPricePerPurchaseUnit: 960,
+  }], { id: "admin", name: "Admin" }, "receive-over"), /exceeds the outstanding/);
+  const receipt = await supply.receivePurchaseOrder(tenantId, po.id, "DN-1", "INV-1", [{
     purchaseOrderLineId: po.lines[0].id, batchNumber: "B-1", expiryDate: "2027-01-01",
-    deliveredBaseQuantity: 12, acceptedBaseQuantity: 10, damagedBaseQuantity: 1, rejectedBaseQuantity: 1,
-  }], { id: "admin", name: "Admin" }, "receive-2", async () => true);
+    deliveredBaseQuantity: 12, acceptedBaseQuantity: 10, damagedBaseQuantity: 1, rejectedBaseQuantity: 1, actualPricePerPurchaseUnit: 960,
+  }], { id: "admin", name: "Admin" }, "receive-2");
   assert.equal(receipt.lines[0].unitCost, 80);
   assert.equal(receipt.lines[0].acceptedBaseQuantity, 10);
   assert.equal(transaction.filter((item) => item.Put?.Item?.entityType === "inventory_lot").length, 1, "accepted stock creates exactly one lot");

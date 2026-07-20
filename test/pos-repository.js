@@ -18,10 +18,10 @@ const product = {
   barcode: "123456789",
   categoryId: "category-1",
   categoryName: "Beverages",
-  price: 125,
-  cost: 80,
-  stock: 5,
-  minStock: 1,
+  sellingPrice: 125,
+  buyingPrice: 80,
+  baseUnit: "item",
+  tracksExpiry: false,
   status: "active",
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
@@ -33,8 +33,8 @@ const secondProduct = {
   name: "Coffee",
   sku: "COFFEE-1",
   barcode: "987654321",
-  stock: 8,
 };
+const cashShift = { id: "shift-1", storeId: "store-1", storeName: "Main Store", cashierId: "cashier-1", cashierName: "Cashier Name", status: "open", openingFloat: 500, cashSalesTotal: 0, cashInTotal: 0, cashOutTotal: 0, openedAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" };
 const lot = {
   partitionKey: "TENANT#tenant-1#LOT#lot-1", sortKey: "PROFILE", accessPartition: "TENANT#tenant-1#INVENTORY#ACTIVE",
   accessSort: "store-1#9999-12-31#2026-01-01#lot-1", id: "lot-1", storeId: "store-1", productId: "product-1",
@@ -46,6 +46,9 @@ async function main() {
   let transaction;
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") {
+      if (command.input.Key.partitionKey.includes("IDEMPOTENCY#")) return {};
+      if (command.input.Key.partitionKey.includes("CASH_SHIFT_OPEN#")) return { Item: { shiftId: cashShift.id } };
+      if (command.input.Key.partitionKey.endsWith(`CASH_SHIFT#${cashShift.id}`)) return { Item: cashShift };
       if (command.input.Key.partitionKey.endsWith("SETTINGS#BUSINESS")) return {};
       return { Item: command.input.Key.partitionKey.endsWith("PRODUCT#product-2") ? secondProduct : product };
     }
@@ -53,7 +56,12 @@ async function main() {
       transaction = command.input.TransactItems;
       return {};
     }
-    if (command.constructor.name === "QueryCommand") return command.input.ExpressionAttributeValues[":pk"].includes("INVENTORY#ACTIVE") ? { Items: [lot] } : { Items: [product, secondProduct] };
+    if (command.constructor.name === "QueryCommand") {
+      if (command.input.ExpressionAttributeValues[":pk"].includes("INVENTORY#ACTIVE")) return { Items: [lot] };
+      const start = command.input.ExclusiveStartKey ? 1 : 0;
+      const items = [product, secondProduct].slice(start, start + command.input.Limit);
+      return { Items: items, LastEvaluatedKey: start + items.length < 2 ? { partitionKey: product.partitionKey, sortKey: product.sortKey, accessPartition: product.accessPartition, accessSort: product.accessSort } : undefined };
+    }
     throw new Error(`Unexpected command ${command.constructor.name}`);
   };
 
@@ -64,6 +72,7 @@ async function main() {
       storeId: "store-1",
       paymentMethod: "cash",
       amountTendered: 300,
+      requestId: "sale-1",
       items: [{ productId: "product-1", quantity: 2 }],
     },
     { id: "cashier-1", name: "Cashier Name", employeeCode: "EMP-001", storeName: "Main Store" },
@@ -76,7 +85,7 @@ async function main() {
   assert.equal(sale.cashierDisplayName, "Cashier (EMP-001)");
   assert.equal(sale.storeName, "Main Store", "sales must retain the selling store at checkout time");
   assert.equal(sale.receiptBranding.businessName, "Tomkondi Supermarket");
-  assert.equal(transaction.length, 3, "stock update, audit event, and receipt must be atomic");
+  assert.equal(transaction.length, 5, "lot update, movement, receipt, cash shift, and idempotency must be atomic");
   assert.match(transaction[0].Update.ConditionExpression, /remainingQuantity.*>=/);
   assert.equal(transaction[2].Put.Item.orderNumber, sale.orderNumber);
 
@@ -86,7 +95,7 @@ async function main() {
     { sellingPrice: 60 },
     { id: "admin", name: "Admin" },
   );
-  assert.equal(belowCostProduct.price, 60, "below-cost prices warn in the UI but remain valid");
+  assert.equal(belowCostProduct.sellingPrice, 60, "below-cost prices warn in the UI but remain valid");
   assert.match(transaction[1].Put.Item.reason, /Selling price changed from 125.00 to 60.00/);
   assert.equal(sale.items[0].price, 125, "product price updates must not rewrite completed sales");
 
@@ -100,22 +109,22 @@ async function main() {
   assert.deepEqual(searchPage.items.map(({ id }) => id), ["product-2"]);
 
   await assert.rejects(
-    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "cash", amountTendered: 1_000, items: [{ productId: "product-1", quantity: 6 }] }, { id: "cashier", name: "Cashier" }),
+    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "cash", amountTendered: 1_000, items: [{ productId: "product-1", quantity: 6 }], requestId: "sale-insufficient" }, { id: "cashier", name: "Cashier" }),
     /Insufficient sellable stock/,
   );
   await assert.rejects(
-    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "cash", amountTendered: 100, items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
+    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "cash", amountTendered: 100, items: [{ productId: "product-1", quantity: 1 }], requestId: "sale-tender" }, { id: "cashier-1", name: "Cashier" }),
     /at least the amount due/,
   );
   await assert.rejects(
-    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "mpesa", mpesaReference: "BAD", items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
+    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "mpesa", mpesaReference: "BAD", items: [{ productId: "product-1", quantity: 1 }], requestId: "sale-bad-mpesa" }, { id: "cashier", name: "Cashier" }),
     /valid M-Pesa transaction code/,
   );
 
   const promoted = { ...product, promotionPrice: 100 };
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") {
-      if (command.input.Key.partitionKey.includes("PAYMENT#") || command.input.Key.partitionKey.endsWith("SETTINGS#BUSINESS")) return {};
+      if (command.input.Key.partitionKey.includes("PAYMENT#") || command.input.Key.partitionKey.includes("IDEMPOTENCY#") || command.input.Key.partitionKey.endsWith("SETTINGS#BUSINESS")) return {};
       return { Item: promoted };
     }
     if (command.constructor.name === "TransactWriteCommand") {
@@ -127,7 +136,7 @@ async function main() {
   };
   const mpesaSale = await repository.completeSale(
     tenantId,
-    { storeId: "store-1", paymentMethod: "mpesa", mpesaReference: "QGH1234567", items: [{ productId: "product-1", quantity: 2 }] },
+    { storeId: "store-1", paymentMethod: "mpesa", mpesaReference: "QGH1234567", items: [{ productId: "product-1", quantity: 2 }], requestId: "sale-mpesa" },
     { id: "cashier", name: "Cashier Name" },
   );
   assert.equal(mpesaSale.subtotal, 250);
@@ -135,17 +144,39 @@ async function main() {
   assert.equal(mpesaSale.totalAmount, 200);
   assert.equal(mpesaSale.paymentReference, "QGH1234567");
   assert.equal(mpesaSale.createdByName, "Cashier Name");
-  assert.equal(transaction[transaction.length - 1].Put.Item.partitionKey, "TENANT#tenant-1#PAYMENT#MPESA#QGH1234567");
+  assert.equal(transaction[transaction.length - 2].Put.Item.partitionKey, "TENANT#tenant-1#PAYMENT#MPESA#QGH1234567");
 
   dynamoDB.send = async (command) => {
-    if (command.constructor.name === "GetCommand") return command.input.Key.partitionKey.includes("PAYMENT#") ? { Item: { saleId: "existing-sale" } } : { Item: promoted };
+    if (command.constructor.name === "GetCommand") {
+      if (command.input.Key.partitionKey.includes("IDEMPOTENCY#")) return {};
+      return command.input.Key.partitionKey.includes("PAYMENT#") ? { Item: { saleId: "existing-sale" } } : { Item: promoted };
+    }
     if (command.constructor.name === "QueryCommand") return { Items: [lot] };
     throw new Error(`Unexpected command ${command.constructor.name}`);
   };
   await assert.rejects(
-    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "mpesa", mpesaReference: "QGH1234567", items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
+    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "mpesa", mpesaReference: "QGH1234567", items: [{ productId: "product-1", quantity: 1 }], requestId: "sale-duplicate-mpesa" }, { id: "cashier", name: "Cashier" }),
     /already been used/,
   );
+
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return {};
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  const openedShift = await repository.openCashShift(tenantId, { id: "store-1", name: "Main Store" }, 500, { id: "cashier-1", name: "Cashier Name" }, "open-shift-1");
+  assert.equal(openedShift.status, "open");
+  assert.equal(transaction.length, 3, "shift, open-shift lookup, and idempotency must be atomic");
+  const storedShift = transaction[0].Put.Item;
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return command.input.Key.partitionKey.includes("IDEMPOTENCY#") ? {} : { Item: storedShift };
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  const closedShift = await repository.closeCashShift(tenantId, openedShift.id, 510, { id: "cashier-1", name: "Cashier Name" }, "close-shift-1");
+  assert.equal(closedShift.expectedCash, 500);
+  assert.equal(closedShift.variance, 10);
+  assert.equal(transaction.length, 3, "shift close, open lookup removal, and idempotency must be atomic");
 
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") return {};

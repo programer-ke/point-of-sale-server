@@ -9,7 +9,7 @@ import {
   type TransactWriteCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import { dynamoDB, TABLE_NAME } from "../config/db";
-import { allocateLots, listStores as listInventoryStores, lotDecrement, sellableLots, stockMovementPut, storeStock as getStoreStock } from "./supply-chain-repository";
+import { allocateLots, commitIdempotent, existingIdempotentResult, listStores as listInventoryStores, lotDecrement, sellableLots, stockMovementPut, storeStock as getStoreStock } from "./supply-chain-repository";
 
 export interface CategoryRecord {
   id: string;
@@ -33,14 +33,9 @@ export interface ProductRecord {
   buyingPrice: number;
   baseUnit: string;
   tracksExpiry: boolean;
-  /** Compatibility aliases retained while old sale snapshots are readable. */
-  price: number;
-  cost: number;
   promotionPrice?: number | null;
   promotionStartsAt?: string | null;
   promotionEndsAt?: string | null;
-  stock: number;
-  minStock: number;
   status: "active" | "inactive";
   createdAt: string;
   updatedAt: string;
@@ -74,6 +69,7 @@ export interface SaleRecord {
   amountTendered?: number | null;
   changeDue?: number | null;
   paymentReference?: string | null;
+  cashShiftId?: string | null;
   createdBy: string;
   createdByName: string;
   storeId?: string | null;
@@ -84,6 +80,9 @@ export interface SaleRecord {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface CashShiftRecord { id: string; shiftNumber: string; storeId: string; storeName: string; cashierId: string; cashierName: string; status: "open" | "closed"; openingFloat: number; cashSalesTotal: number; cashInTotal: number; cashOutTotal: number; expectedCash?: number | null; countedCash?: number | null; variance?: number | null; openedAt: string; closedAt?: string | null; updatedAt: string }
+export interface CashMovementRecord { id: string; shiftId: string; storeId: string; type: "cash_in" | "cash_out"; amount: number; reason: string; actorId: string; actorName: string; createdAt: string }
 
 export interface AuditRecord {
   id: string;
@@ -137,11 +136,10 @@ export interface StockReportProductRecord {
   productId: string;
   productName: string;
   sku: string;
-  stock: number;
-  minStock: number;
-  cost: number;
-  price: number;
-  costValue: number;
+  quantity: number;
+  reorderPoint: number;
+  actualCostValue: number;
+  sellingPrice: number;
   retailValue: number;
   status: string;
 }
@@ -185,6 +183,8 @@ const lookupKey = (tenantId: string, kind: "SKU" | "BARCODE" | "CATEGORY", value
 });
 const profileKey = (tenantId: string, userId: string) => ({ partitionKey: tenantKey(tenantId, `USER#${userId}`), sortKey: "PROFILE" });
 const mpesaPaymentKey = (tenantId: string, reference: string) => ({ partitionKey: tenantKey(tenantId, `PAYMENT#MPESA#${reference}`), sortKey: "SALE" });
+const cashShiftKey = (tenantId: string, id: string) => ({ partitionKey: tenantKey(tenantId, `CASH_SHIFT#${id}`), sortKey: "PROFILE" });
+const openCashShiftKey = (tenantId: string, storeId: string, cashierId: string) => ({ partitionKey: tenantKey(tenantId, `CASH_SHIFT_OPEN#${storeId}#${cashierId}`), sortKey: "PROFILE" });
 const businessSettingsKey = (tenantId: string) => ({ partitionKey: tenantKey(tenantId, "SETTINGS#BUSINESS"), sortKey: "PROFILE" });
 const defaultBusinessSettings: BusinessSettingsRecord = {
   businessName: "Tomkondi Supermarket",
@@ -249,18 +249,7 @@ const queryCollection = async <T>(tenantId: string, partition: string, options?:
 };
 
 export const listCategories = (tenantId: string) => queryCollection<CategoryRecord>(tenantId, "CATALOG#CATEGORY");
-const normalizeProductRecord = (product: ProductRecord): ProductRecord => ({
-  ...product,
-  sellingPrice: product.sellingPrice ?? product.price,
-  buyingPrice: product.buyingPrice ?? product.cost,
-  baseUnit: product.baseUnit ?? "unit",
-  tracksExpiry: product.tracksExpiry ?? false,
-  price: product.sellingPrice ?? product.price,
-  cost: product.buyingPrice ?? product.cost,
-  stock: 0,
-  minStock: 0,
-});
-export const listProducts = (tenantId: string) => queryCollection<ProductRecord>(tenantId, "CATALOG#PRODUCT").then((products) => products.map(normalizeProductRecord));
+export const listProducts = (tenantId: string) => queryCollection<ProductRecord>(tenantId, "CATALOG#PRODUCT");
 export const listSales = (tenantId: string, limit = 50, range?: { from?: string; to?: string }) => queryCollection<SaleRecord>(tenantId, "SALE", { limit, ...range });
 export const listSalesByStaff = async (tenantId: string, staffId: string, limit = 50, range?: { from?: string; to?: string }) => {
   const sales: SaleRecord[] = [];
@@ -297,21 +286,39 @@ export const getProductPage = async (tenantId: string, options: {
 }) => {
   const limit = Math.min(Math.max(options.limit ?? 20, 1), 50);
   const search = options.search?.trim().toLowerCase() ?? "";
-  const offsetValue = options.cursor
-    ? Number.parseInt(Buffer.from(options.cursor, "base64url").toString("utf8"), 10)
-    : 0;
-  const offset = Number.isSafeInteger(offsetValue) && offsetValue >= 0 ? offsetValue : 0;
-  const products = (await listProducts(tenantId)).filter((product) => {
-    if (options.activeOnly && product.status !== "active") return false;
-    if (!search) return true;
-    return [product.name, product.sku, product.barcode, product.categoryName]
-      .some((value) => value.toLowerCase().includes(search));
-  });
-  const end = Math.min(offset + limit, products.length);
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  if (options.cursor) {
+    try { exclusiveStartKey = JSON.parse(Buffer.from(options.cursor, "base64url").toString("utf8")) as Record<string, unknown>; }
+    catch { throw new Error("Invalid product cursor"); }
+  }
+  const products: ProductRecord[] = [];
+  let pagesRead = 0;
+  do {
+    const response = await dynamoDB.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      IndexName: "AccessIndex",
+      KeyConditionExpression: "accessPartition = :pk",
+      ExpressionAttributeValues: { ":pk": tenantKey(tenantId, "CATALOG#PRODUCT") },
+      ExclusiveStartKey: exclusiveStartKey,
+      Limit: limit - products.length,
+    }));
+    products.push(...(response.Items ?? []).map((item) => stripKeys<ProductRecord>(item)!).filter((product) => {
+      if (options.activeOnly && product.status !== "active") return false;
+      return !search || [product.name, product.sku, product.barcode, product.categoryName]
+        .some((value) => value.toLowerCase().includes(search));
+    }));
+    exclusiveStartKey = response.LastEvaluatedKey;
+    pagesRead += 1;
+  } while (products.length < limit && exclusiveStartKey && pagesRead < 20);
+  const nextCursor = exclusiveStartKey
+    ? Buffer.from(JSON.stringify(exclusiveStartKey)).toString("base64url")
+    : null;
   return {
-    items: products.slice(offset, end),
-    totalCount: products.length,
-    nextCursor: end < products.length ? Buffer.from(String(end)).toString("base64url") : null,
+    items: products,
+    // Exact totals require reading the whole catalog. This is the number known so
+    // far; nextCursor is authoritative for whether another page is available.
+    totalCount: products.length + (nextCursor ? 1 : 0),
+    nextCursor,
   };
 };
 
@@ -323,7 +330,7 @@ export const getCategory = async (tenantId: string, id: string) => {
 export const getProduct = async (tenantId: string, id: string) => {
   const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: productKey(tenantId, id) }));
   const product = stripKeys<ProductRecord>(response.Item);
-  return product ? normalizeProductRecord(product) : null;
+  return product;
 };
 
 export const getSale = async (tenantId: string, id: string) => {
@@ -388,13 +395,13 @@ export const updateBusinessSettings = async (
 
 export const effectiveProductPrice = (product: ProductRecord, at = new Date()) => {
   const promotionalPrice = product.promotionPrice;
-  if (typeof promotionalPrice !== "number" || promotionalPrice < 0 || promotionalPrice >= product.price) {
-    return product.price;
+  if (typeof promotionalPrice !== "number" || promotionalPrice < 0 || promotionalPrice >= product.sellingPrice) {
+    return product.sellingPrice;
   }
   const timestamp = at.getTime();
   const startsAt = product.promotionStartsAt ? Date.parse(product.promotionStartsAt) : Number.NEGATIVE_INFINITY;
   const endsAt = product.promotionEndsAt ? Date.parse(product.promotionEndsAt) : Number.POSITIVE_INFINITY;
-  return timestamp >= startsAt && timestamp <= endsAt ? promotionalPrice : product.price;
+  return timestamp >= startsAt && timestamp <= endsAt ? promotionalPrice : product.sellingPrice;
 };
 
 export const findProduct = async (tenantId: string, term: string) => {
@@ -499,7 +506,7 @@ export const createProduct = async (
   if (!category || category.status !== "active") throw new Error("Select an active category");
   const id = randomUUID();
   const now = new Date().toISOString();
-  const product: ProductRecord = { id, ...input, name: input.name.trim(), description: input.description.trim(), baseUnit: input.baseUnit.trim(), sku: normalizeLookup(input.sku), barcode: normalizeLookup(input.barcode), categoryName: category.name, price: input.sellingPrice, cost: input.buyingPrice, stock: 0, minStock: 0, status: "active", createdAt: now, updatedAt: now };
+  const product: ProductRecord = { id, ...input, name: input.name.trim(), description: input.description.trim(), baseUnit: input.baseUnit.trim(), sku: normalizeLookup(input.sku), barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active", createdAt: now, updatedAt: now };
   const item = { ...productKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#PRODUCT"), accessSort: `${product.name.toLowerCase()}#${id}`, entityType: "product", tenantId, ...product };
   const lookupItems = [
     { ...lookupKey(tenantId, "SKU", product.sku), entityType: "product_lookup", tenantId, productId: id },
@@ -525,9 +532,9 @@ export const updateProduct = async (
   const category = await getCategory(tenantId, categoryId);
   if (!category) throw new Error("Category not found");
   const now = new Date().toISOString();
-  const sellingPrice = updates.sellingPrice ?? current.sellingPrice ?? current.price;
-  const buyingPrice = updates.buyingPrice ?? current.buyingPrice ?? current.cost;
-  const next: ProductRecord = { ...current, ...updates, sellingPrice, buyingPrice, price: sellingPrice, cost: buyingPrice, baseUnit: updates.baseUnit ?? current.baseUnit ?? "unit", tracksExpiry: updates.tracksExpiry ?? current.tracksExpiry ?? false, sku: normalizeLookup(updates.sku ?? current.sku), barcode: normalizeLookup(updates.barcode ?? current.barcode), categoryId, categoryName: category.name, stock: 0, minStock: 0, updatedAt: now };
+  const sellingPrice = updates.sellingPrice ?? current.sellingPrice;
+  const buyingPrice = updates.buyingPrice ?? current.buyingPrice;
+  const next: ProductRecord = { ...current, ...updates, sellingPrice, buyingPrice, baseUnit: updates.baseUnit ?? current.baseUnit, tracksExpiry: updates.tracksExpiry ?? current.tracksExpiry, sku: normalizeLookup(updates.sku ?? current.sku), barcode: normalizeLookup(updates.barcode ?? current.barcode), categoryId, categoryName: category.name, updatedAt: now };
   const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
   const aliases = [
     { kind: "SKU" as const, oldValue: current.sku, newValue: next.sku },
@@ -541,12 +548,12 @@ export const updateProduct = async (
   transaction.push(
     { Put: { TableName: TABLE_NAME, Item: { ...productKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#PRODUCT"), accessSort: `${next.name.toLowerCase()}#${id}`, entityType: "product", tenantId, ...next }, ConditionExpression: "attribute_exists(partitionKey)" } },
     auditPut(tenantId, {
-      action: (current.sellingPrice ?? current.price) !== next.sellingPrice ? "product.price.updated" : "product.updated",
+      action: current.sellingPrice !== next.sellingPrice ? "product.price.updated" : "product.updated",
       entityType: "product",
       entityId: id,
       productName: next.name,
-      reason: (current.sellingPrice ?? current.price) !== next.sellingPrice
-        ? `Selling price changed from ${(current.sellingPrice ?? current.price).toFixed(2)} to ${next.sellingPrice.toFixed(2)}`
+      reason: current.sellingPrice !== next.sellingPrice
+        ? `Selling price changed from ${current.sellingPrice.toFixed(2)} to ${next.sellingPrice.toFixed(2)}`
         : "Product details updated",
       actorId: actor.id,
       actorName: actor.name,
@@ -555,6 +562,23 @@ export const updateProduct = async (
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: transaction }));
   return next;
 };
+
+export const getCashShift = async (tenantId: string, id: string) => stripKeys<CashShiftRecord>((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: cashShiftKey(tenantId, id) }))).Item);
+export const getOpenCashShift = async (tenantId: string, storeId: string, cashierId: string) => {
+  const lookup = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: openCashShiftKey(tenantId, storeId, cashierId) }));
+  return lookup.Item?.shiftId ? getCashShift(tenantId, String(lookup.Item.shiftId)) : null;
+};
+export const listCashShifts = (tenantId: string, limit = 100, range?: { from?: string; to?: string; storeId?: string }) => queryCollection<CashShiftRecord>(tenantId, "CASH_SHIFT", { limit, from: range?.from, to: range?.to }).then((shifts) => range?.storeId ? shifts.filter((shift) => shift.storeId === range.storeId) : shifts);
+export const openCashShift = async (tenantId: string, store: { id: string; name: string }, openingFloat: number, actor: { id: string; name: string }, requestId: string) => {
+  if (!Number.isFinite(openingFloat) || openingFloat < 0) throw new Error("Opening float must be zero or greater"); const payload = { storeId: store.id, openingFloat }; const previous = await existingIdempotentResult<CashShiftRecord>(tenantId, "open_cash_shift", requestId, payload); if (previous) return previous;
+  if (await getOpenCashShift(tenantId, store.id, actor.id)) throw new Error("This cashier already has an open shift in this store"); const now = new Date().toISOString(); const id = randomUUID(); const shift: CashShiftRecord = { id, shiftNumber: `SHIFT-${businessDate().replaceAll("-", "")}-${id.slice(0, 8).toUpperCase()}`, storeId: store.id, storeName: store.name, cashierId: actor.id, cashierName: actor.name, status: "open", openingFloat: roundMoney(openingFloat), cashSalesTotal: 0, cashInTotal: 0, cashOutTotal: 0, openedAt: now, updatedAt: now };
+  return commitIdempotent(tenantId, "open_cash_shift", requestId, payload, shift, [{ Put: { TableName: TABLE_NAME, Item: { ...cashShiftKey(tenantId, id), accessPartition: tenantKey(tenantId, "CASH_SHIFT"), accessSort: `${now}#${id}`, entityType: "cash_shift", tenantId, ...shift }, ConditionExpression: "attribute_not_exists(partitionKey)" } }, { Put: { TableName: TABLE_NAME, Item: { ...openCashShiftKey(tenantId, store.id, actor.id), entityType: "open_cash_shift", tenantId, shiftId: id }, ConditionExpression: "attribute_not_exists(partitionKey)" } }]);
+};
+export const recordCashMovement = async (tenantId: string, shiftId: string, type: "cash_in" | "cash_out", amount: number, reason: string, actor: { id: string; name: string }, requestId: string) => {
+  const payload = { shiftId, type, amount, reason }; const previous = await existingIdempotentResult<CashMovementRecord>(tenantId, "cash_movement", requestId, payload); if (previous) return previous; if (!Number.isFinite(amount) || amount <= 0) throw new Error("Cash movement amount must be greater than zero"); if (reason.trim().length < 3) throw new Error("A cash movement reason is required"); const shift = await getCashShift(tenantId, shiftId); if (!shift || shift.status !== "open") throw new Error("Cash shift is not open"); const now = new Date().toISOString(); const id = randomUUID(); const movement: CashMovementRecord = { id, shiftId, storeId: shift.storeId, type, amount: roundMoney(amount), reason: reason.trim(), actorId: actor.id, actorName: actor.name, createdAt: now }; const field = type === "cash_in" ? "cashInTotal" : "cashOutTotal";
+  return commitIdempotent(tenantId, "cash_movement", requestId, payload, movement, [{ Update: { TableName: TABLE_NAME, Key: cashShiftKey(tenantId, shiftId), UpdateExpression: `SET ${field} = ${field} + :amount, updatedAt = :now`, ConditionExpression: "#status = :open", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":amount": movement.amount, ":now": now, ":open": "open" } } }, { Put: { TableName: TABLE_NAME, Item: { partitionKey: tenantKey(tenantId, `CASH_MOVEMENT#${id}`), sortKey: "EVENT", accessPartition: tenantKey(tenantId, "CASH_MOVEMENT"), accessSort: `${now}#${id}`, entityType: "cash_movement", tenantId, ...movement }, ConditionExpression: "attribute_not_exists(partitionKey)" } }]);
+};
+export const closeCashShift = async (tenantId: string, id: string, countedCash: number, actor: { id: string; name: string }, requestId: string) => { const payload = { id, countedCash }; const previous = await existingIdempotentResult<CashShiftRecord>(tenantId, "close_cash_shift", requestId, payload); if (previous) return previous; if (!Number.isFinite(countedCash) || countedCash < 0) throw new Error("Counted cash must be zero or greater"); const shift = await getCashShift(tenantId, id); if (!shift || shift.status !== "open") throw new Error("Cash shift is not open"); if (shift.cashierId !== actor.id) throw new Error("Only the shift cashier can close this shift"); const now = new Date().toISOString(); const expectedCash = roundMoney(shift.openingFloat + shift.cashSalesTotal + shift.cashInTotal - shift.cashOutTotal); const closed: CashShiftRecord = { ...shift, status: "closed", expectedCash, countedCash: roundMoney(countedCash), variance: roundMoney(countedCash - expectedCash), closedAt: now, updatedAt: now }; return commitIdempotent(tenantId, "close_cash_shift", requestId, payload, closed, [{ Put: { TableName: TABLE_NAME, Item: { ...cashShiftKey(tenantId, id), accessPartition: tenantKey(tenantId, "CASH_SHIFT"), accessSort: `${shift.openedAt}#${id}`, entityType: "cash_shift", tenantId, ...closed }, ConditionExpression: "#status = :open AND updatedAt = :expected", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":open": "open", ":expected": shift.updatedAt } } }, { Delete: { TableName: TABLE_NAME, Key: openCashShiftKey(tenantId, shift.storeId, shift.cashierId), ConditionExpression: "shiftId = :id", ExpressionAttributeValues: { ":id": id } } }]); };
 
 export const completeSale = async (
   tenantId: string,
@@ -565,9 +589,11 @@ export const completeSale = async (
     amountTendered?: number | null;
     mpesaReference?: string | null;
     items: Array<{ productId: string; quantity: number }>;
+    requestId: string;
   },
   actor: { id: string; name: string; employeeCode?: string; storeName?: string },
 ) => {
+  const previous = await existingIdempotentResult<SaleRecord>(tenantId, "complete_sale", input.requestId, input); if (previous) return previous;
   const grouped = new Map<string, number>();
   for (const item of input.items) grouped.set(item.productId, (grouped.get(item.productId) ?? 0) + item.quantity);
   if (grouped.size === 0) throw new Error("Add at least one product to the sale");
@@ -577,17 +603,18 @@ export const completeSale = async (
   if (products.some((product) => !product || product.status !== "active")) throw new Error("One or more products are unavailable");
   const now = new Date().toISOString();
   const id = randomUUID();
-  const allocations = await allocateLots(tenantId, input.storeId, [...grouped].map(([productId, quantity]) => ({ productId, quantity })));
+  const [allocations, cashShift] = await Promise.all([allocateLots(tenantId, input.storeId, [...grouped].map(([productId, quantity]) => ({ productId, quantity }))), input.paymentMethod === "cash" ? getOpenCashShift(tenantId, input.storeId, actor.id) : Promise.resolve(null)]);
+  if (input.paymentMethod === "cash" && !cashShift) throw new Error("Open a cash shift before accepting cash sales");
   const saleItems: SaleItemRecord[] = products.map((product) => {
     const value = product!;
     const quantity = grouped.get(value.id)!;
     const price = effectiveProductPrice(value, new Date(now));
     const cost = roundMoney((allocations.get(value.id) ?? []).reduce((sum, allocation) => sum + allocation.quantity * allocation.lot.unitCost, 0) / quantity);
-    return { productId: value.id, productName: value.name, sku: value.sku, barcode: value.barcode, quantity, price, regularPrice: value.sellingPrice ?? value.price, promotionApplied: price < (value.sellingPrice ?? value.price), cost, total: roundMoney(price * quantity) };
+    return { productId: value.id, productName: value.name, sku: value.sku, barcode: value.barcode, quantity, price, regularPrice: value.sellingPrice, promotionApplied: price < value.sellingPrice, cost, total: roundMoney(price * quantity) };
   });
   const subtotal = roundMoney(products.reduce((sum, product) => {
     const value = product!;
-    return sum + (value.sellingPrice ?? value.price) * grouped.get(value.id)!;
+    return sum + value.sellingPrice * grouped.get(value.id)!;
   }, 0));
   const totalAmount = roundMoney(saleItems.reduce((sum, item) => sum + item.total, 0));
   const discount = roundMoney(subtotal - totalAmount);
@@ -624,6 +651,7 @@ export const completeSale = async (
     amountTendered,
     changeDue,
     paymentReference,
+    cashShiftId: cashShift?.id ?? null,
     createdBy: actor.id,
     createdByName: actor.name,
     storeId: input.storeId,
@@ -642,9 +670,9 @@ export const completeSale = async (
   if (paymentReference) {
     transaction.push({ Put: { TableName: TABLE_NAME, Item: { ...mpesaPaymentKey(tenantId, paymentReference), entityType: "payment_lookup", tenantId, saleId: id, orderNumber: sale.orderNumber, createdAt: now }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
   }
-  if (transaction.length > 100) throw new Error("Sale uses too many inventory lots to complete atomically; reduce the basket size");
-  await dynamoDB.send(new TransactWriteCommand({ TransactItems: transaction }));
-  return sale;
+  if (cashShift) transaction.push({ Update: { TableName: TABLE_NAME, Key: cashShiftKey(tenantId, cashShift.id), UpdateExpression: "SET cashSalesTotal = cashSalesTotal + :amount, updatedAt = :now", ConditionExpression: "#status = :open", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":amount": totalAmount, ":now": now, ":open": "open" } } });
+  if (transaction.length + 1 > 100) throw new Error("Sale uses too many inventory lots to complete atomically; reduce the basket size");
+  return commitIdempotent(tenantId, "complete_sale", input.requestId, input, sale, transaction);
 };
 
 export const dashboardSummary = async (tenantId: string, requestedDays = 1, staffId?: string, includeDetails = true, storeId?: string) => {
@@ -659,7 +687,7 @@ export const dashboardSummary = async (tenantId: string, requestedDays = 1, staf
     storeId ? getStoreStock(tenantId, storeId) : Promise.resolve([]),
   ]);
   const byProduct = new Map(stock.map((item) => [item.productId, item]));
-  const products = catalogProducts.map((product) => ({ ...product, stock: byProduct.get(product.id)?.quantity ?? 0, minStock: byProduct.get(product.id)?.reorderPoint ?? 0 }));
+  const products = catalogProducts.map((product) => ({ ...product, storeStock: byProduct.get(product.id) }));
   const sales = staffId ? allSales.filter((sale) => sale.createdBy === staffId) : allSales;
   const revenue = roundMoney(sales.reduce((sum, sale) => sum + sale.totalAmount, 0));
   const unitsSold = sales.flatMap((sale) => sale.items).reduce((sum, item) => sum + item.quantity, 0);
@@ -677,8 +705,8 @@ export const dashboardSummary = async (tenantId: string, requestedDays = 1, staf
     byCashier.set(sale.createdBy, current);
   }
   const lowStock = products
-    .filter((product) => product.status === "active" && product.stock <= product.minStock)
-    .sort((a, b) => (a.stock - a.minStock) - (b.stock - b.minStock));
+    .filter((product) => product.status === "active" && product.storeStock && product.storeStock.quantity <= product.storeStock.reorderPoint)
+    .sort((a, b) => (a.storeStock!.quantity - a.storeStock!.reorderPoint) - (b.storeStock!.quantity - b.storeStock!.reorderPoint));
   return {
     periodDays: days,
     periodStart: start,
@@ -698,24 +726,31 @@ export const dashboardSummary = async (tenantId: string, requestedDays = 1, staf
   };
 };
 
-export const businessReport = async (tenantId: string, range: { from: string; to: string }): Promise<BusinessReportRecord> => {
+export const businessReport = async (tenantId: string, range: { from: string; to: string; storeId?: string }): Promise<BusinessReportRecord> => {
   const [catalogProducts, sales, audits, stores] = await Promise.all([
     listProducts(tenantId),
     queryCollection<SaleRecord>(tenantId, "SALE", range),
     queryCollection<AuditRecord>(tenantId, "AUDIT", range),
     listInventoryStores(tenantId),
   ]);
-  const lots = (await Promise.all(stores.map((store) => sellableLots(tenantId, store.id)))).flat();
+  const selectedStores = range.storeId ? stores.filter((store) => store.id === range.storeId) : stores;
+  const [lots, storePositions] = await Promise.all([
+    Promise.all(selectedStores.map((store) => sellableLots(tenantId, store.id))).then((values) => values.flat()),
+    Promise.all(selectedStores.map((store) => getStoreStock(tenantId, store.id))).then((values) => values.flat()),
+  ]);
+  const filteredSales = range.storeId ? sales.filter((sale) => sale.storeId === range.storeId) : sales;
   const quantityByProduct = new Map<string, number>();
   const valueByProduct = new Map<string, number>();
   for (const lot of lots) { quantityByProduct.set(lot.productId, (quantityByProduct.get(lot.productId) ?? 0) + lot.remainingQuantity); valueByProduct.set(lot.productId, roundMoney((valueByProduct.get(lot.productId) ?? 0) + lot.remainingQuantity * lot.unitCost)); }
-  const products = catalogProducts.map((product) => ({ ...product, stock: quantityByProduct.get(product.id) ?? 0 }));
+  const reorderByProduct = new Map<string, number>();
+  for (const position of storePositions) reorderByProduct.set(position.productId, (reorderByProduct.get(position.productId) ?? 0) + position.reorderPoint);
+  const products = catalogProducts.map((product) => ({ ...product, quantity: quantityByProduct.get(product.id) ?? 0, reorderPoint: reorderByProduct.get(product.id) }));
   const productTotals = new Map<string, ReportProductRecord>();
   const promotionTotals = new Map<string, ReportProductRecord>();
   let promotionUnitsSold = 0;
   let promotionRevenue = 0;
   let promotionSavings = 0;
-  for (const sale of sales) {
+  for (const sale of filteredSales) {
     for (const item of sale.items) {
       const current = productTotals.get(item.productId) ?? { productId: item.productId, productName: item.productName, units: 0, revenue: 0, grossProfit: 0, savings: 0 };
       current.units += item.quantity;
@@ -738,26 +773,26 @@ export const businessReport = async (tenantId: string, range: { from: string; to
   }
   const stockAdjustments = audits.filter(({ action }) => action === "stock.adjusted");
   const priceChanges = audits.filter(({ action }) => action === "product.price.updated");
-  const revenue = roundMoney(sales.reduce((sum, sale) => sum + sale.totalAmount, 0));
-  const grossProfit = roundMoney(sales.flatMap(({ items }) => items).reduce((sum, item) => sum + (item.price - item.cost) * item.quantity, 0));
+  const revenue = roundMoney(filteredSales.reduce((sum, sale) => sum + sale.totalAmount, 0));
+  const grossProfit = roundMoney(filteredSales.flatMap(({ items }) => items).reduce((sum, item) => sum + (item.price - item.cost) * item.quantity, 0));
   const stockCostValue = roundMoney([...valueByProduct.values()].reduce((sum, value) => sum + value, 0));
-  const stockRetailValue = roundMoney(products.reduce((sum, product) => sum + product.stock * product.price, 0));
+  const stockRetailValue = roundMoney(products.reduce((sum, product) => sum + product.quantity * product.sellingPrice, 0));
   return {
     from: range.from,
     to: range.to,
-    salesCount: sales.length,
+    salesCount: filteredSales.length,
     revenue,
     grossProfit,
-    unitsSold: sales.flatMap(({ items }) => items).reduce((sum, item) => sum + item.quantity, 0),
+    unitsSold: filteredSales.flatMap(({ items }) => items).reduce((sum, item) => sum + item.quantity, 0),
     promotionUnitsSold,
     promotionRevenue,
     promotionSavings,
-    stockUnits: products.reduce((sum, product) => sum + product.stock, 0),
+    stockUnits: products.reduce((sum, product) => sum + product.quantity, 0),
     stockCostValue,
     stockRetailValue,
     potentialMargin: roundMoney(stockRetailValue - stockCostValue),
-    lowStockCount: products.filter((product) => product.status === "active" && product.stock <= product.minStock).length,
-    outOfStockCount: products.filter((product) => product.status === "active" && product.stock === 0).length,
+    lowStockCount: products.filter((product) => product.status === "active" && product.reorderPoint !== undefined && product.quantity <= product.reorderPoint).length,
+    outOfStockCount: products.filter((product) => product.status === "active" && product.quantity === 0).length,
     netStockAdjustment: stockAdjustments.reduce((sum, audit) => sum + (audit.quantityDelta ?? 0), 0),
     stockAdjustmentCount: stockAdjustments.length,
     priceChangeCount: priceChanges.length,
@@ -767,14 +802,13 @@ export const businessReport = async (tenantId: string, range: { from: string; to
       productId: product.id,
       productName: product.name,
       sku: product.sku,
-      stock: product.stock,
-      minStock: product.minStock,
-      cost: product.cost,
-      price: product.price,
-      costValue: valueByProduct.get(product.id) ?? 0,
-      retailValue: roundMoney(product.stock * product.price),
+      quantity: product.quantity,
+      reorderPoint: product.reorderPoint ?? 0,
+      actualCostValue: valueByProduct.get(product.id) ?? 0,
+      sellingPrice: product.sellingPrice,
+      retailValue: roundMoney(product.quantity * product.sellingPrice),
       status: product.status,
-    })).sort((a, b) => Number(a.stock > a.minStock) - Number(b.stock > b.minStock) || a.productName.localeCompare(b.productName)),
+    })).sort((a, b) => Number(a.quantity > a.reorderPoint) - Number(b.quantity > b.reorderPoint) || a.productName.localeCompare(b.productName)),
     stockAdjustments: stockAdjustments.slice(0, 100),
     priceChanges: priceChanges.slice(0, 100),
   };
