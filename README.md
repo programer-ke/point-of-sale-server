@@ -14,12 +14,18 @@ The deployment zip contains only the bundle and its external source map.
 
 ## Local development
 
-Local commands are unchanged:
+Configure an AWS CLI profile or standard AWS environment credentials, then
+pull the server configuration from Parameter Store and start the server:
 
 ```sh
 yarn install --frozen-lockfile
+PROJECT_ENV=prod yarn params
 yarn dev
 ```
+
+`yarn params` writes `.env`, which is ignored by Git, and replaces it on each
+run so deployed parameter changes can be pulled locally. It fails if any
+required parameter is missing. Set `PARAMS_OUTPUT_FILE` to write elsewhere.
 
 The local entry point is `src/index.ts`. `dotenv` loads `.env`, and the AWS SDK
 uses its standard credential provider chain. This supports environment
