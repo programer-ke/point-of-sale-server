@@ -9,6 +9,7 @@ import {
   type TransactWriteCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import { dynamoDB, TABLE_NAME } from "../config/db";
+import { allocateLots, listStores as listInventoryStores, lotDecrement, sellableLots, stockMovementPut, storeStock as getStoreStock } from "./supply-chain-repository";
 
 export interface CategoryRecord {
   id: string;
@@ -28,6 +29,11 @@ export interface ProductRecord {
   barcode: string;
   categoryId: string;
   categoryName: string;
+  sellingPrice: number;
+  buyingPrice: number;
+  baseUnit: string;
+  tracksExpiry: boolean;
+  /** Compatibility aliases retained while old sale snapshots are readable. */
   price: number;
   cost: number;
   promotionPrice?: number | null;
@@ -70,6 +76,8 @@ export interface SaleRecord {
   paymentReference?: string | null;
   createdBy: string;
   createdByName: string;
+  storeId?: string | null;
+  storeName?: string | null;
   sellerDepartment?: string | null;
   cashierDisplayName?: string;
   receiptBranding?: BusinessSettingsRecord;
@@ -97,7 +105,8 @@ export interface StaffProfileRecord {
   userId: string;
   employeeCode: string;
   jobTitle: string;
-  department: string;
+  storeId?: string;
+  storeName?: string;
   phone: string;
   createdAt: string;
   updatedAt: string;
@@ -108,13 +117,12 @@ export interface BusinessSettingsRecord {
   address: string;
   phone: string;
   email: string;
-  departments: string[];
   thankYouMessage: string;
   returnPolicy: string;
   updatedAt: string;
 }
 
-export type BusinessBrandingInput = Omit<BusinessSettingsRecord, "departments" | "updatedAt">;
+export type BusinessBrandingInput = Omit<BusinessSettingsRecord, "updatedAt">;
 
 export interface ReportProductRecord {
   productId: string;
@@ -183,7 +191,6 @@ const defaultBusinessSettings: BusinessSettingsRecord = {
   address: "Nairobi, Kenya",
   phone: "",
   email: "",
-  departments: ["Management", "Sales", "Inventory"],
   thankYouMessage: "Thank you for shopping with us.",
   returnPolicy: "Goods once sold cannot be returned.",
   updatedAt: new Date(0).toISOString(),
@@ -242,7 +249,18 @@ const queryCollection = async <T>(tenantId: string, partition: string, options?:
 };
 
 export const listCategories = (tenantId: string) => queryCollection<CategoryRecord>(tenantId, "CATALOG#CATEGORY");
-export const listProducts = (tenantId: string) => queryCollection<ProductRecord>(tenantId, "CATALOG#PRODUCT");
+const normalizeProductRecord = (product: ProductRecord): ProductRecord => ({
+  ...product,
+  sellingPrice: product.sellingPrice ?? product.price,
+  buyingPrice: product.buyingPrice ?? product.cost,
+  baseUnit: product.baseUnit ?? "unit",
+  tracksExpiry: product.tracksExpiry ?? false,
+  price: product.sellingPrice ?? product.price,
+  cost: product.buyingPrice ?? product.cost,
+  stock: 0,
+  minStock: 0,
+});
+export const listProducts = (tenantId: string) => queryCollection<ProductRecord>(tenantId, "CATALOG#PRODUCT").then((products) => products.map(normalizeProductRecord));
 export const listSales = (tenantId: string, limit = 50, range?: { from?: string; to?: string }) => queryCollection<SaleRecord>(tenantId, "SALE", { limit, ...range });
 export const listSalesByStaff = async (tenantId: string, staffId: string, limit = 50, range?: { from?: string; to?: string }) => {
   const sales: SaleRecord[] = [];
@@ -304,7 +322,8 @@ export const getCategory = async (tenantId: string, id: string) => {
 
 export const getProduct = async (tenantId: string, id: string) => {
   const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: productKey(tenantId, id) }));
-  return stripKeys<ProductRecord>(response.Item);
+  const product = stripKeys<ProductRecord>(response.Item);
+  return product ? normalizeProductRecord(product) : null;
 };
 
 export const getSale = async (tenantId: string, id: string) => {
@@ -318,22 +337,7 @@ export const getSale = async (tenantId: string, id: string) => {
 export const getBusinessSettings = async (tenantId: string) => {
   const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: businessSettingsKey(tenantId) }));
   const settings = stripKeys<BusinessSettingsRecord>(response.Item);
-  return settings ? { ...settings, departments: settings.departments ?? defaultBusinessSettings.departments } : defaultBusinessSettings;
-};
-
-const normalizeDepartment = (department: string) => department.trim().replace(/\s+/g, " ");
-
-const normalizeDepartments = (departments: string[]) => {
-  const normalized = departments
-    .map(normalizeDepartment)
-    .filter(Boolean)
-    .filter((department, index, values) =>
-      values.findIndex((value) => value.toLowerCase() === department.toLowerCase()) === index,
-    );
-  if (normalized.length === 0) throw new Error("Add at least one department");
-  if (normalized.length > 30) throw new Error("A business can have at most 30 departments");
-  if (normalized.some((department) => department.length > 80)) throw new Error("Department names must be 80 characters or fewer");
-  return normalized;
+  return settings ?? defaultBusinessSettings;
 };
 
 export const ensureBusinessSettings = async (tenantId: string, businessName: string, email: string) => {
@@ -359,7 +363,6 @@ export const updateBusinessSettings = async (
   input: BusinessBrandingInput,
   actor: { id: string; name: string },
 ) => {
-  const current = await getBusinessSettings(tenantId);
   const now = new Date().toISOString();
   const branding = {
     businessName: input.businessName.trim(),
@@ -380,41 +383,7 @@ export const updateBusinessSettings = async (
     } },
     auditPut(tenantId, { action: "settings.branding.updated", entityType: "business_settings", entityId: "business", reason: "Receipt branding updated", actorId: actor.id, actorName: actor.name }, now),
   ] }));
-  return { ...branding, departments: current.departments };
-};
-
-export const updateDepartments = async (
-  tenantId: string,
-  currentDepartments: string[],
-  nextDepartments: string[],
-  actor: { id: string; name: string },
-  renamedProfiles: Array<{ userId: string; from: string; to: string }> = [],
-) => {
-  const current = normalizeDepartments(currentDepartments);
-  const next = normalizeDepartments(nextDepartments);
-  const now = new Date().toISOString();
-  const transactionItems: NonNullable<TransactWriteCommandInput["TransactItems"]> = [
-    { Update: {
-      TableName: TABLE_NAME,
-      Key: businessSettingsKey(tenantId),
-      UpdateExpression: "SET departments = :next, updatedAt = :updatedAt",
-      ConditionExpression: "departments = :current",
-      ExpressionAttributeValues: { ":current": current, ":next": next, ":updatedAt": now },
-    } },
-    ...renamedProfiles.map(({ userId, from, to }) => ({ Update: {
-      TableName: TABLE_NAME,
-      Key: profileKey(tenantId, userId),
-      UpdateExpression: "SET department = :next, updatedAt = :updatedAt",
-      ConditionExpression: "department = :current",
-      ExpressionAttributeValues: { ":current": from, ":next": to, ":updatedAt": now },
-    } })),
-    auditPut(tenantId, { action: "settings.departments.updated", entityType: "business_settings", entityId: "departments", reason: "Departments updated", actorId: actor.id, actorName: actor.name }, now),
-  ];
-  if (transactionItems.length > 100) {
-    throw new Error("Too many staff profiles use this department to rename it safely");
-  }
-  await dynamoDB.send(new TransactWriteCommand({ TransactItems: transactionItems }));
-  return next;
+  return branding;
 };
 
 export const effectiveProductPrice = (product: ProductRecord, at = new Date()) => {
@@ -523,15 +492,14 @@ export const deleteCategory = async (
 
 export const createProduct = async (
   tenantId: string,
-  input: Omit<ProductRecord, "id" | "categoryName" | "stock" | "status" | "createdAt" | "updatedAt"> & { initialStock: number },
+  input: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "baseUnit" | "tracksExpiry"> & { promotionPrice?: number | null; promotionStartsAt?: string | null; promotionEndsAt?: string | null },
   actor: { id: string; name: string },
 ) => {
   const category = await getCategory(tenantId, input.categoryId);
   if (!category || category.status !== "active") throw new Error("Select an active category");
   const id = randomUUID();
   const now = new Date().toISOString();
-  const { initialStock, ...values } = input;
-  const product: ProductRecord = { id, ...values, sku: normalizeLookup(input.sku), barcode: normalizeLookup(input.barcode), categoryName: category.name, stock: initialStock, status: "active", createdAt: now, updatedAt: now };
+  const product: ProductRecord = { id, ...input, name: input.name.trim(), description: input.description.trim(), baseUnit: input.baseUnit.trim(), sku: normalizeLookup(input.sku), barcode: normalizeLookup(input.barcode), categoryName: category.name, price: input.sellingPrice, cost: input.buyingPrice, stock: 0, minStock: 0, status: "active", createdAt: now, updatedAt: now };
   const item = { ...productKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#PRODUCT"), accessSort: `${product.name.toLowerCase()}#${id}`, entityType: "product", tenantId, ...product };
   const lookupItems = [
     { ...lookupKey(tenantId, "SKU", product.sku), entityType: "product_lookup", tenantId, productId: id },
@@ -540,7 +508,7 @@ export const createProduct = async (
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
     { Put: { TableName: TABLE_NAME, Item: item, ConditionExpression: "attribute_not_exists(partitionKey)" } },
     ...lookupItems.map((lookup) => ({ Put: { TableName: TABLE_NAME, Item: lookup, ConditionExpression: "attribute_not_exists(partitionKey)" } })),
-    auditPut(tenantId, { action: "product.created", entityType: "product", entityId: id, productName: product.name, quantityBefore: 0, quantityAfter: initialStock, quantityDelta: initialStock, reason: "Initial stock", actorId: actor.id, actorName: actor.name }, now),
+    auditPut(tenantId, { action: "product.created", entityType: "product", entityId: id, productName: product.name, quantityBefore: 0, quantityAfter: 0, quantityDelta: 0, reason: "Product created without stock", actorId: actor.id, actorName: actor.name }, now),
   ] }));
   return product;
 };
@@ -548,7 +516,7 @@ export const createProduct = async (
 export const updateProduct = async (
   tenantId: string,
   id: string,
-  updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "price" | "cost" | "promotionPrice" | "promotionStartsAt" | "promotionEndsAt" | "minStock" | "status">>,
+  updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "baseUnit" | "tracksExpiry" | "promotionPrice" | "promotionStartsAt" | "promotionEndsAt" | "status">>,
   actor: { id: string; name: string },
 ) => {
   const current = await getProduct(tenantId, id);
@@ -557,7 +525,9 @@ export const updateProduct = async (
   const category = await getCategory(tenantId, categoryId);
   if (!category) throw new Error("Category not found");
   const now = new Date().toISOString();
-  const next: ProductRecord = { ...current, ...updates, sku: normalizeLookup(updates.sku ?? current.sku), barcode: normalizeLookup(updates.barcode ?? current.barcode), categoryId, categoryName: category.name, updatedAt: now };
+  const sellingPrice = updates.sellingPrice ?? current.sellingPrice ?? current.price;
+  const buyingPrice = updates.buyingPrice ?? current.buyingPrice ?? current.cost;
+  const next: ProductRecord = { ...current, ...updates, sellingPrice, buyingPrice, price: sellingPrice, cost: buyingPrice, baseUnit: updates.baseUnit ?? current.baseUnit ?? "unit", tracksExpiry: updates.tracksExpiry ?? current.tracksExpiry ?? false, sku: normalizeLookup(updates.sku ?? current.sku), barcode: normalizeLookup(updates.barcode ?? current.barcode), categoryId, categoryName: category.name, stock: 0, minStock: 0, updatedAt: now };
   const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
   const aliases = [
     { kind: "SKU" as const, oldValue: current.sku, newValue: next.sku },
@@ -571,12 +541,12 @@ export const updateProduct = async (
   transaction.push(
     { Put: { TableName: TABLE_NAME, Item: { ...productKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#PRODUCT"), accessSort: `${next.name.toLowerCase()}#${id}`, entityType: "product", tenantId, ...next }, ConditionExpression: "attribute_exists(partitionKey)" } },
     auditPut(tenantId, {
-      action: current.price !== next.price ? "product.price.updated" : "product.updated",
+      action: (current.sellingPrice ?? current.price) !== next.sellingPrice ? "product.price.updated" : "product.updated",
       entityType: "product",
       entityId: id,
       productName: next.name,
-      reason: current.price !== next.price
-        ? `Selling price changed from ${current.price.toFixed(2)} to ${next.price.toFixed(2)}`
+      reason: (current.sellingPrice ?? current.price) !== next.sellingPrice
+        ? `Selling price changed from ${(current.sellingPrice ?? current.price).toFixed(2)} to ${next.sellingPrice.toFixed(2)}`
         : "Product details updated",
       actorId: actor.id,
       actorName: actor.name,
@@ -586,64 +556,17 @@ export const updateProduct = async (
   return next;
 };
 
-export const adjustStock = async (
-  tenantId: string,
-  productId: string,
-  delta: number,
-  reason: string,
-  actor: { id: string; name: string },
-) => {
-  const [updated] = await adjustStocks(tenantId, [{ productId, delta }], reason, actor);
-  return updated;
-};
-
-export const adjustStocks = async (
-  tenantId: string,
-  adjustments: Array<{ productId: string; delta: number }>,
-  reason: string,
-  actor: { id: string; name: string },
-) => {
-  if (adjustments.length === 0) throw new Error("Add at least one stock adjustment");
-  if (adjustments.length > 49) throw new Error("A stock count can adjust at most 49 products at once");
-  if (new Set(adjustments.map(({ productId }) => productId)).size !== adjustments.length) {
-    throw new Error("Each product can appear only once in a stock count");
-  }
-  if (adjustments.some(({ delta }) => !Number.isInteger(delta) || delta === 0)) {
-    throw new Error("Stock adjustments must be non-zero whole numbers");
-  }
-  if (reason.trim().length < 3) throw new Error("A meaningful stock adjustment reason is required");
-  const currentProducts = await Promise.all(adjustments.map(({ productId }) => getProduct(tenantId, productId)));
-  if (currentProducts.some((product) => !product)) throw new Error("One or more products were not found");
-  const now = new Date().toISOString();
-  const updated = currentProducts.map((product, index) => {
-    const current = product!;
-    const delta = adjustments[index].delta;
-    const stock = current.stock + delta;
-    if (stock < 0) throw new Error(`${current.name} cannot be adjusted below zero`);
-    return { ...current, stock, updatedAt: now };
-  });
-  const transaction = updated.flatMap((product, index) => {
-    const delta = adjustments[index].delta;
-    const current = currentProducts[index]!;
-    return [
-      { Update: { TableName: TABLE_NAME, Key: productKey(tenantId, product.id), UpdateExpression: "SET #stock = #stock + :delta, updatedAt = :now", ConditionExpression: "attribute_exists(partitionKey) AND #stock + :delta >= :zero", ExpressionAttributeNames: { "#stock": "stock" }, ExpressionAttributeValues: { ":delta": delta, ":zero": 0, ":now": now } } },
-      auditPut(tenantId, { action: "stock.adjusted", entityType: "product", entityId: product.id, productName: product.name, quantityBefore: current.stock, quantityAfter: product.stock, quantityDelta: delta, reason: reason.trim(), actorId: actor.id, actorName: actor.name }, now),
-    ];
-  });
-  await dynamoDB.send(new TransactWriteCommand({ TransactItems: transaction }));
-  return updated;
-};
-
 export const completeSale = async (
   tenantId: string,
   input: {
+    storeId: string;
     customerName?: string;
     paymentMethod: "cash" | "mpesa";
     amountTendered?: number | null;
     mpesaReference?: string | null;
     items: Array<{ productId: string; quantity: number }>;
   },
-  actor: { id: string; name: string; employeeCode?: string; department?: string },
+  actor: { id: string; name: string; employeeCode?: string; storeName?: string },
 ) => {
   const grouped = new Map<string, number>();
   for (const item of input.items) grouped.set(item.productId, (grouped.get(item.productId) ?? 0) + item.quantity);
@@ -654,16 +577,17 @@ export const completeSale = async (
   if (products.some((product) => !product || product.status !== "active")) throw new Error("One or more products are unavailable");
   const now = new Date().toISOString();
   const id = randomUUID();
+  const allocations = await allocateLots(tenantId, input.storeId, [...grouped].map(([productId, quantity]) => ({ productId, quantity })));
   const saleItems: SaleItemRecord[] = products.map((product) => {
     const value = product!;
     const quantity = grouped.get(value.id)!;
-    if (value.stock < quantity) throw new Error(`${value.name} has only ${value.stock} units available`);
     const price = effectiveProductPrice(value, new Date(now));
-    return { productId: value.id, productName: value.name, sku: value.sku, barcode: value.barcode, quantity, price, regularPrice: value.price, promotionApplied: price < value.price, cost: value.cost, total: roundMoney(price * quantity) };
+    const cost = roundMoney((allocations.get(value.id) ?? []).reduce((sum, allocation) => sum + allocation.quantity * allocation.lot.unitCost, 0) / quantity);
+    return { productId: value.id, productName: value.name, sku: value.sku, barcode: value.barcode, quantity, price, regularPrice: value.sellingPrice ?? value.price, promotionApplied: price < (value.sellingPrice ?? value.price), cost, total: roundMoney(price * quantity) };
   });
   const subtotal = roundMoney(products.reduce((sum, product) => {
     const value = product!;
-    return sum + value.price * grouped.get(value.id)!;
+    return sum + (value.sellingPrice ?? value.price) * grouped.get(value.id)!;
   }, 0));
   const totalAmount = roundMoney(saleItems.reduce((sum, item) => sum + item.total, 0));
   const discount = roundMoney(subtotal - totalAmount);
@@ -702,38 +626,40 @@ export const completeSale = async (
     paymentReference,
     createdBy: actor.id,
     createdByName: actor.name,
-    sellerDepartment: actor.department?.trim() || null,
+    storeId: input.storeId,
+    storeName: actor.storeName?.trim() || null,
     cashierDisplayName: [actor.name.trim().split(/\s+/)[0], actor.employeeCode ? `(${actor.employeeCode})` : ""].filter(Boolean).join(" "),
     receiptBranding,
     createdAt: now,
     updatedAt: now,
   };
   const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
-  for (const item of saleItems) {
-    const product = products.find((candidate) => candidate?.id === item.productId)!;
-    transaction.push(
-      { Update: { TableName: TABLE_NAME, Key: productKey(tenantId, item.productId), UpdateExpression: "SET #stock = #stock - :quantity, updatedAt = :now", ConditionExpression: "#status = :active AND #stock >= :quantity", ExpressionAttributeNames: { "#stock": "stock", "#status": "status" }, ExpressionAttributeValues: { ":quantity": item.quantity, ":active": "active", ":now": now } } },
-      auditPut(tenantId, { action: "stock.sold", entityType: "product", entityId: item.productId, productName: item.productName, quantityBefore: product.stock, quantityAfter: product.stock - item.quantity, quantityDelta: -item.quantity, reason: `Sale ${sale.orderNumber}`, referenceId: id, actorId: actor.id, actorName: actor.name }, now),
-    );
-  }
+  for (const item of saleItems) for (const allocation of allocations.get(item.productId) ?? []) transaction.push(
+    lotDecrement(tenantId, allocation.lot, allocation.quantity, now),
+    stockMovementPut(tenantId, { type: "sale", storeId: input.storeId, productId: item.productId, productName: item.productName, lotId: allocation.lot.id, quantity: -allocation.quantity, unitCost: allocation.lot.unitCost, reason: `Sale ${sale.orderNumber}`, referenceId: id, actorId: actor.id, actorName: actor.name }, now),
+  );
   transaction.push({ Put: { TableName: TABLE_NAME, Item: { partitionKey: tenantKey(tenantId, `SALE#${id}`), sortKey: "RECEIPT", accessPartition: tenantKey(tenantId, "SALE"), accessSort: `${now}#${id}`, entityType: "sale", tenantId, ...sale }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
   if (paymentReference) {
     transaction.push({ Put: { TableName: TABLE_NAME, Item: { ...mpesaPaymentKey(tenantId, paymentReference), entityType: "payment_lookup", tenantId, saleId: id, orderNumber: sale.orderNumber, createdAt: now }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
   }
+  if (transaction.length > 100) throw new Error("Sale uses too many inventory lots to complete atomically; reduce the basket size");
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: transaction }));
   return sale;
 };
 
-export const dashboardSummary = async (tenantId: string, requestedDays = 1, staffId?: string, includeDetails = true) => {
+export const dashboardSummary = async (tenantId: string, requestedDays = 1, staffId?: string, includeDetails = true, storeId?: string) => {
   const days = Math.min(Math.max(requestedDays, 1), 90);
   const startDate = new Date(`${businessDate()}T00:00:00+03:00`);
   startDate.setUTCDate(startDate.getUTCDate() - (days - 1));
   const start = startDate.toISOString();
-  const [products, allSales, audits] = await Promise.all([
+  const [catalogProducts, allSales, audits, stock] = await Promise.all([
     listProducts(tenantId),
     queryCollection<SaleRecord>(tenantId, "SALE", { from: start }),
     includeDetails ? listAudits(tenantId, 8) : Promise.resolve([]),
+    storeId ? getStoreStock(tenantId, storeId) : Promise.resolve([]),
   ]);
+  const byProduct = new Map(stock.map((item) => [item.productId, item]));
+  const products = catalogProducts.map((product) => ({ ...product, stock: byProduct.get(product.id)?.quantity ?? 0, minStock: byProduct.get(product.id)?.reorderPoint ?? 0 }));
   const sales = staffId ? allSales.filter((sale) => sale.createdBy === staffId) : allSales;
   const revenue = roundMoney(sales.reduce((sum, sale) => sum + sale.totalAmount, 0));
   const unitsSold = sales.flatMap((sale) => sale.items).reduce((sum, item) => sum + item.quantity, 0);
@@ -773,11 +699,17 @@ export const dashboardSummary = async (tenantId: string, requestedDays = 1, staf
 };
 
 export const businessReport = async (tenantId: string, range: { from: string; to: string }): Promise<BusinessReportRecord> => {
-  const [products, sales, audits] = await Promise.all([
+  const [catalogProducts, sales, audits, stores] = await Promise.all([
     listProducts(tenantId),
     queryCollection<SaleRecord>(tenantId, "SALE", range),
     queryCollection<AuditRecord>(tenantId, "AUDIT", range),
+    listInventoryStores(tenantId),
   ]);
+  const lots = (await Promise.all(stores.map((store) => sellableLots(tenantId, store.id)))).flat();
+  const quantityByProduct = new Map<string, number>();
+  const valueByProduct = new Map<string, number>();
+  for (const lot of lots) { quantityByProduct.set(lot.productId, (quantityByProduct.get(lot.productId) ?? 0) + lot.remainingQuantity); valueByProduct.set(lot.productId, roundMoney((valueByProduct.get(lot.productId) ?? 0) + lot.remainingQuantity * lot.unitCost)); }
+  const products = catalogProducts.map((product) => ({ ...product, stock: quantityByProduct.get(product.id) ?? 0 }));
   const productTotals = new Map<string, ReportProductRecord>();
   const promotionTotals = new Map<string, ReportProductRecord>();
   let promotionUnitsSold = 0;
@@ -808,7 +740,7 @@ export const businessReport = async (tenantId: string, range: { from: string; to
   const priceChanges = audits.filter(({ action }) => action === "product.price.updated");
   const revenue = roundMoney(sales.reduce((sum, sale) => sum + sale.totalAmount, 0));
   const grossProfit = roundMoney(sales.flatMap(({ items }) => items).reduce((sum, item) => sum + (item.price - item.cost) * item.quantity, 0));
-  const stockCostValue = roundMoney(products.reduce((sum, product) => sum + product.stock * product.cost, 0));
+  const stockCostValue = roundMoney([...valueByProduct.values()].reduce((sum, value) => sum + value, 0));
   const stockRetailValue = roundMoney(products.reduce((sum, product) => sum + product.stock * product.price, 0));
   return {
     from: range.from,
@@ -839,7 +771,7 @@ export const businessReport = async (tenantId: string, range: { from: string; to
       minStock: product.minStock,
       cost: product.cost,
       price: product.price,
-      costValue: roundMoney(product.stock * product.cost),
+      costValue: valueByProduct.get(product.id) ?? 0,
       retailValue: roundMoney(product.stock * product.price),
       status: product.status,
     })).sort((a, b) => Number(a.stock > a.minStock) - Number(b.stock > b.minStock) || a.productName.localeCompare(b.productName)),
@@ -851,7 +783,7 @@ export const businessReport = async (tenantId: string, range: { from: string; to
 export const getStaffProfile = async (tenantId: string, userId: string) => {
   const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: profileKey(tenantId, userId) }));
   const profile = stripKeys<StaffProfileRecord>(response.Item);
-  return profile ? { ...profile, department: profile.department ?? "" } : null;
+  return profile;
 };
 
 export const getStaffProfiles = async (tenantId: string, userIds: string[]) => {
@@ -872,20 +804,18 @@ export const getStaffProfiles = async (tenantId: string, userIds: string[]) => {
   }
   return new Map(items.map((item) => {
     const profile = stripKeys<StaffProfileRecord>(item)!;
-    return [profile.userId, { ...profile, department: profile.department ?? "" }];
+    return [profile.userId, profile];
   }));
 };
 
 export const upsertStaffProfile = async (
   tenantId: string,
   userId: string,
-  input: Pick<StaffProfileRecord, "employeeCode" | "jobTitle" | "department" | "phone">,
+  input: Pick<StaffProfileRecord, "employeeCode" | "jobTitle" | "phone"> & Pick<StaffProfileRecord, "storeId" | "storeName">,
 ) => {
   const current = await getStaffProfile(tenantId, userId);
   const now = new Date().toISOString();
-  const department = input.department.trim().replace(/\s+/g, " ");
-  if (department.length > 80) throw new Error("Department must be 80 characters or fewer");
-  const profile: StaffProfileRecord = { userId, employeeCode: input.employeeCode.trim(), jobTitle: input.jobTitle.trim(), department, phone: input.phone.trim(), createdAt: current?.createdAt ?? now, updatedAt: now };
+  const profile: StaffProfileRecord = { userId, employeeCode: input.employeeCode.trim(), jobTitle: input.jobTitle.trim(), storeId: input.storeId ?? current?.storeId, storeName: input.storeName ?? current?.storeName, phone: input.phone.trim(), createdAt: current?.createdAt ?? now, updatedAt: now };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [{ Put: { TableName: TABLE_NAME, Item: { ...profileKey(tenantId, userId), entityType: "staff_profile", tenantId, ...profile } } }] }));
   return profile;
 };

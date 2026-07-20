@@ -33,10 +33,10 @@ const assertSeedFile: (value: unknown) => asserts value is SeedFile = (value) =>
     if (skus.has(product.sku.toUpperCase()) || barcodes.has(product.barcode.toUpperCase())) throw new Error(`Duplicate product lookup value for ${product.name}`);
     skus.add(product.sku.toUpperCase());
     barcodes.add(product.barcode.toUpperCase());
-    for (const [field, amount] of [["price", product.price], ["cost", product.cost], ["initialStock", product.initialStock], ["minStock", product.minStock]] as const) {
+    for (const [field, amount] of [["sellingPrice", product.sellingPrice], ["buyingPrice", product.buyingPrice]] as const) {
       if (!Number.isFinite(amount) || amount < 0) throw new Error(`${product.name} has invalid ${field}`);
     }
-    if (product.promotionPrice != null && (!Number.isFinite(product.promotionPrice) || product.promotionPrice < 0 || product.promotionPrice >= product.price)) {
+    if (product.promotionPrice != null && (!Number.isFinite(product.promotionPrice) || product.promotionPrice < 0 || product.promotionPrice >= product.sellingPrice)) {
       throw new Error(`${product.name} has an invalid promotion price`);
     }
   }
@@ -82,13 +82,14 @@ async function main() {
           sku: product.sku,
           barcode: product.barcode,
           categoryId: category.id,
-          price: product.price,
-          cost: product.cost,
+          sellingPrice: product.sellingPrice,
+          buyingPrice: product.buyingPrice,
+          baseUnit: product.baseUnit,
+          tracksExpiry: product.tracksExpiry,
           promotionPrice: product.promotionPrice ?? null,
-          minStock: product.minStock,
           status: "active",
         }, actor);
-        console.log(`Updated product ${product.sku}; preserved stock ${existing.stock}`);
+        console.log(`Updated product ${product.sku}; store inventory was not changed`);
       } else {
         await createProduct(tenantId, {
           name: product.name.trim(),
@@ -96,11 +97,11 @@ async function main() {
           sku: product.sku,
           barcode: product.barcode,
           categoryId: category.id,
-          price: product.price,
-          cost: product.cost,
+          sellingPrice: product.sellingPrice,
+          buyingPrice: product.buyingPrice,
+          baseUnit: product.baseUnit,
+          tracksExpiry: product.tracksExpiry,
           promotionPrice: product.promotionPrice ?? null,
-          initialStock: product.initialStock,
-          minStock: product.minStock,
         }, actor);
         console.log(`Created product ${product.sku}`);
       }

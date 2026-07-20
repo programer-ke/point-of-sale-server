@@ -6,11 +6,11 @@ export interface SeedFile {
     sku: string;
     barcode: string;
     categoryCode: string;
-    price: number;
-    cost: number;
+    sellingPrice: number;
+    buyingPrice: number;
+    baseUnit: string;
+    tracksExpiry: boolean;
     promotionPrice?: number | null;
-    initialStock: number;
-    minStock: number;
   }>;
 }
 
@@ -136,8 +136,6 @@ export const buildMvpSeed = (): SeedFile => {
     categories: categorySpecs.map(({ code, name, description }) => ({ code, name, description })),
     products: categorySpecs.flatMap((category) => category.products.map(([name, price]) => {
       const index = productNumber++;
-      const minStock = 4 + ((index * 7) % 17);
-      const initialStock = index % 19 === 0 ? minStock : minStock + 12 + ((index * 17) % 85);
       const costRatio = 0.68 + (index % 10) * 0.012;
       return {
         name,
@@ -145,11 +143,11 @@ export const buildMvpSeed = (): SeedFile => {
         sku: `${category.code.slice(0, 4)}-${String(index).padStart(4, "0")}`,
         barcode: ean13(index),
         categoryCode: category.code,
-        price,
-        cost: Math.round(price * costRatio),
+        sellingPrice: price,
+        buyingPrice: Math.round(price * costRatio),
+        baseUnit: "unit",
+        tracksExpiry: ["STAPLES", "BEVERAGES", "DAIRY", "PRODUCE", "BAKERY", "BABY"].includes(category.code),
         promotionPrice: index % 10 === 0 ? Math.max(1, Math.round(price * 0.9)) : null,
-        initialStock,
-        minStock,
       };
     })),
   };

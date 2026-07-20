@@ -9,6 +9,11 @@ repository.listSales = async () => sales;
 repository.listSalesByStaff = async (_tenantId, staffId) => sales.filter((sale) => sale.createdBy === staffId);
 repository.getSale = async (_tenantId, id) => sales.find((sale) => sale.id === id) ?? null;
 repository.getStaffProfiles = async () => new Map();
+repository.getStaffProfile = async () => ({ storeId: "store-1", storeName: "Main Store" });
+const supply = require("../dist/repositories/supply-chain-repository.js");
+supply.listStores = async () => [{ id: "store-1", code: "MAIN", name: "Main Store", status: "active" }];
+supply.getStore = async () => ({ id: "store-1", code: "MAIN", name: "Main Store", status: "active" });
+supply.storeStock = async () => [];
 const cognito = require("../dist/services/cognito.js");
 cognito.getCognitoUser = async (username) => ({ id: username.startsWith("staff-1") ? "staff-1" : "staff-2", username, name: username });
 const tenants = require("../dist/repositories/tenant-repository.js");
@@ -33,7 +38,7 @@ async function main() {
   assert.ok(schemaFields.dashboard.fields.some(({ name }) => name === "averageSale"));
   assert.ok(!schemaFields.stock.fields.some(({ name }) => name === "averageSale"));
   assert.ok(schemaFields.report.fields.some(({ name }) => name === "savings"));
-  for (const mutation of ["updateCategory", "deleteCategory", "createDepartment", "updateDepartment", "deleteDepartment"]) {
+  for (const mutation of ["updateCategory", "deleteCategory", "createStore", "createSupplier", "createPurchaseOrder", "receivePurchaseOrder"]) {
     assert.ok(schemaFields.mutation.fields.some(({ name }) => name === mutation), `${mutation} must be available`);
   }
 

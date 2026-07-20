@@ -6,8 +6,8 @@ assert.equal(seed.categories.length, 10);
 assert.equal(seed.products.length, 200);
 assert.equal(new Set(seed.products.map(({ sku }) => sku)).size, 200);
 assert.equal(new Set(seed.products.map(({ barcode }) => barcode)).size, 200);
-assert.ok(seed.products.every(({ price, cost }) => price > 0 && cost > 0 && cost < price));
-assert.ok(seed.products.every(({ initialStock, minStock }) => Number.isInteger(initialStock) && initialStock >= minStock));
+assert.ok(seed.products.every(({ sellingPrice, buyingPrice, baseUnit }) => sellingPrice > 0 && buyingPrice > 0 && buyingPrice < sellingPrice && baseUnit));
+assert.ok(seed.products.every((product) => !("initialStock" in product) && !("minStock" in product)), "seed products must not create opening stock");
 
 for (const { barcode } of seed.products) {
   assert.match(barcode, /^616\d{10}$/);

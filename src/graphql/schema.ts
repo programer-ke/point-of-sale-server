@@ -2,7 +2,8 @@ export const typeDefs = `#graphql
   type StaffProfile {
     employeeCode: String!
     jobTitle: String!
-    department: String!
+    storeId: ID
+    storeName: String
     phone: String!
   }
 
@@ -40,6 +41,10 @@ export const typeDefs = `#graphql
     barcode: String!
     categoryId: ID!
     categoryName: String!
+    sellingPrice: Float!
+    buyingPrice: Float!
+    baseUnit: String!
+    tracksExpiry: Boolean!
     price: Float!
     cost: Float!
     promotionPrice: Float
@@ -90,7 +95,8 @@ export const typeDefs = `#graphql
     paymentReference: String
     createdBy: String!
     createdByName: String!
-    sellerDepartment: String
+    storeId: ID
+    storeName: String
     cashierDisplayName: String!
     receiptBranding: BusinessSettings!
     createdAt: String!
@@ -159,7 +165,6 @@ export const typeDefs = `#graphql
     address: String!
     phone: String!
     email: String!
-    departments: [String!]!
     thankYouMessage: String!
     returnPolicy: String!
     updatedAt: String!
@@ -168,7 +173,6 @@ export const typeDefs = `#graphql
   type Business {
     id: ID!
     name: String!
-    departments: [String!]!
   }
 
   type ReportProduct {
@@ -211,52 +215,271 @@ export const typeDefs = `#graphql
     quantity: Int!
   }
 
-  input StockAdjustmentInput {
-    productId: ID!
-    delta: Int!
+  type Store {
+    id: ID!
+    code: String!
+    name: String!
+    address: String!
+    status: String!
+    createdAt: String!
+    updatedAt: String!
   }
+
+  type Supplier {
+    id: ID!
+    code: String!
+    name: String!
+    contactName: String!
+    phone: String!
+    email: String!
+    address: String!
+    status: String!
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type SupplierProduct {
+    supplierId: ID!
+    productId: ID!
+    supplierSku: String!
+    purchaseUnit: String!
+    unitsPerPurchaseUnit: Int!
+    lastPurchasePrice: Float!
+    preferred: Boolean!
+    updatedAt: String!
+  }
+
+  type StoreProductPolicy {
+    storeId: ID!
+    productId: ID!
+    reorderPoint: Int!
+    targetQuantity: Int!
+    updatedAt: String!
+  }
+
+  type StoreProductStock {
+    storeId: ID!
+    productId: ID!
+    quantity: Int!
+    inventoryValue: Float!
+    reorderPoint: Int!
+    targetQuantity: Int!
+    lowStock: Boolean!
+  }
+
+  type PurchaseOrderLine {
+    id: ID!
+    productId: ID!
+    productName: String!
+    supplierSku: String!
+    purchaseUnit: String!
+    unitsPerPurchaseUnit: Int!
+    orderedPurchaseQuantity: Int!
+    acceptedBaseQuantity: Int!
+    pricePerPurchaseUnit: Float!
+  }
+
+  type PurchaseOrder {
+    id: ID!
+    orderNumber: String!
+    supplierId: ID!
+    supplierName: String!
+    storeId: ID!
+    storeName: String!
+    status: String!
+    expectedDeliveryDate: String
+    notes: String!
+    closeReason: String
+    lines: [PurchaseOrderLine!]!
+    totalAmount: Float!
+    createdBy: ID!
+    createdByName: String!
+    issuedAt: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type GoodsReceiptLine {
+    purchaseOrderLineId: ID!
+    productId: ID!
+    productName: String!
+    batchNumber: String
+    expiryDate: String
+    deliveredBaseQuantity: Int!
+    acceptedBaseQuantity: Int!
+    damagedBaseQuantity: Int!
+    rejectedBaseQuantity: Int!
+    unitCost: Float!
+    lotId: ID
+  }
+
+  type GoodsReceipt {
+    id: ID!
+    receiptNumber: String!
+    purchaseOrderId: ID!
+    orderNumber: String!
+    supplierId: ID!
+    supplierName: String!
+    storeId: ID!
+    storeName: String!
+    deliveryNote: String!
+    lines: [GoodsReceiptLine!]!
+    createdBy: ID!
+    createdByName: String!
+    createdAt: String!
+  }
+
+  type InventoryLot {
+    id: ID!
+    storeId: ID!
+    productId: ID!
+    productName: String!
+    supplierId: ID
+    receiptId: ID
+    batchNumber: String!
+    expiryDate: String
+    receivedQuantity: Int!
+    remainingQuantity: Int!
+    unitCost: Float!
+    origin: String!
+    status: String!
+    receivedAt: String!
+    updatedAt: String!
+  }
+
+  type StockMovement {
+    id: ID!
+    type: String!
+    storeId: ID!
+    productId: ID!
+    productName: String!
+    lotId: ID
+    quantity: Int!
+    unitCost: Float!
+    reason: String!
+    referenceId: ID
+    actorId: ID!
+    actorName: String!
+    createdAt: String!
+  }
+
+  type TransferAllocation { lotId: ID!, quantity: Int!, unitCost: Float!, batchNumber: String!, expiryDate: String, supplierId: ID }
+  type StockTransferLine { productId: ID!, productName: String!, quantity: Int!, allocations: [TransferAllocation!] }
+  type StockTransfer {
+    id: ID!
+    transferNumber: String!
+    fromStoreId: ID!
+    fromStoreName: String!
+    toStoreId: ID!
+    toStoreName: String!
+    status: String!
+    notes: String!
+    lines: [StockTransferLine!]!
+    createdBy: ID!
+    createdByName: String!
+    dispatchedAt: String
+    receivedAt: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type ReplenishmentSuggestion {
+    storeId: ID!
+    supplierId: ID!
+    productId: ID!
+    availableQuantity: Int!
+    projectedQuantity: Int!
+    reorderPoint: Int!
+    targetQuantity: Int!
+    suggestedPurchaseQuantity: Int!
+    supplierProduct: SupplierProduct!
+  }
+
+  type SupplyChainReport {
+    from: String!
+    to: String!
+    purchaseSpend: Float!
+    receivedValue: Float!
+    damagedValue: Float!
+    inventoryValue: Float!
+    purchaseOrders: [PurchaseOrder!]!
+    receipts: [GoodsReceipt!]!
+    movements: [StockMovement!]!
+    transfers: [StockTransfer!]!
+    stock: [StoreProductStock!]!
+    expiryLots: [InventoryLot!]!
+  }
+
+  input PurchaseOrderLineInput { productId: ID!, productName: String!, supplierSku: String!, purchaseUnit: String!, unitsPerPurchaseUnit: Int!, orderedPurchaseQuantity: Int!, pricePerPurchaseUnit: Float! }
+  input GoodsReceiptLineInput { purchaseOrderLineId: ID!, batchNumber: String, expiryDate: String, deliveredBaseQuantity: Int!, acceptedBaseQuantity: Int!, damagedBaseQuantity: Int!, rejectedBaseQuantity: Int! }
+  input StockTransferLineInput { productId: ID!, productName: String!, quantity: Int! }
 
   type Query {
     me: User!
     users: [User!]!
     user(username: String!): User
     categories: [Category!]!
-    products: [Product!]!
-    productPage(search: String = "", limit: Int = 20, cursor: String, activeOnly: Boolean = false): ProductPage!
+    products(storeId: ID): [Product!]!
+    productPage(search: String = "", limit: Int = 20, cursor: String, activeOnly: Boolean = false, storeId: ID): ProductPage!
     product(id: ID!): Product
-    productLookup(term: String!): Product
-    sales(limit: Int = 50, personal: Boolean = false, from: String, to: String): [Sale!]!
+    productLookup(term: String!, storeId: ID): Product
+    sales(limit: Int = 50, personal: Boolean = false, from: String, to: String, storeId: ID): [Sale!]!
     sale(id: ID!, personal: Boolean = false): Sale
     stockAudits(limit: Int = 100): [AuditEvent!]!
     dashboard(days: Int = 1, personal: Boolean = false, compact: Boolean = false): DashboardSummary!
     businessSettings: BusinessSettings!
     business: Business!
     businessReport(from: String!, to: String!): BusinessReport!
+    stores(activeOnly: Boolean = false): [Store!]!
+    suppliers(activeOnly: Boolean = false): [Supplier!]!
+    supplierProducts(supplierId: ID): [SupplierProduct!]!
+    storePolicies(storeId: ID!): [StoreProductPolicy!]!
+    storeStock(storeId: ID): [StoreProductStock!]!
+    purchaseOrders: [PurchaseOrder!]!
+    purchaseOrder(id: ID!): PurchaseOrder
+    goodsReceipts: [GoodsReceipt!]!
+    inventoryLots(storeId: ID, includeExhausted: Boolean = false): [InventoryLot!]!
+    stockMovements(from: String, to: String, storeId: ID): [StockMovement!]!
+    stockTransfers: [StockTransfer!]!
+    replenishmentSuggestions(storeId: ID!, supplierId: ID!): [ReplenishmentSuggestion!]!
+    supplyChainReport(from: String!, to: String!, storeId: ID, supplierId: ID, expiryDays: Int = 30): SupplyChainReport!
   }
 
   type Mutation {
     createBusiness(name: String!): User!
-    inviteUser(email: String!, firstName: String!, lastName: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", department: String = "", phone: String = ""): User!
+    inviteUser(email: String!, firstName: String!, lastName: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", storeId: ID!, phone: String = ""): User!
     resendUserInvitation(username: String!): User!
     updateUserRoles(username: String!, roles: [String!]!): User!
     setUserEnabled(username: String!, enabled: Boolean!): User!
     updateStaffEmail(username: String!, email: String!): User!
     deleteStaffUser(username: String!): Boolean!
     updateMyProfile(phone: String!): StaffProfile!
-    updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, department: String, phone: String!): StaffProfile!
-    updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", departments: [String!], thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
-    createDepartment(name: String!): [String!]!
-    updateDepartment(currentName: String!, name: String!): [String!]!
-    deleteDepartment(name: String!): [String!]!
+    updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, storeId: ID!, phone: String!): StaffProfile!
+    updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
 
     createCategory(code: String!, name: String!, description: String = ""): Category!
     updateCategory(id: ID!, code: String!, name: String!, description: String = ""): Category!
     deleteCategory(id: ID!): Boolean!
-    createProduct(name: String!, description: String = "", sku: String!, barcode: String!, categoryId: ID!, price: Float!, cost: Float!, initialStock: Int!, minStock: Int!): Product!
-    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, price: Float, cost: Float, promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, minStock: Int, status: String): Product!
+    createProduct(name: String!, description: String = "", sku: String!, barcode: String!, categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, baseUnit: String!, tracksExpiry: Boolean!): Product!
+    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, baseUnit: String, tracksExpiry: Boolean, promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
     archiveProduct(id: ID!): Product!
-    adjustStock(productId: ID!, delta: Int!, reason: String!): Product!
-    adjustStocks(adjustments: [StockAdjustmentInput!]!, reason: String!): [Product!]!
-    completeSale(customerName: String, paymentMethod: String!, amountTendered: Float, mpesaReference: String, items: [SaleItemInput!]!): Sale!
+    completeSale(storeId: ID, customerName: String, paymentMethod: String!, amountTendered: Float, mpesaReference: String, items: [SaleItemInput!]!): Sale!
+    createStore(code: String!, name: String!, address: String = ""): Store!
+    updateStore(id: ID!, name: String, address: String, status: String): Store!
+    createSupplier(code: String!, name: String!, contactName: String = "", phone: String = "", email: String = "", address: String = ""): Supplier!
+    updateSupplier(id: ID!, name: String, contactName: String, phone: String, email: String, address: String, status: String): Supplier!
+    upsertSupplierProduct(supplierId: ID!, productId: ID!, supplierSku: String!, purchaseUnit: String!, unitsPerPurchaseUnit: Int!, lastPurchasePrice: Float!, preferred: Boolean!): SupplierProduct!
+    upsertStorePolicy(storeId: ID!, productId: ID!, reorderPoint: Int!, targetQuantity: Int!): StoreProductPolicy!
+    createPurchaseOrder(supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!, requestId: ID!): PurchaseOrder!
+    updatePurchaseOrder(id: ID!, supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!): PurchaseOrder!
+    issuePurchaseOrder(id: ID!): PurchaseOrder!
+    closePurchaseOrder(id: ID!, reason: String!): PurchaseOrder!
+    cancelPurchaseOrder(id: ID!, reason: String = "Cancelled"): PurchaseOrder!
+    receivePurchaseOrder(purchaseOrderId: ID!, deliveryNote: String = "", lines: [GoodsReceiptLineInput!]!, requestId: ID!): GoodsReceipt!
+    writeOffLot(lotId: ID!, quantity: Int!, type: String!, reason: String!, requestId: ID!): StockMovement!
+    countInventoryLot(lotId: ID!, physicalQuantity: Int!, reason: String!, requestId: ID!): StockMovement!
+    createStockTransfer(fromStoreId: ID!, toStoreId: ID!, notes: String = "", lines: [StockTransferLineInput!]!, requestId: ID!): StockTransfer!
+    dispatchStockTransfer(id: ID!, requestId: ID!): StockTransfer!
+    receiveStockTransfer(id: ID!, requestId: ID!): StockTransfer!
   }
 `;

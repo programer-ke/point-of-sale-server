@@ -35,6 +35,12 @@ const secondProduct = {
   barcode: "987654321",
   stock: 8,
 };
+const lot = {
+  partitionKey: "TENANT#tenant-1#LOT#lot-1", sortKey: "PROFILE", accessPartition: "TENANT#tenant-1#INVENTORY#ACTIVE",
+  accessSort: "store-1#9999-12-31#2026-01-01#lot-1", id: "lot-1", storeId: "store-1", productId: "product-1",
+  productName: "Tea", batchNumber: "BATCH-1", expiryDate: null, receivedQuantity: 5, remainingQuantity: 5,
+  unitCost: 80, origin: "supplier_receipt", status: "active", receivedAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+};
 
 async function main() {
   let transaction;
@@ -47,7 +53,7 @@ async function main() {
       transaction = command.input.TransactItems;
       return {};
     }
-    if (command.constructor.name === "QueryCommand") return { Items: [product, secondProduct] };
+    if (command.constructor.name === "QueryCommand") return command.input.ExpressionAttributeValues[":pk"].includes("INVENTORY#ACTIVE") ? { Items: [lot] } : { Items: [product, secondProduct] };
     throw new Error(`Unexpected command ${command.constructor.name}`);
   };
 
@@ -55,11 +61,12 @@ async function main() {
     tenantId,
     {
       customerName: "Walk-in",
+      storeId: "store-1",
       paymentMethod: "cash",
       amountTendered: 300,
       items: [{ productId: "product-1", quantity: 2 }],
     },
-    { id: "cashier-1", name: "Cashier Name", employeeCode: "EMP-001", department: "Front End" },
+    { id: "cashier-1", name: "Cashier Name", employeeCode: "EMP-001", storeName: "Main Store" },
   );
 
   assert.equal(sale.items[0].price, 125, "server price must be authoritative");
@@ -67,16 +74,16 @@ async function main() {
   assert.equal(sale.amountTendered, 300);
   assert.equal(sale.changeDue, 50);
   assert.equal(sale.cashierDisplayName, "Cashier (EMP-001)");
-  assert.equal(sale.sellerDepartment, "Front End", "sales must retain the seller department at checkout time");
+  assert.equal(sale.storeName, "Main Store", "sales must retain the selling store at checkout time");
   assert.equal(sale.receiptBranding.businessName, "Tomkondi Supermarket");
   assert.equal(transaction.length, 3, "stock update, audit event, and receipt must be atomic");
-  assert.match(transaction[0].Update.ConditionExpression, /stock.*>=/);
+  assert.match(transaction[0].Update.ConditionExpression, /remainingQuantity.*>=/);
   assert.equal(transaction[2].Put.Item.orderNumber, sale.orderNumber);
 
   const belowCostProduct = await repository.updateProduct(
     tenantId,
     "product-1",
-    { price: 60 },
+    { sellingPrice: 60 },
     { id: "admin", name: "Admin" },
   );
   assert.equal(belowCostProduct.price, 60, "below-cost prices warn in the UI but remain valid");
@@ -92,29 +99,16 @@ async function main() {
   const searchPage = await repository.getProductPage(tenantId, { search: "coffee", limit: 20 });
   assert.deepEqual(searchPage.items.map(({ id }) => id), ["product-2"]);
 
-  const adjusted = await repository.adjustStocks(
-    tenantId,
-    [{ productId: "product-1", delta: 2 }, { productId: "product-2", delta: -1 }],
-    "Monthly count",
-    { id: "admin", name: "Admin" },
-  );
-  assert.deepEqual(adjusted.map(({ stock }) => stock), [7, 7]);
-  assert.equal(transaction.length, 4, "all stock changes and audit events must commit together");
-
   await assert.rejects(
-    () => repository.adjustStock(tenantId, "product-1", -6, "damaged", { id: "admin", name: "Admin" }),
-    /below zero/,
+    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "cash", amountTendered: 1_000, items: [{ productId: "product-1", quantity: 6 }] }, { id: "cashier", name: "Cashier" }),
+    /Insufficient sellable stock/,
   );
   await assert.rejects(
-    () => repository.completeSale(tenantId, { paymentMethod: "cash", amountTendered: 1_000, items: [{ productId: "product-1", quantity: 6 }] }, { id: "cashier", name: "Cashier" }),
-    /only 5 units/,
-  );
-  await assert.rejects(
-    () => repository.completeSale(tenantId, { paymentMethod: "cash", amountTendered: 100, items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
+    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "cash", amountTendered: 100, items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
     /at least the amount due/,
   );
   await assert.rejects(
-    () => repository.completeSale(tenantId, { paymentMethod: "mpesa", mpesaReference: "BAD", items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
+    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "mpesa", mpesaReference: "BAD", items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
     /valid M-Pesa transaction code/,
   );
 
@@ -128,11 +122,12 @@ async function main() {
       transaction = command.input.TransactItems;
       return {};
     }
+    if (command.constructor.name === "QueryCommand") return { Items: [lot] };
     throw new Error(`Unexpected command ${command.constructor.name}`);
   };
   const mpesaSale = await repository.completeSale(
     tenantId,
-    { paymentMethod: "mpesa", mpesaReference: "QGH1234567", items: [{ productId: "product-1", quantity: 2 }] },
+    { storeId: "store-1", paymentMethod: "mpesa", mpesaReference: "QGH1234567", items: [{ productId: "product-1", quantity: 2 }] },
     { id: "cashier", name: "Cashier Name" },
   );
   assert.equal(mpesaSale.subtotal, 250);
@@ -144,10 +139,11 @@ async function main() {
 
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") return command.input.Key.partitionKey.includes("PAYMENT#") ? { Item: { saleId: "existing-sale" } } : { Item: promoted };
+    if (command.constructor.name === "QueryCommand") return { Items: [lot] };
     throw new Error(`Unexpected command ${command.constructor.name}`);
   };
   await assert.rejects(
-    () => repository.completeSale(tenantId, { paymentMethod: "mpesa", mpesaReference: "QGH1234567", items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
+    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "mpesa", mpesaReference: "QGH1234567", items: [{ productId: "product-1", quantity: 1 }] }, { id: "cashier", name: "Cashier" }),
     /already been used/,
   );
 
@@ -167,25 +163,8 @@ async function main() {
     { id: "admin", name: "Admin" },
   );
   assert.equal(settings.thankYouMessage, "Asante sana");
-  assert.deepEqual(settings.departments, ["Management", "Sales", "Inventory"]);
   assert.equal(transaction.length, 2, "settings update and its audit event must be atomic");
-  assert.ok(transaction[0].Update, "branding must update only its own fields instead of replacing departments");
-
-  const departmentValues = await repository.updateDepartments(
-    tenantId,
-    ["Management", "Sales"],
-    ["Management", "Customer   Support"],
-    { id: "admin", name: "Admin" },
-    [{ userId: "cashier-1", from: "Sales", to: "Customer Support" }],
-  );
-  assert.deepEqual(departmentValues, ["Management", "Customer Support"]);
-  assert.equal(transaction.length, 3, "department and assigned staff renames must be atomic with their audit event");
-  assert.equal(transaction[0].Update.ConditionExpression, "departments = :current");
-  assert.equal(transaction[1].Update.ExpressionAttributeValues[":next"], "Customer Support");
-  await assert.rejects(
-    () => repository.updateDepartments(tenantId, ["Management"], [], { id: "admin", name: "Admin" }),
-    /at least one department/,
-  );
+  assert.ok(transaction[0].Update, "branding must update only its own fields");
 
   const category = {
     partitionKey: "TENANT#tenant-1#CATEGORY#category-1",
@@ -255,15 +234,16 @@ async function main() {
     }
     throw new Error(`Unexpected command ${command.constructor.name}`);
   };
-  assert.equal((await repository.getStaffProfile(tenantId, "cashier-1")).department, "");
+  assert.equal((await repository.getStaffProfile(tenantId, "cashier-1")).storeId, undefined);
   const updatedProfile = await repository.upsertStaffProfile(tenantId, "cashier-1", {
     employeeCode: "EMP-001",
     jobTitle: "Cashier",
-    department: "  Front   End  ",
+    storeId: "store-1",
+    storeName: "Main Store",
     phone: "+254700000000",
   });
-  assert.equal(updatedProfile.department, "Front End");
-  assert.equal(transaction[0].Put.Item.department, "Front End");
+  assert.equal(updatedProfile.storeName, "Main Store");
+  assert.equal(transaction[0].Put.Item.storeId, "store-1");
 
   let batchCount = 0;
   dynamoDB.send = async (command) => {
@@ -271,7 +251,7 @@ async function main() {
     batchCount += 1;
     const keys = command.input.RequestItems["test-table"].Keys;
     assert.ok(keys.length <= 100, "DynamoDB batch reads must not exceed 100 keys");
-    return { Responses: { "test-table": keys.map((key) => ({ ...key, userId: key.partitionKey.split("USER#")[1], employeeCode: "EMP", jobTitle: "Cashier", department: "Sales", phone: "" })) } };
+    return { Responses: { "test-table": keys.map((key) => ({ ...key, userId: key.partitionKey.split("USER#")[1], employeeCode: "EMP", jobTitle: "Cashier", storeId: "store-1", storeName: "Main Store", phone: "" })) } };
   };
   const manyProfiles = await repository.getStaffProfiles(tenantId, Array.from({ length: 101 }, (_, index) => `staff-${index}`));
   assert.equal(manyProfiles.size, 101);

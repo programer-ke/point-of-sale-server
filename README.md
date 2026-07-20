@@ -80,11 +80,11 @@ guide](https://www.apollographql.com/docs/apollo-server/deployment/lambda).
 
 The single DynamoDB table uses `partitionKey`/`sortKey` entity keys and one
 sparse `AccessIndex` (`accessPartition`/`accessSort`) for the access patterns
-the MVP actually needs: ordered products and
-categories, chronological sales, and chronological audit events. Strongly
+the application needs: catalogs, stores, suppliers, purchase orders, receipts,
+active lots, transfers, chronological sales, and stock movements. Strongly
 consistent alias records make SKU, barcode, and category code unique without a
 scan. A sale is one DynamoDB transaction containing its immutable receipt,
-conditional stock decrements, and per-product audit events.
+conditional FEFO lot decrements, and stock movement events.
 
 Every business record and index partition starts with `TENANT#<tenant-id>#`.
 An identity membership record maps a Cognito `sub` to exactly one business and
@@ -103,10 +103,9 @@ the server-authoritative price and cost used at checkout.
 M-Pesa codes also receive a conditional payment lookup record in the sale
 transaction, preventing the same code from being accepted twice.
 
-Admin-managed business name, address, phone, email, departments, thank-you
-text, and return policy are stored at `SETTINGS#BUSINESS/PROFILE`. Branding and
-department mutations update only their owned fields so one form cannot overwrite
-changes from the other; every change writes an audit event. New sales snapshot those settings into the immutable receipt so later
+Admin-managed business name, address, phone, email, thank-you text, and return
+policy are stored at `SETTINGS#BUSINESS/PROFILE`. Stores are separate entities
+with their own inventory. New sales snapshot those settings into the immutable receipt so later
 branding or policy changes do not rewrite historical customer records;
 pre-branding historical sales fall back to the current settings.
 Cashier receipt labels prefer the employee code from the DynamoDB staff profile
@@ -115,15 +114,12 @@ and the first name from Cognito.
 Cognito remains the identity source for first name, family name, email,
 verification state, password, and enabled state. Application display names are
 derived from the two Cognito name attributes. Employment metadata that is
-owned by the business (`employeeCode`, `jobTitle`, `department`, and a
+owned by the business (`employeeCode`, `jobTitle`, assigned store, and a
 non-authentication phone number) is stored in DynamoDB at
 `USER#<cognito-sub>/PROFILE`. Staff can
-change their own phone; an administrator manages employment fields. Department
-is selected from the flat list configured in Business setup (there is no
-department hierarchy). Each new sale
-snapshots that label as `sellerDepartment`, so moving a staff member later does
-not alter historical department reporting. Sales created before this field was
-introduced remain unassigned rather than being inferred from current profiles.
+change their own phone; an administrator manages employment fields and assigns
+one active store. Each new sale snapshots `storeId` and `storeName`, so moving a
+staff member later does not alter historical store reporting.
 
 Changing a staff email updates the existing Cognito identity and requires the
 new address to be verified; the stable Cognito `sub` means historical sales do
@@ -150,11 +146,10 @@ yarn seed:mvp --tenant='<workspace-id>'
 The default catalog is generated deterministically from the version-controlled
 specification in `src/seed/mvp-catalog.ts`. It contains 10 categories and 200
 realistic Kenyan retail products with EAN-13 test barcodes, SKU values, KES
-prices and costs, reorder thresholds, varied opening stock, and 20 promotional
-prices for checkout testing. Re-running the
-loader is safe: it updates existing product metadata by SKU but preserves
-current stock; only new products receive `initialStock`. Validate it without
-AWS access:
+buying and selling prices, units, expiry flags, and 20 promotional prices for
+checkout testing. It creates catalog data only: availability remains zero until
+goods are received from a supplier. Re-running the loader safely updates
+existing product metadata by SKU. Validate it without AWS access:
 
 ```sh
 yarn seed:mvp --validate-only
@@ -163,7 +158,7 @@ yarn seed:mvp --validate-only
 You can still pass a custom JSON seed file as the first argument.
 
 Seeding always targets exactly one tenant. Categories, lookup aliases, products,
-stock, and seed audit records all receive that tenant's key prefix. It never
+and seed audit records all receive that tenant's key prefix. It never
 copies products to other businesses. A newly created business starts empty by
 design; run the seed only for a chosen demo or test workspace.
 

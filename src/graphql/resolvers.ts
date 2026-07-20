@@ -17,8 +17,6 @@ import {
   updateTenantMembershipRoles,
 } from "../repositories/tenant-repository";
 import {
-  adjustStock,
-  adjustStocks,
   completeSale,
   createCategory,
   createProduct,
@@ -43,11 +41,42 @@ import {
   updateProduct,
   updateCategory,
   updateBusinessSettings,
-  updateDepartments,
   upsertStaffProfile,
   type ProductRecord,
   type SaleRecord,
 } from "../repositories/pos-repository";
+import {
+  createPurchaseOrder,
+  createStore,
+  createSupplier,
+  createTransfer,
+  countLot,
+  dispatchTransfer,
+  getPurchaseOrder,
+  getStore,
+  listGoodsReceipts,
+  listLots,
+  listMovements,
+  listPurchaseOrders,
+  listStorePolicies,
+  listStores,
+  listSupplierProducts,
+  listSuppliers,
+  listTransfers,
+  receivePurchaseOrder,
+  receiveTransfer,
+  replenishmentSuggestions,
+  setPurchaseOrderStatus,
+  storeStock,
+  supplyChainReport,
+  updateStore,
+  updateSupplier,
+  updatePurchaseOrder,
+  upsertStorePolicy,
+  upsertSupplierProduct,
+  writeOffLot,
+  type ReceiptLineInput,
+} from "../repositories/supply-chain-repository";
 const requireStaff = (context: GraphQLContext) => requireRole(context, ["admin", "staff"]);
 const requireAdmin = (context: GraphQLContext) => requireRole(context, ["admin"]);
 const actor = (context: GraphQLContext) => ({ id: context.auth.id, name: context.auth.username });
@@ -55,6 +84,28 @@ const tenant = (context: GraphQLContext) => {
   const value = context.auth.tenantId;
   if (!value) throw forbiddenError();
   return value;
+};
+const selectedStore = async (context: GraphQLContext, requested?: string | null) => {
+  const authenticated = requireStaff(context);
+  const tenantId = tenant(context);
+  if (activeRole(authenticated) === "admin" && requested) {
+    const store = await getStore(tenantId, requested);
+    if (!store || store.status !== "active") throw new Error("Select an active store");
+    return store;
+  }
+  const profile = await getStaffProfile(tenantId, authenticated.id);
+  if (profile?.storeId) {
+    const store = await getStore(tenantId, profile.storeId);
+    if (store?.status === "active") return store;
+  }
+  const fallback = (await listStores(tenantId)).find((store) => store.status === "active");
+  if (!fallback) throw new Error("No active store is configured");
+  return fallback;
+};
+const ensureMainStore = async (tenantId: string) => {
+  const existing = (await listStores(tenantId)).find((store) => store.code === "MAIN");
+  if (existing) return existing;
+  return createStore(tenantId, { code: "MAIN", name: "Main Store", address: "" }, { id: "system", name: "Business onboarding" });
 };
 const activeRole = (user: GraphQLContext["auth"]) =>
   user.activeRole ?? (user.roles.includes("admin") ? "admin" : "staff");
@@ -71,15 +122,6 @@ const validateMoney = (value: number, name: string) => {
   if (!Number.isFinite(value) || value < 0) throw new Error(`${name} must be zero or greater`);
 };
 
-const normalizeDepartment = (value: string) => value.trim().replace(/\s+/g, " ");
-const validateDepartment = (value: string) => {
-  const normalized = normalizeDepartment(value);
-  if (!normalized) throw new Error("Department name is required");
-  if (normalized.length > 80) throw new Error("Department names must be 80 characters or fewer");
-  return normalized;
-};
-const departmentIndex = (departments: string[], name: string) =>
-  departments.findIndex((department) => department.toLowerCase() === name.toLowerCase());
 
 const validateCategory = (input: { code: string; name: string; description: string }) => {
   const category = { code: input.code.trim().toUpperCase(), name: input.name.trim(), description: input.description.trim() };
@@ -138,6 +180,10 @@ const resolveCashierNames = async <T extends SaleRecord>(tenantId: string, sales
 
 export const resolvers = {
   Product: {
+    sellingPrice: (product: ProductRecord) => product.sellingPrice ?? product.price,
+    buyingPrice: (product: ProductRecord) => product.buyingPrice ?? product.cost,
+    baseUnit: (product: ProductRecord) => product.baseUnit ?? "unit",
+    tracksExpiry: (product: ProductRecord) => product.tracksExpiry ?? false,
     effectivePrice: (product: ProductRecord) => effectiveProductPrice(product),
     onPromotion: (product: ProductRecord) => effectiveProductPrice(product) < product.price,
   },
@@ -173,29 +219,31 @@ export const resolvers = {
       requireStaff(context);
       return listCategories(tenant(context));
     },
-    products: (_: unknown, _args: unknown, context: GraphQLContext) => {
+    products: async (_: unknown, { storeId }: { storeId?: string }, context: GraphQLContext) => {
       requireStaff(context);
-      return listProducts(tenant(context));
+      const tenantId = tenant(context); const store = await selectedStore(context, storeId); const [products, stock] = await Promise.all([listProducts(tenantId), storeStock(tenantId, store.id)]); const byProduct = new Map(stock.map((item) => [item.productId, item]));
+      return products.map((product) => ({ ...product, stock: byProduct.get(product.id)?.quantity ?? 0, minStock: byProduct.get(product.id)?.reorderPoint ?? 0 }));
     },
-    productPage: (
+    productPage: async (
       _: unknown,
-      args: { search?: string; limit?: number; cursor?: string; activeOnly?: boolean },
+      args: { search?: string; limit?: number; cursor?: string; activeOnly?: boolean; storeId?: string },
       context: GraphQLContext,
     ) => {
       requireStaff(context);
-      return getProductPage(tenant(context), args);
+      const tenantId = tenant(context); const store = await selectedStore(context, args.storeId); const [page, stock] = await Promise.all([getProductPage(tenantId, args), storeStock(tenantId, store.id)]); const byProduct = new Map(stock.map((item) => [item.productId, item]));
+      return { ...page, items: page.items.map((product) => ({ ...product, stock: byProduct.get(product.id)?.quantity ?? 0, minStock: byProduct.get(product.id)?.reorderPoint ?? 0 })) };
     },
     product: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
       requireStaff(context);
       return getProduct(tenant(context), id);
     },
-    productLookup: (_: unknown, { term }: { term: string }, context: GraphQLContext) => {
+    productLookup: async (_: unknown, { term, storeId }: { term: string; storeId?: string }, context: GraphQLContext) => {
       requireStaff(context);
-      return findProduct(tenant(context), term);
+      const tenantId = tenant(context); const [product, store] = await Promise.all([findProduct(tenantId, term), selectedStore(context, storeId)]); if (!product) return null; const stock = (await storeStock(tenantId, store.id)).find((item) => item.productId === product.id); return { ...product, stock: stock?.quantity ?? 0, minStock: stock?.reorderPoint ?? 0 };
     },
     sales: async (
       _: unknown,
-      { limit, personal, from, to }: { limit: number; personal: boolean; from?: string; to?: string },
+      { limit, personal, from, to, storeId }: { limit: number; personal: boolean; from?: string; to?: string; storeId?: string },
       context: GraphQLContext,
     ) => {
       const authenticated = requireStaff(context);
@@ -206,7 +254,7 @@ export const resolvers = {
       const sales = personalView
         ? await listSalesByStaff(tenantId, authenticated.id, safeLimit, range)
         : await listSales(tenantId, safeLimit, range);
-      return resolveCashierNames(tenantId, sales);
+      return resolveCashierNames(tenantId, storeId && !personalView ? sales.filter((sale) => sale.storeId === storeId) : sales);
     },
     sale: async (
       _: unknown,
@@ -233,14 +281,15 @@ export const resolvers = {
     business: async (_: unknown, _args: unknown, context: GraphQLContext) => {
       const admin = requireAdmin(context);
       const settings = await getBusinessSettings(tenant(context));
-      return { id: tenant(context), name: admin.tenantName ?? settings.businessName, departments: settings.departments };
+      return { id: tenant(context), name: admin.tenantName ?? settings.businessName };
     },
     dashboard: async (_: unknown, { days, personal, compact }: { days: number; personal: boolean; compact: boolean }, context: GraphQLContext) => {
       const authenticated = requireStaff(context);
       const isAdmin = activeRole(authenticated) === "admin";
       const personalView = personal || !isAdmin;
       const tenantId = tenant(context);
-      const summary = await dashboardSummary(tenantId, days, personalView ? authenticated.id : undefined, !compact);
+      const store = await selectedStore(context);
+      const summary = await dashboardSummary(tenantId, days, personalView ? authenticated.id : undefined, !compact, store.id);
       const [names, recentSales] = await Promise.all([
         compact ? Promise.resolve(new Map<string, string>()) : cashierNames(tenantId),
         compact ? Promise.resolve(summary.recentSales) : resolveCashierNames(tenantId, summary.recentSales),
@@ -261,6 +310,19 @@ export const resolvers = {
       if (!range.from || !range.to) throw new Error("A report start and end date are required");
       return businessReport(tenant(context), { from: range.from, to: range.to });
     },
+    stores: async (_: unknown, { activeOnly }: { activeOnly: boolean }, context: GraphQLContext) => { requireStaff(context); const values = await listStores(tenant(context)); return activeOnly ? values.filter((value) => value.status === "active") : values; },
+    suppliers: async (_: unknown, { activeOnly }: { activeOnly: boolean }, context: GraphQLContext) => { requireAdmin(context); const values = await listSuppliers(tenant(context)); return activeOnly ? values.filter((value) => value.status === "active") : values; },
+    supplierProducts: (_: unknown, { supplierId }: { supplierId?: string }, context: GraphQLContext) => { requireAdmin(context); return listSupplierProducts(tenant(context), supplierId); },
+    storePolicies: (_: unknown, { storeId }: { storeId: string }, context: GraphQLContext) => { requireAdmin(context); return listStorePolicies(tenant(context), storeId); },
+    storeStock: async (_: unknown, { storeId }: { storeId?: string }, context: GraphQLContext) => storeStock(tenant(context), (await selectedStore(context, storeId)).id),
+    purchaseOrders: (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return listPurchaseOrders(tenant(context)); },
+    purchaseOrder: (_: unknown, { id }: { id: string }, context: GraphQLContext) => { requireAdmin(context); return getPurchaseOrder(tenant(context), id); },
+    goodsReceipts: (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return listGoodsReceipts(tenant(context)); },
+    inventoryLots: (_: unknown, { storeId, includeExhausted }: { storeId?: string; includeExhausted: boolean }, context: GraphQLContext) => { requireAdmin(context); return listLots(tenant(context), storeId, includeExhausted); },
+    stockMovements: async (_: unknown, { from, to, storeId }: { from?: string; to?: string; storeId?: string }, context: GraphQLContext) => { requireAdmin(context); const values = await listMovements(tenant(context), validateDateRange(from, to)); return storeId ? values.filter((value) => value.storeId === storeId) : values; },
+    stockTransfers: (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return listTransfers(tenant(context)); },
+    replenishmentSuggestions: (_: unknown, { storeId, supplierId }: { storeId: string; supplierId: string }, context: GraphQLContext) => { requireAdmin(context); return replenishmentSuggestions(tenant(context), storeId, supplierId); },
+    supplyChainReport: (_: unknown, args: { from: string; to: string; storeId?: string; supplierId?: string; expiryDays?: number }, context: GraphQLContext) => { requireAdmin(context); const range = validateDateRange(args.from, args.to) as { from: string; to: string }; return supplyChainReport(tenant(context), { ...range, storeId: args.storeId, supplierId: args.supplierId, expiryDays: args.expiryDays }); },
   },
 
   Mutation: {
@@ -268,14 +330,16 @@ export const resolvers = {
       const identity = requireIdentity(context);
       if (identity.tenantId) {
         const user = await setCognitoUserRoles(identity.username, identity.roles);
+        const store = await ensureMainStore(identity.tenantId);
         if (!(await getStaffProfile(identity.tenantId, identity.id))) {
-          await upsertStaffProfile(identity.tenantId, identity.id, { employeeCode: "OWNER", jobTitle: "Owner", department: "Management", phone: "" });
+          await upsertStaffProfile(identity.tenantId, identity.id, { employeeCode: "OWNER", jobTitle: "Owner", storeId: store.id, storeName: store.name, phone: "" });
         }
         await ensureBusinessSettings(identity.tenantId, identity.tenantName ?? name, user.email);
         return mergeProfile(identity.tenantId, { ...user, roles: identity.roles });
       }
       const { membership } = await createTenant({ name, ownerUserId: identity.id, ownerUsername: identity.username });
-      await upsertStaffProfile(membership.tenantId, identity.id, { employeeCode: "OWNER", jobTitle: "Owner", department: "Management", phone: "" });
+      const store = await ensureMainStore(membership.tenantId);
+      await upsertStaffProfile(membership.tenantId, identity.id, { employeeCode: "OWNER", jobTitle: "Owner", storeId: store.id, storeName: store.name, phone: "" });
       const user = await getCognitoUser(identity.username);
       await ensureBusinessSettings(membership.tenantId, name, user.email);
       await setCognitoUserRoles(identity.username, membership.roles);
@@ -283,7 +347,7 @@ export const resolvers = {
     },
     inviteUser: async (
       _: unknown,
-      args: { email: string; firstName: string; lastName: string; roles: string[]; employeeCode: string; jobTitle: string; department: string; phone: string },
+      args: { email: string; firstName: string; lastName: string; roles: string[]; employeeCode: string; jobTitle: string; storeId: string; phone: string },
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
@@ -291,12 +355,12 @@ export const resolvers = {
       const admin = requireAdmin(context);
       const roles = parseRoles(args.roles);
       const tenantId = tenant(context);
-      const departments = (await getBusinessSettings(tenantId)).departments;
-      if (!departments.includes(args.department.trim())) throw new Error("Select a department configured for this business");
+      const store = await getStore(tenantId, args.storeId);
+      if (!store || store.status !== "active") throw new Error("Select an active store");
       const user = await inviteCognitoUser({ email: args.email, firstName: args.firstName, lastName: args.lastName, roles });
       try {
         await putTenantMembership({ userId: user.id, username: user.username, tenantId, tenantName: admin.tenantName ?? "Business", roles });
-        await upsertStaffProfile(tenantId, user.id, { employeeCode: args.employeeCode, jobTitle: args.jobTitle, department: args.department, phone: args.phone });
+        await upsertStaffProfile(tenantId, user.id, { employeeCode: args.employeeCode, jobTitle: args.jobTitle, storeId: store.id, storeName: store.name, phone: args.phone });
       } catch (error) {
         await deleteTenantMembership(user.id, tenantId).catch(() => undefined);
         await deleteStaffProfile(tenantId, user.id).catch(() => undefined);
@@ -357,27 +421,27 @@ export const resolvers = {
       return upsertStaffProfile(tenant(context), user.id, {
         employeeCode: current?.employeeCode ?? "",
         jobTitle: current?.jobTitle ?? "",
-        department: current?.department ?? "",
+        storeId: current?.storeId,
+        storeName: current?.storeName,
         phone: input.phone,
       });
     },
     updateStaffProfile: async (
       _: unknown,
-      { userId, ...input }: { userId: string; employeeCode: string; jobTitle: string; department?: string; phone: string },
+      { userId, ...input }: { userId: string; employeeCode: string; jobTitle: string; storeId: string; phone: string },
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
       const tenantId = tenant(context);
       const membership = await getTenantMembership(userId);
       if (!membership || membership.tenantId !== tenantId) throw new Error("Staff user was not found in this business");
-      const current = input.department === undefined ? await getStaffProfile(tenantId, userId) : null;
-      const department = input.department ?? current?.department ?? "";
-      if (!(await getBusinessSettings(tenantId)).departments.includes(department.trim())) throw new Error("Select a department configured for this business");
-      return upsertStaffProfile(tenantId, userId, { ...input, department });
+      const store = await getStore(tenantId, input.storeId);
+      if (!store || store.status !== "active") throw new Error("Select an active store");
+      return upsertStaffProfile(tenantId, userId, { ...input, storeName: store.name });
     },
     updateBusinessSettings: async (
       _: unknown,
-      input: { businessName: string; address: string; phone: string; email: string; departments?: string[]; thankYouMessage: string; returnPolicy: string },
+      input: { businessName: string; address: string; phone: string; email: string; thankYouMessage: string; returnPolicy: string },
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
@@ -386,10 +450,7 @@ export const resolvers = {
       if (input.thankYouMessage.trim().length < 3) throw new Error("Thank-you message is required");
       if (input.returnPolicy.trim().length < 3) throw new Error("Return policy is required");
       if (input.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email.trim())) throw new Error("Enter a valid contact email");
-      // The optional departments argument keeps older clients compatible during
-      // rollout. Department writes are intentionally isolated in their CRUD mutations.
-      const { departments: _legacyDepartments, ...branding } = input;
-      return updateBusinessSettings(tenant(context), branding, actor(context));
+      return updateBusinessSettings(tenant(context), input, actor(context));
     },
     createCategory: (_: unknown, args: { code: string; name: string; description: string }, context: GraphQLContext) => {
       requireAdmin(context);
@@ -404,56 +465,15 @@ export const resolvers = {
       await deleteCategory(tenant(context), id, actor(context));
       return true;
     },
-    createDepartment: async (_: unknown, { name }: { name: string }, context: GraphQLContext) => {
-      requireAdmin(context);
-      const tenantId = tenant(context);
-      const nextName = validateDepartment(name);
-      const current = (await getBusinessSettings(tenantId)).departments;
-      if (departmentIndex(current, nextName) >= 0) throw new Error("A department with this name already exists");
-      return updateDepartments(tenantId, current, [...current, nextName], actor(context));
-    },
-    updateDepartment: async (_: unknown, { currentName, name }: { currentName: string; name: string }, context: GraphQLContext) => {
-      requireAdmin(context);
-      const tenantId = tenant(context);
-      const nextName = validateDepartment(name);
-      const current = (await getBusinessSettings(tenantId)).departments;
-      const index = departmentIndex(current, normalizeDepartment(currentName));
-      if (index < 0) throw new Error("Department not found");
-      const duplicate = departmentIndex(current, nextName);
-      if (duplicate >= 0 && duplicate !== index) throw new Error("A department with this name already exists");
-      const previousName = current[index];
-      if (previousName === nextName) return current;
-      const memberships = await listTenantMemberships(tenantId);
-      const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId));
-      const renamedProfiles = [...profiles.values()]
-        .filter(({ department }) => department.toLowerCase() === previousName.toLowerCase())
-        .map(({ userId, department }) => ({ userId, from: department, to: nextName }));
-      const next = current.map((department, departmentPosition) => departmentPosition === index ? nextName : department);
-      return updateDepartments(tenantId, current, next, actor(context), renamedProfiles);
-    },
-    deleteDepartment: async (_: unknown, { name }: { name: string }, context: GraphQLContext) => {
-      requireAdmin(context);
-      const tenantId = tenant(context);
-      const current = (await getBusinessSettings(tenantId)).departments;
-      const index = departmentIndex(current, normalizeDepartment(name));
-      if (index < 0) throw new Error("Department not found");
-      const memberships = await listTenantMemberships(tenantId);
-      const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId));
-      const department = current[index];
-      if ([...profiles.values()].some((profile) => profile.department.toLowerCase() === department.toLowerCase())) {
-        throw new Error("Reassign staff before deleting this department");
-      }
-      return updateDepartments(tenantId, current, current.filter((_, position) => position !== index), actor(context));
-    },
     createProduct: (
       _: unknown,
-      args: Omit<ProductRecord, "id" | "categoryName" | "stock" | "status" | "createdAt" | "updatedAt"> & { initialStock: number },
+      args: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "baseUnit" | "tracksExpiry">,
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
-      validateMoney(args.price, "Price");
-      validateMoney(args.cost, "Cost");
-      if (!Number.isInteger(args.initialStock) || args.initialStock < 0 || !Number.isInteger(args.minStock) || args.minStock < 0) throw new Error("Stock values must be whole numbers of zero or greater");
+      validateMoney(args.sellingPrice, "Selling price");
+      validateMoney(args.buyingPrice, "Buying price");
+      if (!args.baseUnit.trim()) throw new Error("Base unit is required");
       return createProduct(tenant(context), args, actor(context));
     },
     updateProduct: async (
@@ -462,13 +482,13 @@ export const resolvers = {
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
-      if (updates.price !== undefined) validateMoney(updates.price, "Price");
-      if (updates.cost !== undefined) validateMoney(updates.cost, "Cost");
+      if (updates.sellingPrice !== undefined) validateMoney(updates.sellingPrice, "Selling price");
+      if (updates.buyingPrice !== undefined) validateMoney(updates.buyingPrice, "Buying price");
       if (updates.promotionPrice !== undefined && updates.promotionPrice !== null) {
         validateMoney(updates.promotionPrice, "Promotion price");
         const current = await getProduct(tenant(context), id);
         if (!current) throw new Error("Product not found");
-        if (updates.promotionPrice >= (updates.price ?? current.price)) throw new Error("Promotion price must be lower than the regular selling price");
+        if (updates.promotionPrice >= (updates.sellingPrice ?? current.sellingPrice)) throw new Error("Promotion price must be lower than the regular selling price");
       }
       if (updates.promotionStartsAt && Number.isNaN(Date.parse(updates.promotionStartsAt))) throw new Error("Promotion start date is invalid");
       if (updates.promotionEndsAt && Number.isNaN(Date.parse(updates.promotionEndsAt))) throw new Error("Promotion end date is invalid");
@@ -477,19 +497,16 @@ export const resolvers = {
     },
     archiveProduct: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
       requireAdmin(context);
-      return updateProduct(tenant(context), id, { status: "inactive" }, actor(context));
-    },
-    adjustStock: (_: unknown, args: { productId: string; delta: number; reason: string }, context: GraphQLContext) => {
-      requireAdmin(context);
-      return adjustStock(tenant(context), args.productId, args.delta, args.reason, actor(context));
-    },
-    adjustStocks: (_: unknown, args: { adjustments: Array<{ productId: string; delta: number }>; reason: string }, context: GraphQLContext) => {
-      requireAdmin(context);
-      return adjustStocks(tenant(context), args.adjustments, args.reason, actor(context));
+      const tenantId = tenant(context);
+      return listLots(tenantId).then((lots) => {
+        if (lots.some((lot) => lot.productId === id && lot.remainingQuantity > 0)) throw new Error("Transfer, sell, or write off this product's stock before archiving it");
+        return updateProduct(tenantId, id, { status: "inactive" }, actor(context));
+      });
     },
     completeSale: async (
       _: unknown,
       args: {
+        storeId?: string;
         customerName?: string;
         paymentMethod: "cash" | "mpesa";
         amountTendered?: number | null;
@@ -501,8 +518,25 @@ export const resolvers = {
       const authenticated = requireStaff(context);
       if (!(args.paymentMethod === "cash" || args.paymentMethod === "mpesa")) throw new Error("Payment method must be cash or M-Pesa");
       const tenantId = tenant(context);
-      const [user, profile] = await Promise.all([getCognitoUser(authenticated.username), getStaffProfile(tenantId, authenticated.id)]);
-      return completeSale(tenantId, args, { id: authenticated.id, name: user.name, employeeCode: profile?.employeeCode, department: profile?.department });
+      const [user, profile, store] = await Promise.all([getCognitoUser(authenticated.username), getStaffProfile(tenantId, authenticated.id), selectedStore(context, args.storeId)]);
+      return completeSale(tenantId, { ...args, storeId: store.id }, { id: authenticated.id, name: user.name, employeeCode: profile?.employeeCode, storeName: store.name });
     },
+    createStore: (_: unknown, input: { code: string; name: string; address: string }, context: GraphQLContext) => { requireAdmin(context); return createStore(tenant(context), input, actor(context)); },
+    updateStore: async (_: unknown, { id, ...input }: { id: string; name?: string; address?: string; status?: "active" | "inactive" }, context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); if (input.status === "inactive") { const memberships = await listTenantMemberships(tenantId); const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId)); if ([...profiles.values()].some((profile) => profile.storeId === id)) throw new Error("Reassign staff before deactivating this store"); } return updateStore(tenantId, id, input); },
+    createSupplier: (_: unknown, input: { code: string; name: string; contactName: string; phone: string; email: string; address: string }, context: GraphQLContext) => { requireAdmin(context); return createSupplier(tenant(context), input); },
+    updateSupplier: (_: unknown, { id, ...input }: { id: string; name?: string; contactName?: string; phone?: string; email?: string; address?: string; status?: "active" | "inactive" }, context: GraphQLContext) => { requireAdmin(context); return updateSupplier(tenant(context), id, input); },
+    upsertSupplierProduct: (_: unknown, input: { supplierId: string; productId: string; supplierSku: string; purchaseUnit: string; unitsPerPurchaseUnit: number; lastPurchasePrice: number; preferred: boolean }, context: GraphQLContext) => { requireAdmin(context); return upsertSupplierProduct(tenant(context), { ...input, updatedAt: new Date().toISOString() }); },
+    upsertStorePolicy: (_: unknown, input: { storeId: string; productId: string; reorderPoint: number; targetQuantity: number }, context: GraphQLContext) => { requireAdmin(context); return upsertStorePolicy(tenant(context), input); },
+    createPurchaseOrder: (_: unknown, input: { supplierId: string; storeId: string; expectedDeliveryDate?: string; notes: string; lines: Array<{ productId: string; productName: string; supplierSku: string; purchaseUnit: string; unitsPerPurchaseUnit: number; orderedPurchaseQuantity: number; pricePerPurchaseUnit: number }>; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createPurchaseOrder(tenant(context), input, actor(context), input.requestId); },
+    updatePurchaseOrder: (_: unknown, { id, ...input }: { id: string; supplierId: string; storeId: string; expectedDeliveryDate?: string; notes: string; lines: Array<{ productId: string; productName: string; supplierSku: string; purchaseUnit: string; unitsPerPurchaseUnit: number; orderedPurchaseQuantity: number; pricePerPurchaseUnit: number }> }, context: GraphQLContext) => { requireAdmin(context); return updatePurchaseOrder(tenant(context), id, input); },
+    issuePurchaseOrder: (_: unknown, { id }: { id: string }, context: GraphQLContext) => { requireAdmin(context); return setPurchaseOrderStatus(tenant(context), id, "issue", ""); },
+    closePurchaseOrder: (_: unknown, { id, reason }: { id: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return setPurchaseOrderStatus(tenant(context), id, "close", reason); },
+    cancelPurchaseOrder: (_: unknown, { id, reason }: { id: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return setPurchaseOrderStatus(tenant(context), id, "cancel", reason); },
+    receivePurchaseOrder: (_: unknown, { purchaseOrderId, deliveryNote, lines, requestId }: { purchaseOrderId: string; deliveryNote: string; lines: ReceiptLineInput[]; requestId: string }, context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); return receivePurchaseOrder(tenantId, purchaseOrderId, deliveryNote, lines, actor(context), requestId, async (productId) => (await getProduct(tenantId, productId))?.tracksExpiry ?? false); },
+    writeOffLot: (_: unknown, { lotId, quantity, type, reason, requestId }: { lotId: string; quantity: number; type: "damage" | "expiry"; reason: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); if (!(type === "damage" || type === "expiry")) throw new Error("Write-off type must be damage or expiry"); return writeOffLot(tenant(context), lotId, quantity, type, reason, actor(context), requestId); },
+    countInventoryLot: (_: unknown, { lotId, physicalQuantity, reason, requestId }: { lotId: string; physicalQuantity: number; reason: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return countLot(tenant(context), lotId, physicalQuantity, reason, actor(context), requestId); },
+    createStockTransfer: (_: unknown, input: { fromStoreId: string; toStoreId: string; notes: string; lines: Array<{ productId: string; productName: string; quantity: number }>; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createTransfer(tenant(context), input, actor(context), input.requestId); },
+    dispatchStockTransfer: (_: unknown, { id, requestId }: { id: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return dispatchTransfer(tenant(context), id, actor(context), requestId); },
+    receiveStockTransfer: (_: unknown, { id, requestId }: { id: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return receiveTransfer(tenant(context), id, actor(context), requestId); },
   },
 };
