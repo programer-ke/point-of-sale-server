@@ -4,6 +4,7 @@ export const typeDefs = `#graphql
     jobTitle: String!
     storeId: ID
     storeName: String
+    storeIds: [ID!]!
     phone: String!
   }
 
@@ -45,6 +46,7 @@ export const typeDefs = `#graphql
     buyingPrice: Float!
     baseUnit: String!
     tracksExpiry: Boolean!
+    saleVariants: [SaleVariant!]!
     promotionPrice: Float
     promotionStartsAt: String
     promotionEndsAt: String
@@ -55,6 +57,8 @@ export const typeDefs = `#graphql
     createdAt: String!
     updatedAt: String!
   }
+
+  type SaleVariant { id: ID!, name: String!, sku: String!, barcode: String!, quantityInBaseUnits: Int!, sellingPrice: Float!, status: String! }
 
   type ProductPage {
     items: [Product!]!
@@ -68,6 +72,10 @@ export const typeDefs = `#graphql
     sku: String!
     barcode: String!
     quantity: Int!
+    variantId: ID!
+    variantName: String!
+    quantityInBaseUnits: Int!
+    inventoryQuantity: Int!
     price: Float!
     regularPrice: Float
     promotionApplied: Boolean
@@ -164,6 +172,7 @@ export const typeDefs = `#graphql
     email: String!
     thankYouMessage: String!
     returnPolicy: String!
+    storeName: String!
     updatedAt: String!
   }
 
@@ -209,14 +218,22 @@ export const typeDefs = `#graphql
 
   input SaleItemInput {
     productId: ID!
+    variantId: ID
     quantity: Int!
   }
+  input SaleVariantInput { id: ID, name: String!, sku: String = "", barcode: String = "", quantityInBaseUnits: Int!, sellingPrice: Float!, status: String = "active" }
 
   type Store {
     id: ID!
     code: String!
     name: String!
     address: String!
+    receiptBusinessName: String!
+    receiptAddress: String!
+    receiptPhone: String!
+    receiptEmail: String!
+    receiptFooter: String!
+    receiptReturnPolicy: String!
     status: String!
     createdAt: String!
     updatedAt: String!
@@ -388,6 +405,8 @@ export const typeDefs = `#graphql
     createdAt: String!
     updatedAt: String!
   }
+  type StockRequisitionLine { productId: ID!, productName: String!, quantity: Int! }
+  type StockRequisition { id: ID!, requisitionNumber: String!, fromStoreId: ID!, fromStoreName: String!, toStoreId: ID!, toStoreName: String!, status: String!, notes: String!, decisionReason: String, lines: [StockRequisitionLine!]!, requestedBy: ID!, requestedByName: String!, decidedBy: ID, decidedByName: String, transferId: ID, createdAt: String!, updatedAt: String! }
 
   type StocktakeLine { lotId: ID!, productId: ID!, productName: String!, batchNumber: String!, expectedQuantity: Int!, countedQuantity: Int, variance: Int, unitCost: Float! }
   type StocktakeSession { id: ID!, stocktakeNumber: String!, storeId: ID!, storeName: String!, name: String!, status: String!, lines: [StocktakeLine!]!, createdBy: ID!, createdByName: String!, completedBy: ID, completedByName: String, reason: String, createdAt: String!, completedAt: String, updatedAt: String! }
@@ -450,6 +469,7 @@ export const typeDefs = `#graphql
     business: Business!
     businessReport(from: String!, to: String!, storeId: ID): BusinessReport!
     stores(activeOnly: Boolean = false): [Store!]!
+    requisitionStores: [Store!]!
     suppliers(activeOnly: Boolean = false): [Supplier!]!
     supplierProducts(supplierId: ID): [SupplierProduct!]!
     storePolicies(storeId: ID!): [StoreProductPolicy!]!
@@ -462,6 +482,8 @@ export const typeDefs = `#graphql
     stockMovements(from: String, to: String, storeId: ID): [StockMovement!]!
     stockTransfers: [StockTransfer!]!
     stockTransfer(id: ID!): StockTransfer
+    stockRequisitions: [StockRequisition!]!
+    stockRequisition(id: ID!): StockRequisition
     stocktakes(storeId: ID): [StocktakeSession!]!
     stocktake(id: ID!): StocktakeSession
     myOpenCashShift(storeId: ID): CashShift
@@ -472,25 +494,25 @@ export const typeDefs = `#graphql
 
   type Mutation {
     createBusiness(name: String!): User!
-    inviteUser(email: String!, firstName: String!, lastName: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", storeId: ID!, phone: String = ""): User!
+    inviteUser(email: String!, firstName: String!, lastName: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", storeId: ID!, storeIds: [ID!] = [], phone: String = ""): User!
     resendUserInvitation(username: String!): User!
     updateUserRoles(username: String!, roles: [String!]!): User!
     setUserEnabled(username: String!, enabled: Boolean!): User!
     updateStaffEmail(username: String!, email: String!): User!
     deleteStaffUser(username: String!): Boolean!
     updateMyProfile(phone: String!): StaffProfile!
-    updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, storeId: ID!, phone: String!): StaffProfile!
+    updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, storeId: ID!, storeIds: [ID!] = [], phone: String!): StaffProfile!
     updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
 
     createCategory(code: String!, name: String!, description: String = ""): Category!
     updateCategory(id: ID!, code: String!, name: String!, description: String = ""): Category!
     deleteCategory(id: ID!): Boolean!
-    createProduct(name: String!, description: String = "", sku: String!, barcode: String!, categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, baseUnit: String!, tracksExpiry: Boolean!): Product!
-    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, baseUnit: String, tracksExpiry: Boolean, promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
+    createProduct(name: String!, description: String = "", sku: String!, barcode: String!, categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, baseUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!): Product!
+    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, baseUnit: String, tracksExpiry: Boolean, saleVariants: [SaleVariantInput!], promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
     archiveProduct(id: ID!): Product!
     completeSale(storeId: ID, customerName: String, paymentMethod: String!, amountTendered: Float, mpesaReference: String, items: [SaleItemInput!]!, requestId: ID!): Sale!
-    createStore(code: String!, name: String!, address: String = ""): Store!
-    updateStore(id: ID!, name: String, address: String, status: String): Store!
+    createStore(code: String!, name: String!, address: String = "", receiptBusinessName: String = "", receiptAddress: String = "", receiptPhone: String = "", receiptEmail: String = "", receiptFooter: String = "", receiptReturnPolicy: String = ""): Store!
+    updateStore(id: ID!, name: String, address: String, receiptBusinessName: String, receiptAddress: String, receiptPhone: String, receiptEmail: String, receiptFooter: String, receiptReturnPolicy: String, status: String): Store!
     createSupplier(code: String!, name: String!, contactName: String = "", phone: String = "", email: String = "", address: String = ""): Supplier!
     updateSupplier(id: ID!, name: String, contactName: String, phone: String, email: String, address: String, status: String): Supplier!
     upsertSupplierProduct(supplierId: ID!, productId: ID!, supplierSku: String!, purchaseUnit: String!, unitsPerPurchaseUnit: Int!, lastPurchasePrice: Float!, preferred: Boolean!): SupplierProduct!
@@ -507,6 +529,9 @@ export const typeDefs = `#graphql
     dispatchStockTransfer(id: ID!, requestId: ID!): StockTransfer!
     receiveStockTransfer(id: ID!, lines: [TransferReceiptLineInput!]!, requestId: ID!): StockTransfer!
     cancelStockTransfer(id: ID!, reason: String!): StockTransfer!
+    createStockRequisition(fromStoreId: ID!, toStoreId: ID, notes: String = "", lines: [StockTransferLineInput!]!, requestId: ID!): StockRequisition!
+    decideStockRequisition(id: ID!, decision: String!, reason: String = ""): StockRequisition!
+    convertStockRequisition(id: ID!, requestId: ID!): StockTransfer!
     createStocktake(storeId: ID!, name: String!, productId: ID, requestId: ID!): StocktakeSession!
     completeStocktake(id: ID!, counts: [StocktakeCountInput!]!, reason: String!, requestId: ID!): StocktakeSession!
     cancelStocktake(id: ID!, reason: String!): StocktakeSession!

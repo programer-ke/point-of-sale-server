@@ -55,6 +55,9 @@ import {
   createStore,
   createSupplier,
   createTransfer,
+  createRequisition,
+  decideRequisition,
+  convertRequisitionToTransfer,
   cancelTransfer,
   createStocktake,
   completeStocktake,
@@ -64,6 +67,7 @@ import {
   getPurchaseOrder,
   getGoodsReceipt,
   getTransfer,
+  getRequisition,
   getStocktake,
   getStore,
   listGoodsReceipts,
@@ -75,6 +79,7 @@ import {
   listSupplierProducts,
   listSuppliers,
   listTransfers,
+  listRequisitions,
   listStocktakes,
   receivePurchaseOrder,
   receiveTransfer,
@@ -107,6 +112,9 @@ const selectedStore = async (context: GraphQLContext, requested?: string | null)
     return store;
   }
   const profile = await getStaffProfile(tenantId, authenticated.id);
+  if (requested && profile?.storeIds?.includes(requested)) {
+    const assigned = await getStore(tenantId, requested); if (assigned?.status === "active") return assigned;
+  }
   if (profile?.storeId) {
     const store = await getStore(tenantId, profile.storeId);
     if (store?.status === "active") return store;
@@ -197,9 +205,7 @@ export const resolvers = {
     onPromotion: (product: ProductRecord) => effectiveProductPrice(product) < product.sellingPrice,
   },
   Sale: {
-    // Regenerated receipts intentionally use current branding. Sale prices and
-    // payment facts remain immutable snapshots on the sale record.
-    receiptBranding: (_sale: SaleRecord, _args: unknown, context: GraphQLContext) => getBusinessSettings(tenant(context)),
+    receiptBranding: (sale: SaleRecord) => sale.receiptBranding,
   },
   Query: {
     me: async (_: unknown, _args: unknown, context: GraphQLContext) => {
@@ -319,7 +325,8 @@ export const resolvers = {
       if (!range.from || !range.to) throw new Error("A report start and end date are required");
       return businessReport(tenant(context), { from: range.from, to: range.to, storeId });
     },
-    stores: async (_: unknown, { activeOnly }: { activeOnly: boolean }, context: GraphQLContext) => { requireStaff(context); const values = await listStores(tenant(context)); return activeOnly ? values.filter((value) => value.status === "active") : values; },
+    stores: async (_: unknown, { activeOnly }: { activeOnly: boolean }, context: GraphQLContext) => { const authenticated = requireStaff(context); const tenantId = tenant(context); let values = await listStores(tenantId); if (activeRole(authenticated) !== "admin") { const profile = await getStaffProfile(tenantId, authenticated.id); const allowed = new Set(profile?.storeIds?.length ? profile.storeIds : profile?.storeId ? [profile.storeId] : []); values = values.filter((store) => allowed.has(store.id)); } return activeOnly ? values.filter((value) => value.status === "active") : values; },
+    requisitionStores: async (_: unknown, _args: unknown, context: GraphQLContext) => { requireStaff(context); return (await listStores(tenant(context))).filter((store) => store.status === "active"); },
     suppliers: async (_: unknown, { activeOnly }: { activeOnly: boolean }, context: GraphQLContext) => { requireAdmin(context); const values = await listSuppliers(tenant(context)); return activeOnly ? values.filter((value) => value.status === "active") : values; },
     supplierProducts: (_: unknown, { supplierId }: { supplierId?: string }, context: GraphQLContext) => { requireAdmin(context); return listSupplierProducts(tenant(context), supplierId); },
     storePolicies: (_: unknown, { storeId }: { storeId: string }, context: GraphQLContext) => { requireAdmin(context); return listStorePolicies(tenant(context), storeId); },
@@ -332,6 +339,8 @@ export const resolvers = {
     stockMovements: async (_: unknown, { from, to, storeId }: { from?: string; to?: string; storeId?: string }, context: GraphQLContext) => { requireAdmin(context); const values = await listMovements(tenant(context), validateDateRange(from, to)); return storeId ? values.filter((value) => value.storeId === storeId) : values; },
     stockTransfers: (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return listTransfers(tenant(context)); },
     stockTransfer: (_: unknown, { id }: { id: string }, context: GraphQLContext) => { requireAdmin(context); return getTransfer(tenant(context), id); },
+    stockRequisitions: async (_: unknown, _args: unknown, context: GraphQLContext) => { const authenticated = requireStaff(context); const tenantId = tenant(context); const values = await listRequisitions(tenantId); if (activeRole(authenticated) === "admin") return values; const profile = await getStaffProfile(tenantId, authenticated.id); const allowed = new Set(profile?.storeIds ?? []); return values.filter((item) => allowed.has(item.fromStoreId) || allowed.has(item.toStoreId)); },
+    stockRequisition: async (_: unknown, { id }: { id: string }, context: GraphQLContext) => { const authenticated = requireStaff(context); const tenantId = tenant(context); const value = await getRequisition(tenantId, id); if (!value || activeRole(authenticated) === "admin") return value; const profile = await getStaffProfile(tenantId, authenticated.id); const allowed = new Set(profile?.storeIds ?? []); if (!allowed.has(value.fromStoreId) && !allowed.has(value.toStoreId)) throw forbiddenError(); return value; },
     stocktakes: (_: unknown, { storeId }: { storeId?: string }, context: GraphQLContext) => { requireAdmin(context); return listStocktakes(tenant(context), storeId); },
     stocktake: (_: unknown, { id }: { id: string }, context: GraphQLContext) => { requireAdmin(context); return getStocktake(tenant(context), id); },
     myOpenCashShift: async (_: unknown, { storeId }: { storeId?: string }, context: GraphQLContext) => { const user = requireStaff(context); const store = await selectedStore(context, storeId); return getOpenCashShift(tenant(context), store.id, user.id); },
@@ -362,7 +371,7 @@ export const resolvers = {
     },
     inviteUser: async (
       _: unknown,
-      args: { email: string; firstName: string; lastName: string; roles: string[]; employeeCode: string; jobTitle: string; storeId: string; phone: string },
+      args: { email: string; firstName: string; lastName: string; roles: string[]; employeeCode: string; jobTitle: string; storeId: string; storeIds: string[]; phone: string },
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
@@ -370,12 +379,13 @@ export const resolvers = {
       const admin = requireAdmin(context);
       const roles = parseRoles(args.roles);
       const tenantId = tenant(context);
-      const store = await getStore(tenantId, args.storeId);
+      const assignedIds = [...new Set([args.storeId, ...args.storeIds])]; const assignedStores = await Promise.all(assignedIds.map((id) => getStore(tenantId, id))); const store = assignedStores[0];
+      if (assignedStores.some((value) => !value || value.status !== "active")) throw new Error("All assigned stores must be active");
       if (!store || store.status !== "active") throw new Error("Select an active store");
       const user = await inviteCognitoUser({ email: args.email, firstName: args.firstName, lastName: args.lastName, roles });
       try {
         await putTenantMembership({ userId: user.id, username: user.username, tenantId, tenantName: admin.tenantName ?? "Business", roles });
-        await upsertStaffProfile(tenantId, user.id, { employeeCode: args.employeeCode, jobTitle: args.jobTitle, storeId: store.id, storeName: store.name, phone: args.phone });
+        await upsertStaffProfile(tenantId, user.id, { employeeCode: args.employeeCode, jobTitle: args.jobTitle, storeId: store.id, storeName: store.name, storeIds: assignedIds, phone: args.phone });
       } catch (error) {
         await deleteTenantMembership(user.id, tenantId).catch(() => undefined);
         await deleteStaffProfile(tenantId, user.id).catch(() => undefined);
@@ -443,16 +453,16 @@ export const resolvers = {
     },
     updateStaffProfile: async (
       _: unknown,
-      { userId, ...input }: { userId: string; employeeCode: string; jobTitle: string; storeId: string; phone: string },
+      { userId, ...input }: { userId: string; employeeCode: string; jobTitle: string; storeId: string; storeIds: string[]; phone: string },
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
       const tenantId = tenant(context);
       const membership = await getTenantMembership(userId);
       if (!membership || membership.tenantId !== tenantId) throw new Error("Staff user was not found in this business");
-      const store = await getStore(tenantId, input.storeId);
-      if (!store || store.status !== "active") throw new Error("Select an active store");
-      return upsertStaffProfile(tenantId, userId, { ...input, storeName: store.name });
+      const assignedIds = [...new Set([input.storeId, ...input.storeIds])]; const assignedStores = await Promise.all(assignedIds.map((id) => getStore(tenantId, id))); const store = assignedStores[0];
+      if (!store || assignedStores.some((value) => !value || value.status !== "active")) throw new Error("All assigned stores must be active");
+      return upsertStaffProfile(tenantId, userId, { ...input, storeIds: assignedIds, storeName: store.name });
     },
     updateBusinessSettings: async (
       _: unknown,
@@ -482,7 +492,7 @@ export const resolvers = {
     },
     createProduct: (
       _: unknown,
-      args: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "baseUnit" | "tracksExpiry">,
+      args: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "baseUnit" | "tracksExpiry" | "saleVariants">,
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
@@ -526,7 +536,7 @@ export const resolvers = {
         paymentMethod: "cash" | "mpesa";
         amountTendered?: number | null;
         mpesaReference?: string | null;
-        items: Array<{ productId: string; quantity: number }>;
+        items: Array<{ productId: string; variantId?: string | null; quantity: number }>;
         requestId: string;
       },
       context: GraphQLContext,
@@ -537,8 +547,8 @@ export const resolvers = {
       const [user, profile, store] = await Promise.all([getCognitoUser(authenticated.username), getStaffProfile(tenantId, authenticated.id), selectedStore(context, args.storeId)]);
       return completeSale(tenantId, { ...args, storeId: store.id }, { id: authenticated.id, name: user.name, employeeCode: profile?.employeeCode, storeName: store.name });
     },
-    createStore: (_: unknown, input: { code: string; name: string; address: string }, context: GraphQLContext) => { requireAdmin(context); return createStore(tenant(context), input, actor(context)); },
-    updateStore: async (_: unknown, { id, ...input }: { id: string; name?: string; address?: string; status?: "active" | "inactive" }, context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); if (input.status === "inactive") { const memberships = await listTenantMemberships(tenantId); const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId)); if ([...profiles.values()].some((profile) => profile.storeId === id)) throw new Error("Reassign staff before deactivating this store"); } return updateStore(tenantId, id, input); },
+    createStore: (_: unknown, input: Parameters<typeof createStore>[1], context: GraphQLContext) => { requireAdmin(context); return createStore(tenant(context), input, actor(context)); },
+    updateStore: async (_: unknown, { id, ...input }: { id: string } & Parameters<typeof updateStore>[2], context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); if (input.status === "inactive") { const memberships = await listTenantMemberships(tenantId); const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId)); if ([...profiles.values()].some((profile) => profile.storeIds?.includes(id) || profile.storeId === id)) throw new Error("Reassign staff before deactivating this store"); } return updateStore(tenantId, id, input); },
     createSupplier: (_: unknown, input: { code: string; name: string; contactName: string; phone: string; email: string; address: string }, context: GraphQLContext) => { requireAdmin(context); return createSupplier(tenant(context), input); },
     updateSupplier: (_: unknown, { id, ...input }: { id: string; name?: string; contactName?: string; phone?: string; email?: string; address?: string; status?: "active" | "inactive" }, context: GraphQLContext) => { requireAdmin(context); return updateSupplier(tenant(context), id, input); },
     upsertSupplierProduct: (_: unknown, input: { supplierId: string; productId: string; supplierSku: string; purchaseUnit: string; unitsPerPurchaseUnit: number; lastPurchasePrice: number; preferred: boolean }, context: GraphQLContext) => { requireAdmin(context); return upsertSupplierProduct(tenant(context), { ...input, updatedAt: new Date().toISOString() }); },
@@ -555,6 +565,9 @@ export const resolvers = {
     dispatchStockTransfer: (_: unknown, { id, requestId }: { id: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return dispatchTransfer(tenant(context), id, actor(context), requestId); },
     receiveStockTransfer: (_: unknown, { id, lines, requestId }: { id: string; lines: Array<{ lotId: string; receivedQuantity: number; damagedQuantity: number; missingQuantity: number; reason: string }>; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return receiveTransfer(tenant(context), id, lines, actor(context), requestId); },
     cancelStockTransfer: (_: unknown, { id, reason }: { id: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return cancelTransfer(tenant(context), id, reason); },
+    createStockRequisition: async (_: unknown, { toStoreId, requestId, ...input }: { fromStoreId: string; toStoreId?: string; notes: string; lines: Array<{ productId: string; quantity: number }>; requestId: string }, context: GraphQLContext) => { requireStaff(context); const store = await selectedStore(context, toStoreId); return createRequisition(tenant(context), { ...input, toStoreId: store.id }, actor(context), requestId); },
+    decideStockRequisition: (_: unknown, { id, decision, reason }: { id: string; decision: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); if (!(["approve", "reject", "cancel"] as string[]).includes(decision)) throw new Error("Decision must be approve, reject, or cancel"); return decideRequisition(tenant(context), id, decision as "approve" | "reject" | "cancel", reason, actor(context)); },
+    convertStockRequisition: (_: unknown, { id, requestId }: { id: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return convertRequisitionToTransfer(tenant(context), id, actor(context), requestId); },
     createStocktake: (_: unknown, { storeId, name, productId, requestId }: { storeId: string; name: string; productId?: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createStocktake(tenant(context), storeId, name, actor(context), requestId, productId); },
     completeStocktake: (_: unknown, { id, counts, reason, requestId }: { id: string; counts: Array<{ lotId: string; quantity: number }>; reason: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return completeStocktake(tenant(context), id, counts, reason, actor(context), requestId); },
     cancelStocktake: (_: unknown, { id, reason }: { id: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return cancelStocktake(tenant(context), id, reason, actor(context)); },

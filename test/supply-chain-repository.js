@@ -91,6 +91,39 @@ async function main() {
   assert.equal(movement.quantity, -2);
   assert.equal(transaction.length, 3, "lot decrement, movement, and idempotency record must be atomic");
   assert.match(transaction[0].Update.ConditionExpression, /remainingQuantity/);
+
+  const destination = { ...store, id: "store-2", code: "WEST", name: "West Store" };
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") {
+      const key = command.input.Key.partitionKey;
+      if (key.includes("IDEMPOTENCY#")) return {};
+      if (key.includes("STORE#store-2")) return { Item: destination };
+      if (key.includes("STORE#store-1")) return { Item: store };
+      if (key.includes("PRODUCT#")) return { Item: product };
+      return {};
+    }
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  const requisition = await supply.createRequisition(tenantId, { fromStoreId: store.id, toStoreId: destination.id, notes: "Top up shelves", lines: [{ productId: product.id, quantity: 6 }] }, { id: "staff-1", name: "Staff" }, "req-1");
+  assert.equal(requisition.status, "requested");
+  const storedRequisition = transaction[0].Put.Item;
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return { Item: storedRequisition };
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  const approved = await supply.decideRequisition(tenantId, requisition.id, "approve", "Stock available", { id: "admin", name: "Admin" });
+  assert.equal(approved.status, "approved");
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return command.input.Key.partitionKey.includes("IDEMPOTENCY#") ? {} : { Item: approved };
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  const transfer = await supply.convertRequisitionToTransfer(tenantId, requisition.id, { id: "admin", name: "Admin" }, "req-convert-1");
+  assert.equal(transfer.status, "draft");
+  assert.equal(transfer.fromStoreId, store.id);
+  assert.equal(transaction.filter((item) => item.Put?.Item?.entityType === "stock_transfer").length, 1);
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

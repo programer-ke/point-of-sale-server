@@ -35,6 +35,7 @@ const secondProduct = {
   barcode: "987654321",
 };
 const cashShift = { id: "shift-1", storeId: "store-1", storeName: "Main Store", cashierId: "cashier-1", cashierName: "Cashier Name", status: "open", openingFloat: 500, cashSalesTotal: 0, cashInTotal: 0, cashOutTotal: 0, openedAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" };
+const store = { id: "store-1", code: "MAIN", name: "Main Store", address: "Nairobi", receiptBusinessName: "Main Market", receiptAddress: "", receiptPhone: "", receiptEmail: "", receiptFooter: "", receiptReturnPolicy: "", status: "active", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" };
 const lot = {
   partitionKey: "TENANT#tenant-1#LOT#lot-1", sortKey: "PROFILE", accessPartition: "TENANT#tenant-1#INVENTORY#ACTIVE",
   accessSort: "store-1#9999-12-31#2026-01-01#lot-1", id: "lot-1", storeId: "store-1", productId: "product-1",
@@ -49,6 +50,7 @@ async function main() {
       if (command.input.Key.partitionKey.includes("IDEMPOTENCY#")) return {};
       if (command.input.Key.partitionKey.includes("CASH_SHIFT_OPEN#")) return { Item: { shiftId: cashShift.id } };
       if (command.input.Key.partitionKey.endsWith(`CASH_SHIFT#${cashShift.id}`)) return { Item: cashShift };
+      if (command.input.Key.partitionKey.includes("STORE#")) return { Item: store };
       if (command.input.Key.partitionKey.endsWith("SETTINGS#BUSINESS")) return {};
       return { Item: command.input.Key.partitionKey.endsWith("PRODUCT#product-2") ? secondProduct : product };
     }
@@ -84,7 +86,8 @@ async function main() {
   assert.equal(sale.changeDue, 50);
   assert.equal(sale.cashierDisplayName, "Cashier (EMP-001)");
   assert.equal(sale.storeName, "Main Store", "sales must retain the selling store at checkout time");
-  assert.equal(sale.receiptBranding.businessName, "Tomkondi Supermarket");
+  assert.equal(sale.receiptBranding.businessName, "Main Market");
+  assert.equal(sale.receiptBranding.storeName, "Main Store");
   assert.equal(transaction.length, 5, "lot update, movement, receipt, cash shift, and idempotency must be atomic");
   assert.match(transaction[0].Update.ConditionExpression, /remainingQuantity.*>=/);
   assert.equal(transaction[2].Put.Item.orderNumber, sale.orderNumber);
@@ -125,6 +128,7 @@ async function main() {
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") {
       if (command.input.Key.partitionKey.includes("PAYMENT#") || command.input.Key.partitionKey.includes("IDEMPOTENCY#") || command.input.Key.partitionKey.endsWith("SETTINGS#BUSINESS")) return {};
+      if (command.input.Key.partitionKey.includes("STORE#")) return { Item: store };
       return { Item: promoted };
     }
     if (command.constructor.name === "TransactWriteCommand") {
@@ -149,6 +153,8 @@ async function main() {
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") {
       if (command.input.Key.partitionKey.includes("IDEMPOTENCY#")) return {};
+      if (command.input.Key.partitionKey.includes("STORE#")) return { Item: store };
+      if (command.input.Key.partitionKey.endsWith("SETTINGS#BUSINESS")) return {};
       return command.input.Key.partitionKey.includes("PAYMENT#") ? { Item: { saleId: "existing-sale" } } : { Item: promoted };
     }
     if (command.constructor.name === "QueryCommand") return { Items: [lot] };
@@ -158,6 +164,29 @@ async function main() {
     () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "mpesa", mpesaReference: "QGH1234567", items: [{ productId: "product-1", quantity: 1 }], requestId: "sale-duplicate-mpesa" }, { id: "cashier", name: "Cashier" }),
     /already been used/,
   );
+
+  const rice = { ...product, name: "Rice", baseUnit: "gram", sellingPrice: 80, saleVariants: [
+    { id: "rice-500g", name: "500 g", sku: "RICE-500", barcode: "500500", quantityInBaseUnits: 500, sellingPrice: 80, status: "active" },
+    { id: "rice-1kg", name: "1 kg", sku: "RICE-1KG", barcode: "10001000", quantityInBaseUnits: 1000, sellingPrice: 150, status: "active" },
+  ] };
+  const riceLot = { ...lot, productName: "Rice", receivedQuantity: 2000, remainingQuantity: 2000, unitCost: 0.1 };
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") {
+      const key = command.input.Key.partitionKey;
+      if (key.includes("IDEMPOTENCY#") || key.endsWith("SETTINGS#BUSINESS")) return {};
+      if (key.includes("CASH_SHIFT_OPEN#")) return { Item: { shiftId: cashShift.id } };
+      if (key.endsWith(`CASH_SHIFT#${cashShift.id}`)) return { Item: cashShift };
+      if (key.includes("STORE#")) return { Item: store };
+      return { Item: rice };
+    }
+    if (command.constructor.name === "QueryCommand") return { Items: [riceLot] };
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  const weighedSale = await repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "cash", amountTendered: 200, items: [{ productId: rice.id, variantId: "rice-500g", quantity: 2 }], requestId: "sale-rice" }, { id: "cashier-1", name: "Cashier" });
+  assert.equal(weighedSale.totalAmount, 160);
+  assert.equal(weighedSale.items[0].inventoryQuantity, 1000, "two 500 g variants must consume 1,000 gram inventory units");
+  assert.equal(transaction[0].Update.ExpressionAttributeValues[":quantity"], 1000);
 
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") return {};

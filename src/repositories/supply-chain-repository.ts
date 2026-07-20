@@ -16,6 +16,12 @@ export interface StoreRecord {
   code: string;
   name: string;
   address: string;
+  receiptBusinessName: string;
+  receiptAddress: string;
+  receiptPhone: string;
+  receiptEmail: string;
+  receiptFooter: string;
+  receiptReturnPolicy: string;
   status: EntityStatus;
   createdAt: string;
   updatedAt: string;
@@ -178,6 +184,8 @@ export interface StockTransferRecord {
   updatedAt: string;
 }
 
+export interface StockRequisitionRecord { id: string; requisitionNumber: string; fromStoreId: string; fromStoreName: string; toStoreId: string; toStoreName: string; status: "requested" | "approved" | "rejected" | "converted" | "cancelled"; notes: string; decisionReason?: string | null; lines: Array<{ productId: string; productName: string; quantity: number }>; requestedBy: string; requestedByName: string; decidedBy?: string | null; decidedByName?: string | null; transferId?: string | null; createdAt: string; updatedAt: string }
+
 export interface TransferReceiptLineRecord {
   lotId: string;
   productId: string;
@@ -275,9 +283,9 @@ const validateCount = (value: number, label: string, allowZero = true) => {
 
 export const listStores = (tenantId: string) => queryCollection<StoreRecord>(tenantId, "STORE");
 export const getStore = (tenantId: string, id: string) => get<StoreRecord>(tenantId, "STORE", id);
-export const createStore = async (tenantId: string, input: Pick<StoreRecord, "code" | "name" | "address">, actor: Actor) => {
+export const createStore = async (tenantId: string, input: Pick<StoreRecord, "code" | "name" | "address"> & Partial<Pick<StoreRecord, "receiptBusinessName" | "receiptAddress" | "receiptPhone" | "receiptEmail" | "receiptFooter" | "receiptReturnPolicy">>, actor: Actor) => {
   const id = randomUUID(); const now = new Date().toISOString();
-  const store: StoreRecord = { id, code: normalizedCode(input.code), name: normalized(input.name), address: normalized(input.address), status: "active", createdAt: now, updatedAt: now };
+  const store: StoreRecord = { id, code: normalizedCode(input.code), name: normalized(input.name), address: normalized(input.address), receiptBusinessName: normalized(input.receiptBusinessName ?? ""), receiptAddress: normalized(input.receiptAddress ?? ""), receiptPhone: input.receiptPhone?.trim() ?? "", receiptEmail: input.receiptEmail?.trim().toLowerCase() ?? "", receiptFooter: normalized(input.receiptFooter ?? ""), receiptReturnPolicy: normalized(input.receiptReturnPolicy ?? ""), status: "active", createdAt: now, updatedAt: now };
   if (!store.code || !store.name) throw new Error("Store code and name are required");
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
     { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "STORE", id), accessPartition: collection(tenantId, "STORE"), accessSort: `${store.name.toLowerCase()}#${id}`, entityType: "store", tenantId, ...store }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
@@ -286,7 +294,7 @@ export const createStore = async (tenantId: string, input: Pick<StoreRecord, "co
   return store;
 };
 
-export const updateStore = async (tenantId: string, id: string, input: Partial<Pick<StoreRecord, "name" | "address" | "status">>) => {
+export const updateStore = async (tenantId: string, id: string, input: Partial<Pick<StoreRecord, "name" | "address" | "receiptBusinessName" | "receiptAddress" | "receiptPhone" | "receiptEmail" | "receiptFooter" | "receiptReturnPolicy" | "status">>) => {
   const current = await getStore(tenantId, id); if (!current) throw new Error("Store not found");
   if (input.status === "inactive" && current.status === "active") {
     const [lots, orders, transfers] = await Promise.all([listLots(tenantId, id), listPurchaseOrders(tenantId), listTransfers(tenantId)]);
@@ -294,7 +302,7 @@ export const updateStore = async (tenantId: string, id: string, input: Partial<P
     if (orders.some((order) => order.storeId === id && (order.status === "draft" || order.status === "issued" || order.status === "partially_received"))) throw new Error("Close this store's open purchase orders before deactivating it");
     if (transfers.some((transfer) => (transfer.fromStoreId === id || transfer.toStoreId === id) && (transfer.status === "draft" || transfer.status === "dispatched"))) throw new Error("Complete this store's open transfers before deactivating it");
   }
-  const next = { ...current, ...input, name: normalized(input.name ?? current.name), address: normalized(input.address ?? current.address), updatedAt: new Date().toISOString() };
+  const next = { ...current, ...input, name: normalized(input.name ?? current.name), address: normalized(input.address ?? current.address), receiptBusinessName: normalized(input.receiptBusinessName ?? current.receiptBusinessName ?? ""), receiptAddress: normalized(input.receiptAddress ?? current.receiptAddress ?? ""), receiptPhone: (input.receiptPhone ?? current.receiptPhone ?? "").trim(), receiptEmail: (input.receiptEmail ?? current.receiptEmail ?? "").trim().toLowerCase(), receiptFooter: normalized(input.receiptFooter ?? current.receiptFooter ?? ""), receiptReturnPolicy: normalized(input.receiptReturnPolicy ?? current.receiptReturnPolicy ?? ""), updatedAt: new Date().toISOString() };
   await dynamoDB.send(new PutCommand({ TableName: TABLE_NAME, Item: { ...key(tenantId, "STORE", id), accessPartition: collection(tenantId, "STORE"), accessSort: `${next.name.toLowerCase()}#${id}`, entityType: "store", tenantId, ...next }, ConditionExpression: "attribute_exists(partitionKey)" }));
   return next;
 };
@@ -522,6 +530,12 @@ export const countLot = async (tenantId: string, lotId: string, physicalQuantity
 
 export const listTransfers = (tenantId: string, range?: { from?: string; to?: string; limit?: number }) => queryCollection<StockTransferRecord>(tenantId, "TRANSFER", { ...range, limit: range?.limit ?? 200, descending: true });
 export const getTransfer = (tenantId: string, id: string) => get<StockTransferRecord>(tenantId, "TRANSFER", id);
+export const listRequisitions = (tenantId: string, limit = 200) => queryCollection<StockRequisitionRecord>(tenantId, "REQUISITION", { limit, descending: true });
+export const getRequisition = (tenantId: string, id: string) => get<StockRequisitionRecord>(tenantId, "REQUISITION", id);
+const putRequisition = (tenantId: string, requisition: StockRequisitionRecord, expectedUpdatedAt?: string) => ({ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "REQUISITION", requisition.id), accessPartition: collection(tenantId, "REQUISITION"), accessSort: `${requisition.createdAt}#${requisition.id}`, entityType: "stock_requisition", tenantId, ...requisition }, ...(expectedUpdatedAt ? { ConditionExpression: "updatedAt = :expected", ExpressionAttributeValues: { ":expected": expectedUpdatedAt } } : { ConditionExpression: "attribute_not_exists(partitionKey)" }) } });
+export const createRequisition = async (tenantId: string, input: { fromStoreId: string; toStoreId: string; notes: string; lines: Array<{ productId: string; quantity: number }> }, actor: Actor, requestId: string) => { const previous = await existingIdempotentResult<StockRequisitionRecord>(tenantId, "create_requisition", requestId, input); if (previous) return previous; if (input.fromStoreId === input.toStoreId) throw new Error("Requisition stores must be different"); if (input.lines.length < 1 || input.lines.length > 40 || new Set(input.lines.map((line) => line.productId)).size !== input.lines.length) throw new Error("A requisition must contain 1 to 40 unique products"); input.lines.forEach((line) => validateCount(line.quantity, "Requested quantity", false)); const [from, to, products] = await Promise.all([getStore(tenantId, input.fromStoreId), getStore(tenantId, input.toStoreId), Promise.all(input.lines.map((line) => getCatalogProduct(tenantId, line.productId)))]); if (!from || !to || from.status !== "active" || to.status !== "active") throw new Error("Select two active stores"); if (products.some((product) => !product || product.status !== "active")) throw new Error("One or more requested products are unavailable"); const now = new Date().toISOString(); const id = randomUUID(); const requisition: StockRequisitionRecord = { id, requisitionNumber: `REQ-${now.slice(0, 10).replaceAll("-", "")}-${id.slice(0, 8).toUpperCase()}`, fromStoreId: from.id, fromStoreName: from.name, toStoreId: to.id, toStoreName: to.name, status: "requested", notes: input.notes.trim(), lines: input.lines.map((line, index) => ({ ...line, productName: products[index]!.name })), requestedBy: actor.id, requestedByName: actor.name, createdAt: now, updatedAt: now }; return commitIdempotent(tenantId, "create_requisition", requestId, input, requisition, [putRequisition(tenantId, requisition)]); };
+export const decideRequisition = async (tenantId: string, id: string, decision: "approve" | "reject" | "cancel", reason: string, actor: Actor) => { const current = await getRequisition(tenantId, id); if (!current || current.status !== "requested") throw new Error("Only requested requisitions can be decided"); if ((decision === "reject" || decision === "cancel") && reason.trim().length < 3) throw new Error("A decision reason is required"); const next: StockRequisitionRecord = { ...current, status: decision === "approve" ? "approved" : decision === "reject" ? "rejected" : "cancelled", decisionReason: reason.trim() || null, decidedBy: actor.id, decidedByName: actor.name, updatedAt: new Date().toISOString() }; await dynamoDB.send(new TransactWriteCommand({ TransactItems: [putRequisition(tenantId, next, current.updatedAt)] })); return next; };
+export const convertRequisitionToTransfer = async (tenantId: string, id: string, actor: Actor, requestId: string) => { const payload = { id }; const previous = await existingIdempotentResult<StockTransferRecord>(tenantId, "convert_requisition", requestId, payload); if (previous) return previous; const requisition = await getRequisition(tenantId, id); if (!requisition || requisition.status !== "approved") throw new Error("Only approved requisitions can become transfers"); const now = new Date().toISOString(); const transferId = randomUUID(); const transfer: StockTransferRecord = { id: transferId, transferNumber: `TR-${now.slice(0, 10).replaceAll("-", "")}-${transferId.slice(0, 8).toUpperCase()}`, fromStoreId: requisition.fromStoreId, fromStoreName: requisition.fromStoreName, toStoreId: requisition.toStoreId, toStoreName: requisition.toStoreName, status: "draft", notes: [requisition.notes, `From ${requisition.requisitionNumber}`].filter(Boolean).join("\n"), lines: requisition.lines, createdBy: actor.id, createdByName: actor.name, createdAt: now, updatedAt: now }; const converted: StockRequisitionRecord = { ...requisition, status: "converted", transferId, updatedAt: now }; return commitIdempotent(tenantId, "convert_requisition", requestId, payload, transfer, [{ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "TRANSFER", transferId), accessPartition: collection(tenantId, "TRANSFER"), accessSort: `${now}#${transferId}`, entityType: "stock_transfer", tenantId, ...transfer }, ConditionExpression: "attribute_not_exists(partitionKey)" } }, putRequisition(tenantId, converted, requisition.updatedAt)]); };
 export const createTransfer = async (tenantId: string, input: { fromStoreId: string; toStoreId: string; notes: string; lines: Array<{ productId: string; quantity: number }> }, actor: Actor, requestId: string) => {
   const previous = await existingIdempotentResult<StockTransferRecord>(tenantId, "create_transfer", requestId, input); if (previous) return previous;
   if (input.fromStoreId === input.toStoreId) throw new Error("Transfer stores must be different"); if (input.lines.length < 1 || input.lines.length > 40) throw new Error("A transfer must contain 1 to 40 lines"); input.lines.forEach((line) => validateCount(line.quantity, "Transfer quantity", false));

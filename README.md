@@ -82,7 +82,8 @@ The single DynamoDB table uses `partitionKey`/`sortKey` entity keys and one
 sparse `AccessIndex` (`accessPartition`/`accessSort`) for the access patterns
 the application needs: catalogs, stores, suppliers, purchase orders, receipts,
 active lots, transfers, chronological sales, and stock movements. Strongly
-consistent alias records make SKU, barcode, and category code unique without a
+consistent alias records make product and sale-variant SKU/barcode values, plus
+category codes, unique without a
 scan. A sale is one DynamoDB transaction containing its immutable receipt,
 conditional FEFO lot decrements, and stock movement events.
 
@@ -105,21 +106,29 @@ transaction, preventing the same code from being accepted twice.
 
 Admin-managed business name, address, phone, email, thank-you text, and return
 policy are stored at `SETTINGS#BUSINESS/PROFILE`. Stores are separate entities
-with their own inventory. New sales snapshot those settings into the immutable receipt so later
-branding or policy changes do not rewrite historical customer records;
-pre-branding historical sales fall back to the current settings.
+with their own inventory and optional receipt overrides. Checkout resolves the
+store overrides over the global defaults and snapshots the effective result in
+the immutable sale, so later branding or policy changes do not rewrite a reprint.
 Cashier receipt labels prefer the employee code from the DynamoDB staff profile
 and the first name from Cognito.
 
 Cognito remains the identity source for first name, family name, email,
 verification state, password, and enabled state. Application display names are
 derived from the two Cognito name attributes. Employment metadata that is
-owned by the business (`employeeCode`, `jobTitle`, assigned store, and a
+owned by the business (`employeeCode`, `jobTitle`, primary/assigned stores, and a
 non-authentication phone number) is stored in DynamoDB at
 `USER#<cognito-sub>/PROFILE`. Staff can
 change their own phone; an administrator manages employment fields and assigns
-one active store. Each new sale snapshots `storeId` and `storeName`, so moving a
+one primary plus additional active stores. Staff-selected store scope is checked
+against those assignments on the server. Each new sale snapshots `storeId` and `storeName`, so moving a
 staff member later does not alter historical store reporting.
+
+Products keep inventory in integer minor measurement units. A bulk product can
+use `gram` as its base unit and define sale variants such as 500 g and 1 kg;
+checkout multiplies the sold variant count by 500 or 1,000 before the store-only
+FEFO allocation. Variant prices and identifiers are snapshotted on each sale
+line. Stock requisitions optionally add request/approve/reject/convert states
+before the existing dispatch-and-receive transfer workflow.
 
 Changing a staff email updates the existing Cognito identity and requires the
 new address to be verified; the stable Cognito `sub` means historical sales do
