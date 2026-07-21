@@ -1,3 +1,5 @@
+import { buildMvpSupplyChainSeed } from "./mvp-supply-chain";
+
 export interface SeedFile {
   categories: Array<{ code: string; name: string; description?: string }>;
   products: Array<{
@@ -12,6 +14,7 @@ export interface SeedFile {
     tracksExpiry: boolean;
     promotionPrice?: number | null;
   }>;
+  supplyChain?: import("./mvp-supply-chain").SupplyChainSeed;
 }
 
 type CategorySpec = {
@@ -150,5 +153,6 @@ export const buildMvpSeed = (): SeedFile => {
         promotionPrice: index % 10 === 0 ? Math.max(1, Math.round(price * 0.9)) : null,
       };
     })),
+    supplyChain: buildMvpSupplyChainSeed(),
   };
 };
