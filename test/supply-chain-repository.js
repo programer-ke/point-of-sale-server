@@ -10,11 +10,14 @@ const supplier = { id: "supplier-1", code: "SUP", name: "Supplier", contactName:
 const product = { id: "product-1", name: "Tea", sku: "TEA", baseUnit: "each", stockUnit: "each", tracksExpiry: true, status: "active" };
 const supplierProduct = { supplierId: supplier.id, productId: product.id, supplierSku: "TEA-CASE", purchaseUnit: "carton", purchaseQuantity: 12, purchaseMeasurementUnit: "each", unitsPerPurchaseUnit: 12, lastPurchasePrice: 960, preferred: true, updatedAt: now };
 
-const assertUsesEveryExpressionValue = (operation, label) => {
-  const expressions = [operation.UpdateExpression, operation.ConditionExpression].filter(Boolean).join(" ");
-  for (const placeholder of Object.keys(operation.ExpressionAttributeValues ?? {})) {
-    assert.ok(expressions.includes(placeholder), `${label} supplies unused expression value ${placeholder}`);
-  }
+const assertExpressionBindingsMatch = (operation, label) => {
+  const expression = [operation.KeyConditionExpression, operation.FilterExpression, operation.UpdateExpression, operation.ConditionExpression, operation.ProjectionExpression].filter(Boolean).join(" ");
+  const referencedValues = [...new Set(expression.match(/:[A-Za-z0-9_]+/g) ?? [])].sort();
+  const suppliedValues = Object.keys(operation.ExpressionAttributeValues ?? {}).sort();
+  assert.deepEqual(suppliedValues, referencedValues, `${label} expression values must exactly match its placeholders`);
+  const referencedNames = [...new Set(expression.match(/#[A-Za-z0-9_]+/g) ?? [])].sort();
+  const suppliedNames = Object.keys(operation.ExpressionAttributeNames ?? {}).sort();
+  assert.deepEqual(suppliedNames, referencedNames, `${label} expression names must exactly match its placeholders`);
 };
 
 async function main() {
@@ -147,8 +150,20 @@ async function main() {
   assert.equal(dispatched.status, "dispatched");
   const transferLotUpdate = transaction.find((item) => item.Update?.Key?.partitionKey.includes("LOT#"))?.Update;
   assert.ok(transferLotUpdate, "dispatch must decrement the allocated source lot");
-  assertUsesEveryExpressionValue(transferLotUpdate, "transfer lot decrement");
-  assertUsesEveryExpressionValue(supply.lotDecrement(tenantId, activeLot, activeLot.remainingQuantity, now).Update, "fully exhausted lot decrement");
+  assertExpressionBindingsMatch(transferLotUpdate, "transfer lot decrement");
+  assertExpressionBindingsMatch(supply.lotDecrement(tenantId, activeLot, activeLot.remainingQuantity, now).Update, "fully exhausted lot decrement");
+
+  let rangeQuery;
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "QueryCommand") { rangeQuery = command.input; return { Items: [] }; }
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  await supply.listPurchaseOrders(tenantId, { from: "2026-07-01" });
+  assert.match(rangeQuery.KeyConditionExpression, /accessSort >= :from/);
+  assertExpressionBindingsMatch(rangeQuery, "lower-bounded purchase-order query");
+  await supply.listPurchaseOrders(tenantId, { to: "2026-07-31" });
+  assert.match(rangeQuery.KeyConditionExpression, /accessSort <= :to/);
+  assertExpressionBindingsMatch(rangeQuery, "upper-bounded purchase-order query");
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

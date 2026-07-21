@@ -5,6 +5,16 @@ const { dynamoDB } = require("../dist/config/db.js");
 const repository = require("../dist/repositories/pos-repository.js");
 const tenantId = "tenant-1";
 
+const assertExpressionBindingsMatch = (operation, label) => {
+  const expression = [operation.KeyConditionExpression, operation.FilterExpression, operation.UpdateExpression, operation.ConditionExpression, operation.ProjectionExpression].filter(Boolean).join(" ");
+  const referencedValues = [...new Set(expression.match(/:[A-Za-z0-9_]+/g) ?? [])].sort();
+  const suppliedValues = Object.keys(operation.ExpressionAttributeValues ?? {}).sort();
+  assert.deepEqual(suppliedValues, referencedValues, `${label} expression values must exactly match its placeholders`);
+  const referencedNames = [...new Set(expression.match(/#[A-Za-z0-9_]+/g) ?? [])].sort();
+  const suppliedNames = Object.keys(operation.ExpressionAttributeNames ?? {}).sort();
+  assert.deepEqual(suppliedNames, referencedNames, `${label} expression names must exactly match its placeholders`);
+};
+
 const product = {
   partitionKey: "PRODUCT#product-1",
   sortKey: "PROFILE",
@@ -229,7 +239,7 @@ async function main() {
   assert.equal(settings.thankYouMessage, "Asante sana");
   assert.equal(transaction.length, 2, "settings update and its audit event must be atomic");
   assert.ok(transaction[0].Update, "branding must update only its own fields");
-  assert.equal(transaction[0].Update.ExpressionAttributeValues[":storeName"], undefined, "settings update must not send unused expression values");
+  assertExpressionBindingsMatch(transaction[0].Update, "settings update");
 
   const category = {
     partitionKey: "TENANT#tenant-1#CATEGORY#category-1",
@@ -373,8 +383,10 @@ async function main() {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   });
+  let lastQuery;
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "QueryCommand") {
+      lastQuery = command.input;
       const partition = command.input.ExpressionAttributeValues[":pk"];
       if (partition.endsWith("CATALOG#PRODUCT")) return { Items: [product] };
       if (partition.endsWith("SALE")) return { Items: [saleFor("cashier-1", 125), saleFor("cashier-2", 250)] };
@@ -388,6 +400,12 @@ async function main() {
   assert.equal(staffDashboard.cashierPerformance.length, 1);
   const staffSales = await repository.listSalesByStaff(tenantId, "cashier-1", 100);
   assert.deepEqual(staffSales.map(({ createdBy }) => createdBy), ["cashier-1"]);
+  await repository.listSales(tenantId, 100, { to: "2026-07-20" });
+  assert.match(lastQuery.KeyConditionExpression, /accessSort <= :to/);
+  assertExpressionBindingsMatch(lastQuery, "upper-bounded sales query");
+  await repository.listSalesByStaff(tenantId, "cashier-1", 100, { to: "2026-07-20" });
+  assert.match(lastQuery.KeyConditionExpression, /accessSort <= :to/);
+  assertExpressionBindingsMatch(lastQuery, "upper-bounded staff sales query");
 }
 
 main().catch((error) => {

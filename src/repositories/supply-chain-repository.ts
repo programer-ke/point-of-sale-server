@@ -240,7 +240,11 @@ const queryCollection = async <T>(tenantId: string, name: string, range?: { from
       IndexName: "AccessIndex",
       KeyConditionExpression: range?.from && range?.to
         ? "accessPartition = :pk AND accessSort BETWEEN :from AND :to"
-        : "accessPartition = :pk",
+        : range?.from
+          ? "accessPartition = :pk AND accessSort >= :from"
+          : range?.to
+            ? "accessPartition = :pk AND accessSort <= :to"
+            : "accessPartition = :pk",
       ExpressionAttributeValues: {
         ":pk": collection(tenantId, name),
         ...(range?.from ? { ":from": range.from } : {}),

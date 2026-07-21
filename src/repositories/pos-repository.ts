@@ -265,7 +265,9 @@ const queryCollection = async <T>(tenantId: string, partition: string, options?:
         ? "accessPartition = :pk AND accessSort BETWEEN :from AND :to"
         : options?.from
           ? "accessPartition = :pk AND accessSort >= :from"
-        : "accessPartition = :pk",
+          : options?.to
+            ? "accessPartition = :pk AND accessSort <= :to"
+            : "accessPartition = :pk",
       ExpressionAttributeValues: {
         ":pk": tenantKey(tenantId, partition),
         ...(options?.from ? { ":from": options.from } : {}),
@@ -293,7 +295,11 @@ export const listSalesByStaff = async (tenantId: string, staffId: string, limit 
       IndexName: "AccessIndex",
       KeyConditionExpression: range?.from && range?.to
         ? "accessPartition = :pk AND accessSort BETWEEN :from AND :to"
-        : range?.from ? "accessPartition = :pk AND accessSort >= :from" : "accessPartition = :pk",
+        : range?.from
+          ? "accessPartition = :pk AND accessSort >= :from"
+          : range?.to
+            ? "accessPartition = :pk AND accessSort <= :to"
+            : "accessPartition = :pk",
       FilterExpression: "createdBy = :staffId",
       ExpressionAttributeValues: { ":pk": tenantKey(tenantId, "SALE"), ":staffId": staffId, ...(range?.from ? { ":from": range.from } : {}), ...(range?.to ? { ":to": `${range.to}\uffff` } : {}) },
       ScanIndexForward: false,
