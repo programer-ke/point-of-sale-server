@@ -229,6 +229,7 @@ async function main() {
   assert.equal(settings.thankYouMessage, "Asante sana");
   assert.equal(transaction.length, 2, "settings update and its audit event must be atomic");
   assert.ok(transaction[0].Update, "branding must update only its own fields");
+  assert.equal(transaction[0].Update.ExpressionAttributeValues[":storeName"], undefined, "settings update must not send unused expression values");
 
   const category = {
     partitionKey: "TENANT#tenant-1#CATEGORY#category-1",
