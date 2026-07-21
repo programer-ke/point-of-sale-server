@@ -6,7 +6,7 @@ const tenantId = "tenant-1";
 const now = "2026-07-20T10:00:00.000Z";
 const store = { id: "store-1", code: "MAIN", name: "Main Store", address: "", status: "active", createdAt: now, updatedAt: now };
 const supplier = { id: "supplier-1", code: "SUP", name: "Supplier", contactName: "", phone: "", email: "", address: "", status: "active", createdAt: now, updatedAt: now };
-const product = { id: "product-1", name: "Tea", sku: "TEA", baseUnit: "item", tracksExpiry: true, status: "active" };
+const product = { id: "product-1", name: "Tea", sku: "TEA", baseUnit: "each", tracksExpiry: true, status: "active" };
 const supplierProduct = { supplierId: supplier.id, productId: product.id, supplierSku: "TEA-CASE", purchaseUnit: "carton", unitsPerPurchaseUnit: 12, lastPurchasePrice: 960, preferred: true, updatedAt: now };
 
 async function main() {

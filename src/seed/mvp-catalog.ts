@@ -145,7 +145,7 @@ export const buildMvpSeed = (): SeedFile => {
         categoryCode: category.code,
         sellingPrice: price,
         buyingPrice: Math.round(price * costRatio),
-        baseUnit: "unit",
+        baseUnit: "each",
         tracksExpiry: ["STAPLES", "BEVERAGES", "DAIRY", "PRODUCE", "BAKERY", "BABY"].includes(category.code),
         promotionPrice: index % 10 === 0 ? Math.max(1, Math.round(price * 0.9)) : null,
       };

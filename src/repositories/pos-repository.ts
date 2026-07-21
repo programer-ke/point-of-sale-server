@@ -180,6 +180,7 @@ export interface BusinessReportRecord {
 }
 
 const normalizeLookup = (value: string) => value.trim().toUpperCase();
+const BASE_UNITS = new Set(["each", "gram", "millilitre", "millimetre", "square_centimetre", "cubic_centimetre"]);
 const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 const businessDate = (date = new Date()) =>
   new Date(date.getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -450,6 +451,7 @@ export const createCategory = async (
   const id = randomUUID();
   const now = new Date().toISOString();
   const category = { ...input, code: normalizeLookup(input.code) };
+  if ((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: lookupKey(tenantId, "CATEGORY", category.code) }))).Item) throw new Error("Category code is already in use");
   const item = { ...categoryKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#CATEGORY"), accessSort: `${category.name.toLowerCase()}#${id}`, entityType: "category", tenantId, id, ...category, createdAt: now, updatedAt: now };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
     { Put: { TableName: TABLE_NAME, Item: item, ConditionExpression: "attribute_not_exists(partitionKey)" } },
@@ -479,6 +481,10 @@ export const updateCategory = async (
     ? []
     : (await listProducts(tenantId)).filter((product) => product.categoryId === id);
   const codeChanged = next.code !== current.code;
+  if (codeChanged) {
+    const existingCode = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: lookupKey(tenantId, "CATEGORY", next.code) }));
+    if (existingCode.Item?.categoryId && existingCode.Item.categoryId !== id) throw new Error("Category code is already in use");
+  }
   const transactionItems: NonNullable<TransactWriteCommandInput["TransactItems"]> = [
     { Put: {
       TableName: TABLE_NAME,
@@ -532,11 +538,14 @@ export const createProduct = async (
   if (!category || category.status !== "active") throw new Error("Select an active category");
   const id = randomUUID();
   const now = new Date().toISOString();
-  const provisional = { id, ...input, name: input.name.trim(), description: input.description.trim(), baseUnit: input.baseUnit.trim().toLowerCase(), sku: normalizeLookup(input.sku), barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active" as const, createdAt: now, updatedAt: now };
+  const provisional = { id, ...input, name: input.name.trim(), description: input.description.trim(), baseUnit: input.baseUnit.trim().toLowerCase(), sku: normalizeLookup(input.sku) || `PRD-${id.slice(0, 8).toUpperCase()}`, barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active" as const, createdAt: now, updatedAt: now };
+  if (!provisional.name) throw new Error("Product name is required");
+  if (!BASE_UNITS.has(provisional.baseUnit)) throw new Error("Select a supported base inventory unit");
   const saleVariants = validateVariants(input.saleVariants?.length ? input.saleVariants : [defaultVariant(provisional)]);
   const product: ProductRecord = { ...provisional, sellingPrice: saleVariants[0].sellingPrice, saleVariants };
   const item = { ...productKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#PRODUCT"), accessSort: `${product.name.toLowerCase()}#${id}`, entityType: "product", tenantId, ...product };
   const lookupItems = [...productAliases(product).values()].map((alias) => ({ ...lookupKey(tenantId, alias.kind, alias.value), entityType: "product_lookup", tenantId, productId: id, variantId: alias.variantId }));
+  for (const lookup of lookupItems) if ((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: { partitionKey: lookup.partitionKey, sortKey: lookup.sortKey } }))).Item) throw new Error(`${lookup.partitionKey.includes("#SKU#") ? "SKU" : "Barcode"} is already used by another product or sale variant`);
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
     { Put: { TableName: TABLE_NAME, Item: item, ConditionExpression: "attribute_not_exists(partitionKey)" } },
     ...lookupItems.map((lookup) => ({ Put: { TableName: TABLE_NAME, Item: lookup, ConditionExpression: "attribute_not_exists(partitionKey)" } })),
@@ -561,8 +570,10 @@ export const updateProduct = async (
   const sellingPrice = updates.saleVariants ? saleVariants[0].sellingPrice : updates.sellingPrice ?? current.sellingPrice;
   const buyingPrice = updates.buyingPrice ?? current.buyingPrice;
   const next: ProductRecord = { ...current, ...updates, saleVariants, sellingPrice, buyingPrice, baseUnit: (updates.baseUnit ?? current.baseUnit).trim().toLowerCase(), tracksExpiry: updates.tracksExpiry ?? current.tracksExpiry, sku: normalizeLookup(updates.sku ?? current.sku), barcode: normalizeLookup(updates.barcode ?? current.barcode), categoryId, categoryName: category.name, updatedAt: now };
+  if (!BASE_UNITS.has(next.baseUnit)) throw new Error("Select a supported base inventory unit");
   const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
   const oldAliases = productAliases(current); const newAliases = productAliases(next);
+  for (const [aliasKey, alias] of newAliases) if (!oldAliases.has(aliasKey) && (await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: lookupKey(tenantId, alias.kind, alias.value) }))).Item) throw new Error(`${alias.kind === "SKU" ? "SKU" : "Barcode"} is already used by another product or sale variant`);
   for (const [key, alias] of oldAliases) if (!newAliases.has(key)) transaction.push({ Delete: { TableName: TABLE_NAME, Key: lookupKey(tenantId, alias.kind, alias.value) } });
   for (const [key, alias] of newAliases) if (!oldAliases.has(key)) transaction.push({ Put: { TableName: TABLE_NAME, Item: { ...lookupKey(tenantId, alias.kind, alias.value), entityType: "product_lookup", tenantId, productId: id, variantId: alias.variantId }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
   transaction.push(

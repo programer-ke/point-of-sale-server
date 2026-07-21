@@ -20,7 +20,7 @@ const product = {
   categoryName: "Beverages",
   sellingPrice: 125,
   buyingPrice: 80,
-  baseUnit: "item",
+  baseUnit: "each",
   tracksExpiry: false,
   status: "active",
   createdAt: "2026-01-01T00:00:00.000Z",
@@ -90,6 +90,9 @@ async function main() {
   assert.equal(sale.receiptBranding.storeName, "Main Store");
   assert.equal(transaction.length, 5, "lot update, movement, receipt, cash shift, and idempotency must be atomic");
   assert.match(transaction[0].Update.ConditionExpression, /remainingQuantity.*>=/);
+  for (const placeholder of Object.keys(transaction[0].Update.ExpressionAttributeValues)) {
+    assert.match(`${transaction[0].Update.UpdateExpression} ${transaction[0].Update.ConditionExpression}`, new RegExp(placeholder.replace(":", "\\:")), `lot decrement must use ${placeholder}`);
+  }
   assert.equal(transaction[2].Put.Item.orderNumber, sale.orderNumber);
 
   const belowCostProduct = await repository.updateProduct(

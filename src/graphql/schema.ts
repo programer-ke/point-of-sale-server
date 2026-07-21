@@ -258,7 +258,7 @@ export const typeDefs = `#graphql
     supplierSku: String!
     purchaseUnit: String!
     unitsPerPurchaseUnit: Int!
-    lastPurchasePrice: Float!
+    lastPurchasePrice: Float
     preferred: Boolean!
     updatedAt: String!
   }
@@ -285,6 +285,7 @@ export const typeDefs = `#graphql
     id: ID!
     productId: ID!
     productName: String!
+    baseUnit: String!
     supplierSku: String!
     purchaseUnit: String!
     unitsPerPurchaseUnit: Int!
@@ -318,6 +319,9 @@ export const typeDefs = `#graphql
     purchaseOrderLineId: ID!
     productId: ID!
     productName: String!
+    baseUnit: String!
+    purchaseUnit: String!
+    unitsPerPurchaseUnit: Int!
     batchNumber: String
     expiryDate: String
     deliveredBaseQuantity: Int!
@@ -507,7 +511,7 @@ export const typeDefs = `#graphql
     createCategory(code: String!, name: String!, description: String = ""): Category!
     updateCategory(id: ID!, code: String!, name: String!, description: String = ""): Category!
     deleteCategory(id: ID!): Boolean!
-    createProduct(name: String!, description: String = "", sku: String!, barcode: String!, categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, baseUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!): Product!
+    createProduct(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, baseUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!): Product!
     updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, baseUnit: String, tracksExpiry: Boolean, saleVariants: [SaleVariantInput!], promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
     archiveProduct(id: ID!): Product!
     completeSale(storeId: ID, customerName: String, paymentMethod: String!, amountTendered: Float, mpesaReference: String, items: [SaleItemInput!]!, requestId: ID!): Sale!
@@ -515,7 +519,7 @@ export const typeDefs = `#graphql
     updateStore(id: ID!, name: String, address: String, receiptBusinessName: String, receiptAddress: String, receiptPhone: String, receiptEmail: String, receiptFooter: String, receiptReturnPolicy: String, status: String): Store!
     createSupplier(code: String!, name: String!, contactName: String = "", phone: String = "", email: String = "", address: String = ""): Supplier!
     updateSupplier(id: ID!, name: String, contactName: String, phone: String, email: String, address: String, status: String): Supplier!
-    upsertSupplierProduct(supplierId: ID!, productId: ID!, supplierSku: String!, purchaseUnit: String!, unitsPerPurchaseUnit: Int!, lastPurchasePrice: Float!, preferred: Boolean!): SupplierProduct!
+    upsertSupplierProduct(supplierId: ID!, productId: ID!, supplierSku: String = "", purchaseUnit: String!, unitsPerPurchaseUnit: Int!, lastPurchasePrice: Float, preferred: Boolean!): SupplierProduct!
     upsertStorePolicy(storeId: ID!, productId: ID!, reorderPoint: Int!, targetQuantity: Int!): StoreProductPolicy!
     createPurchaseOrder(supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!, requestId: ID!): PurchaseOrder!
     updatePurchaseOrder(id: ID!, supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!): PurchaseOrder!

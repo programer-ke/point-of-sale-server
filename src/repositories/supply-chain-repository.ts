@@ -46,7 +46,7 @@ export interface SupplierProductRecord {
   supplierSku: string;
   purchaseUnit: string;
   unitsPerPurchaseUnit: number;
-  lastPurchasePrice: number;
+  lastPurchasePrice: number | null;
   preferred: boolean;
   updatedAt: string;
 }
@@ -63,6 +63,7 @@ export interface PurchaseOrderLineRecord {
   id: string;
   productId: string;
   productName: string;
+  baseUnit: string;
   supplierSku: string;
   purchaseUnit: string;
   unitsPerPurchaseUnit: number;
@@ -115,7 +116,7 @@ export interface GoodsReceiptRecord {
   storeName: string;
   deliveryNote: string;
   invoiceNumber: string;
-  lines: Array<ReceiptLineInput & { productId: string; productName: string; orderedPricePerPurchaseUnit: number; actualPricePerPurchaseUnit: number; priceVariance: number; unitCost: number; lotId?: string | null }>;
+  lines: Array<ReceiptLineInput & { productId: string; productName: string; baseUnit: string; purchaseUnit: string; unitsPerPurchaseUnit: number; orderedPricePerPurchaseUnit: number; actualPricePerPurchaseUnit: number; priceVariance: number; unitCost: number; lotId?: string | null }>;
   createdBy: string;
   createdByName: string;
   createdAt: string;
@@ -204,6 +205,14 @@ export interface StocktakeSessionRecord { id: string; stocktakeNumber: string; s
 const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 const normalized = (value: string) => value.trim().replace(/\s+/g, " ");
 const normalizedCode = (value: string) => normalized(value).toUpperCase();
+const PURCHASE_UNITS: Record<string, Set<string>> = {
+  each: new Set(["each", "pack", "box", "inner carton", "carton", "case", "master carton", "tray", "crate", "bundle", "pallet"]),
+  gram: new Set(["bag", "sack", "bale", "tub", "bucket", "carton", "case", "drum", "pallet"]),
+  millilitre: new Set(["bottle", "can", "carton", "case", "crate", "jerrycan", "drum", "tank", "pallet"]),
+  millimetre: new Set(["roll", "reel", "bundle", "carton", "case", "pallet"]),
+  square_centimetre: new Set(["sheet", "roll", "bundle", "carton", "pallet"]),
+  cubic_centimetre: new Set(["container", "drum", "crate", "pallet"]),
+};
 const tenantKey = (tenantId: string, value: string) => `TENANT#${tenantId}#${value}`;
 const key = (tenantId: string, kind: string, id: string, sortKey = "PROFILE") => ({ partitionKey: tenantKey(tenantId, `${kind}#${id}`), sortKey });
 const collection = (tenantId: string, name: string) => tenantKey(tenantId, name);
@@ -287,6 +296,7 @@ export const createStore = async (tenantId: string, input: Pick<StoreRecord, "co
   const id = randomUUID(); const now = new Date().toISOString();
   const store: StoreRecord = { id, code: normalizedCode(input.code), name: normalized(input.name), address: normalized(input.address), receiptBusinessName: normalized(input.receiptBusinessName ?? ""), receiptAddress: normalized(input.receiptAddress ?? ""), receiptPhone: input.receiptPhone?.trim() ?? "", receiptEmail: input.receiptEmail?.trim().toLowerCase() ?? "", receiptFooter: normalized(input.receiptFooter ?? ""), receiptReturnPolicy: normalized(input.receiptReturnPolicy ?? ""), status: "active", createdAt: now, updatedAt: now };
   if (!store.code || !store.name) throw new Error("Store code and name are required");
+  if ((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: key(tenantId, "LOOKUP#STORE", store.code) }))).Item) throw new Error("Store code is already in use");
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
     { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "STORE", id), accessPartition: collection(tenantId, "STORE"), accessSort: `${store.name.toLowerCase()}#${id}`, entityType: "store", tenantId, ...store }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
     { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "LOOKUP#STORE", store.code), entityType: "store_lookup", tenantId, storeId: id }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
@@ -313,6 +323,7 @@ export const createSupplier = async (tenantId: string, input: Omit<SupplierRecor
   const id = randomUUID(); const now = new Date().toISOString();
   const supplier: SupplierRecord = { id, code: normalizedCode(input.code), name: normalized(input.name), contactName: normalized(input.contactName), phone: input.phone.trim(), email: input.email.trim().toLowerCase(), address: normalized(input.address), status: "active", createdAt: now, updatedAt: now };
   if (!supplier.code || !supplier.name) throw new Error("Supplier code and name are required");
+  if ((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: key(tenantId, "LOOKUP#SUPPLIER", supplier.code) }))).Item) throw new Error("Supplier code is already in use");
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
     { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "SUPPLIER", id), accessPartition: collection(tenantId, "SUPPLIER"), accessSort: `${supplier.name.toLowerCase()}#${id}`, entityType: "supplier", tenantId, ...supplier }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
     { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "LOOKUP#SUPPLIER", supplier.code), entityType: "supplier_lookup", tenantId, supplierId: id }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
@@ -335,10 +346,10 @@ export const listSupplierProducts = (tenantId: string, supplierId?: string) => {
 
 export const upsertSupplierProduct = async (tenantId: string, input: SupplierProductRecord) => {
   validateCount(input.unitsPerPurchaseUnit, "Units per purchase unit", false);
-  if (!Number.isFinite(input.lastPurchasePrice) || input.lastPurchasePrice < 0) throw new Error("Purchase price must be zero or greater");
-  if (!normalized(input.supplierSku) || !normalized(input.purchaseUnit)) throw new Error("Supplier SKU and purchase unit are required");
+  if (input.lastPurchasePrice != null && (!Number.isFinite(input.lastPurchasePrice) || input.lastPurchasePrice < 0)) throw new Error("Purchase price must be zero or greater when provided");
+  if (!normalized(input.purchaseUnit)) throw new Error("Purchase unit is required");
   const now = new Date().toISOString();
-  const record = { ...input, supplierSku: normalizedCode(input.supplierSku), purchaseUnit: normalized(input.purchaseUnit), updatedAt: now };
+  const record = { ...input, supplierSku: normalizedCode(input.supplierSku), purchaseUnit: normalized(input.purchaseUnit).toLowerCase(), updatedAt: now };
   const preferredKey = key(tenantId, "PREFERRED_SUPPLIER", record.productId);
   const [supplier, product, current, preferredLookup] = await Promise.all([
     getSupplier(tenantId, record.supplierId), getCatalogProduct(tenantId, record.productId),
@@ -347,10 +358,15 @@ export const upsertSupplierProduct = async (tenantId: string, input: SupplierPro
   ]);
   if (!supplier || supplier.status !== "active") throw new Error("Select an active supplier");
   if (!product || product.status !== "active") throw new Error("Select an active product");
+  if (!PURCHASE_UNITS[product.baseUnit]?.has(record.purchaseUnit.toLowerCase())) throw new Error(`${record.purchaseUnit} is not a supported purchase package for ${product.name}`);
   const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
-  const skuLookup = key(tenantId, `LOOKUP#SUPPLIER_SKU#${record.supplierId}`, record.supplierSku);
+  const skuLookup = record.supplierSku ? key(tenantId, `LOOKUP#SUPPLIER_SKU#${record.supplierId}`, record.supplierSku) : null;
+  if (skuLookup && current?.supplierSku !== record.supplierSku) {
+    const existingSku = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: skuLookup }));
+    if (existingSku.Item && existingSku.Item.productId !== record.productId) throw new Error("Supplier SKU is already used for another product in this supplier's catalog");
+  }
   if (current?.supplierSku && current.supplierSku !== record.supplierSku) transaction.push({ Delete: { TableName: TABLE_NAME, Key: key(tenantId, `LOOKUP#SUPPLIER_SKU#${record.supplierId}`, current.supplierSku) } });
-  if (!current || current.supplierSku !== record.supplierSku) transaction.push({ Put: { TableName: TABLE_NAME, Item: { ...skuLookup, entityType: "supplier_sku_lookup", tenantId, productId: record.productId }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
+  if (skuLookup && (!current || current.supplierSku !== record.supplierSku)) transaction.push({ Put: { TableName: TABLE_NAME, Item: { ...skuLookup, entityType: "supplier_sku_lookup", tenantId, productId: record.productId }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
   if (record.preferred) {
     const previousSupplierId = preferredLookup?.supplierId as string | undefined;
     if (previousSupplierId && previousSupplierId !== record.supplierId) {
@@ -419,8 +435,8 @@ const resolvePurchaseOrderLines = async (tenantId: string, supplierId: string, i
     if (!product || product.status !== "active") throw new Error("One or more purchase-order products are unavailable");
     if (!supplierProduct) throw new Error(`${product.name} is not configured for the selected supplier`);
     const pricePerPurchaseUnit = input.pricePerPurchaseUnit ?? supplierProduct.lastPurchasePrice;
-    if (!Number.isFinite(pricePerPurchaseUnit) || pricePerPurchaseUnit < 0) throw new Error("Purchase price must be zero or greater");
-    return { id: existing?.lines.find((line) => line.productId === input.productId)?.id ?? randomUUID(), productId: product.id, productName: product.name, supplierSku: supplierProduct.supplierSku, purchaseUnit: supplierProduct.purchaseUnit, unitsPerPurchaseUnit: supplierProduct.unitsPerPurchaseUnit, orderedPurchaseQuantity: input.orderedPurchaseQuantity, acceptedBaseQuantity: 0, pricePerPurchaseUnit };
+    if (typeof pricePerPurchaseUnit !== "number" || !Number.isFinite(pricePerPurchaseUnit) || pricePerPurchaseUnit < 0) throw new Error(`Enter a purchase price for ${product.name} on this purchase order`);
+    return { id: existing?.lines.find((line) => line.productId === input.productId)?.id ?? randomUUID(), productId: product.id, productName: product.name, baseUnit: product.baseUnit, supplierSku: supplierProduct.supplierSku, purchaseUnit: supplierProduct.purchaseUnit, unitsPerPurchaseUnit: supplierProduct.unitsPerPurchaseUnit, orderedPurchaseQuantity: input.orderedPurchaseQuantity, acceptedBaseQuantity: 0, pricePerPurchaseUnit: pricePerPurchaseUnit! };
   }));
 };
 export const createPurchaseOrder = async (tenantId: string, input: { supplierId: string; storeId: string; expectedDeliveryDate?: string | null; notes: string; lines: PurchaseOrderLineInput[] }, actor: Actor, requestId: string) => {
@@ -484,7 +500,7 @@ export const receivePurchaseOrder = async (tenantId: string, purchaseOrderId: st
       lotId = randomUUID(); const lot: InventoryLotRecord = { id: lotId, storeId: po.storeId, productId: poLine.productId, productName: poLine.productName, supplierId: po.supplierId, receiptId: id, batchNumber: normalized(input.batchNumber ?? "") || `GRN-${id.slice(0, 8).toUpperCase()}`, expiryDate: input.expiryDate ?? null, receivedQuantity: input.acceptedBaseQuantity, remainingQuantity: input.acceptedBaseQuantity, unitCost, origin: "supplier_receipt", status: "active", receivedAt: now, updatedAt: now };
       lotWrites.push({ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "LOT", lotId), accessPartition: collection(tenantId, `STORE#${lot.storeId}#INVENTORY#ACTIVE`), accessSort: `${lot.expiryDate ?? "9999-12-31"}#${now}#${lotId}`, entityType: "inventory_lot", tenantId, ...lot }, ConditionExpression: "attribute_not_exists(partitionKey)" } }, stockMovementPut(tenantId, { type: "receipt", storeId: po.storeId, productId: poLine.productId, productName: poLine.productName, lotId, quantity: input.acceptedBaseQuantity, unitCost, reason: `Receipt for ${po.orderNumber}`, referenceId: id, actorId: actor.id, actorName: actor.name }, now));
     }
-    receiptLines.push({ ...input, productId: poLine.productId, productName: poLine.productName, orderedPricePerPurchaseUnit: poLine.pricePerPurchaseUnit, priceVariance: roundMoney(input.actualPricePerPurchaseUnit - poLine.pricePerPurchaseUnit), unitCost, lotId });
+    receiptLines.push({ ...input, productId: poLine.productId, productName: poLine.productName, baseUnit: poLine.baseUnit, purchaseUnit: poLine.purchaseUnit, unitsPerPurchaseUnit: poLine.unitsPerPurchaseUnit, orderedPricePerPurchaseUnit: poLine.pricePerPurchaseUnit, priceVariance: roundMoney(input.actualPricePerPurchaseUnit - poLine.pricePerPurchaseUnit), unitCost, lotId });
   }
   const nextLines = po.lines.map((line) => ({ ...line, acceptedBaseQuantity: line.acceptedBaseQuantity + (acceptedByLine.get(line.id) ?? 0) }));
   const complete = nextLines.every((line) => line.acceptedBaseQuantity >= line.orderedPurchaseQuantity * line.unitsPerPurchaseUnit);
@@ -509,7 +525,10 @@ export const allocateLots = async (tenantId: string, storeId: string, requiremen
   return allocations;
 };
 
-export const lotDecrement = (tenantId: string, lot: InventoryLotRecord, quantity: number, now: string) => ({ Update: { TableName: TABLE_NAME, Key: key(tenantId, "LOT", lot.id), UpdateExpression: quantity === lot.remainingQuantity ? "SET remainingQuantity = :zero, #status = :exhausted, updatedAt = :now, accessPartition = :archive, accessSort = :sort" : "SET remainingQuantity = remainingQuantity - :quantity, updatedAt = :now", ConditionExpression: "remainingQuantity >= :quantity AND #status = :active", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":quantity": quantity, ":zero": 0, ":active": "active", ":exhausted": "exhausted", ":now": now, ...(quantity === lot.remainingQuantity ? { ":archive": collection(tenantId, `STORE#${lot.storeId}#INVENTORY#LOT`), ":sort": `${now}#${lot.id}` } : {}) } } });
+export const lotDecrement = (tenantId: string, lot: InventoryLotRecord, quantity: number, now: string) => {
+  const exhausted = quantity === lot.remainingQuantity;
+  return { Update: { TableName: TABLE_NAME, Key: key(tenantId, "LOT", lot.id), UpdateExpression: "SET remainingQuantity = remainingQuantity - :quantity, #status = :nextStatus, updatedAt = :now, accessPartition = :nextPartition, accessSort = :nextSort", ConditionExpression: "remainingQuantity >= :quantity AND #status = :active", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":quantity": quantity, ":active": "active", ":nextStatus": exhausted ? "exhausted" : "active", ":now": now, ":nextPartition": collection(tenantId, `STORE#${lot.storeId}#INVENTORY#${exhausted ? "LOT" : "ACTIVE"}`), ":nextSort": exhausted ? `${now}#${lot.id}` : `${lot.expiryDate ?? "9999-12-31"}#${lot.receivedAt}#${lot.id}` } } };
+};
 
 export const listMovements = (tenantId: string, range?: { from?: string; to?: string }) => queryCollection<StockMovementRecord>(tenantId, "STOCK#MOVEMENT", range);
 export const writeOffLot = async (tenantId: string, lotId: string, quantity: number, type: "damage" | "expiry", reason: string, actor: Actor, requestId: string) => {
