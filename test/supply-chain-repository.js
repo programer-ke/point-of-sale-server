@@ -9,6 +9,13 @@ const supplier = { id: "supplier-1", code: "SUP", name: "Supplier", contactName:
 const product = { id: "product-1", name: "Tea", sku: "TEA", baseUnit: "each", tracksExpiry: true, status: "active" };
 const supplierProduct = { supplierId: supplier.id, productId: product.id, supplierSku: "TEA-CASE", purchaseUnit: "carton", unitsPerPurchaseUnit: 12, lastPurchasePrice: 960, preferred: true, updatedAt: now };
 
+const assertUsesEveryExpressionValue = (operation, label) => {
+  const expressions = [operation.UpdateExpression, operation.ConditionExpression].filter(Boolean).join(" ");
+  for (const placeholder of Object.keys(operation.ExpressionAttributeValues ?? {})) {
+    assert.ok(expressions.includes(placeholder), `${label} supplies unused expression value ${placeholder}`);
+  }
+};
+
 async function main() {
   let transaction;
   dynamoDB.send = async (command) => {
@@ -124,6 +131,19 @@ async function main() {
   assert.equal(transfer.status, "draft");
   assert.equal(transfer.fromStoreId, store.id);
   assert.equal(transaction.filter((item) => item.Put?.Item?.entityType === "stock_transfer").length, 1);
+
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return command.input.Key.partitionKey.includes("IDEMPOTENCY#") ? {} : { Item: transfer };
+    if (command.constructor.name === "QueryCommand") return { Items: [activeLot] };
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  const dispatched = await supply.dispatchTransfer(tenantId, transfer.id, { id: "admin", name: "Admin" }, "dispatch-1");
+  assert.equal(dispatched.status, "dispatched");
+  const transferLotUpdate = transaction.find((item) => item.Update?.Key?.partitionKey.includes("LOT#"))?.Update;
+  assert.ok(transferLotUpdate, "dispatch must decrement the allocated source lot");
+  assertUsesEveryExpressionValue(transferLotUpdate, "transfer lot decrement");
+  assertUsesEveryExpressionValue(supply.lotDecrement(tenantId, activeLot, activeLot.remainingQuantity, now).Update, "fully exhausted lot decrement");
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });
