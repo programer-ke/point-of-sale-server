@@ -84,7 +84,7 @@ async function main() {
           categoryId: category.id,
           sellingPrice: product.sellingPrice,
           buyingPrice: product.buyingPrice,
-          baseUnit: product.baseUnit,
+          stockUnit: product.baseUnit,
           tracksExpiry: product.tracksExpiry,
           promotionPrice: product.promotionPrice ?? null,
           status: "active",
@@ -99,7 +99,7 @@ async function main() {
           categoryId: category.id,
           sellingPrice: product.sellingPrice,
           buyingPrice: product.buyingPrice,
-          baseUnit: product.baseUnit,
+          stockUnit: product.baseUnit,
           tracksExpiry: product.tracksExpiry,
           promotionPrice: product.promotionPrice ?? null,
         }, actor);

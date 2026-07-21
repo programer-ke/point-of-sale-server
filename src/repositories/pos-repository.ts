@@ -9,6 +9,7 @@ import {
   type TransactWriteCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import { dynamoDB, TABLE_NAME } from "../config/db";
+import { measurementUnit } from "../domain/measurements";
 import { allocateLots, commitIdempotent, existingIdempotentResult, getStore, listStores as listInventoryStores, lotDecrement, sellableLots, stockMovementPut, storeStock as getStoreStock } from "./supply-chain-repository";
 
 export interface SaleVariantRecord { id: string; name: string; sku: string; barcode: string; quantityInBaseUnits: number; sellingPrice: number; status: "active" | "inactive" }
@@ -34,6 +35,7 @@ export interface ProductRecord {
   sellingPrice: number;
   buyingPrice: number;
   baseUnit: string;
+  stockUnit: string;
   tracksExpiry: boolean;
   saleVariants: SaleVariantRecord[];
   promotionPrice?: number | null;
@@ -135,6 +137,8 @@ export type BusinessBrandingInput = Omit<BusinessSettingsRecord, "updatedAt" | "
 export interface ReportProductRecord {
   productId: string;
   productName: string;
+  baseUnit: string;
+  stockUnit: string;
   units: number;
   revenue: number;
   grossProfit: number;
@@ -145,6 +149,8 @@ export interface StockReportProductRecord {
   productId: string;
   productName: string;
   sku: string;
+  baseUnit: string;
+  stockUnit: string;
   quantity: number;
   reorderPoint: number;
   actualCostValue: number;
@@ -180,7 +186,6 @@ export interface BusinessReportRecord {
 }
 
 const normalizeLookup = (value: string) => value.trim().toUpperCase();
-const BASE_UNITS = new Set(["each", "gram", "millilitre", "millimetre", "square_centimetre", "cubic_centimetre"]);
 const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 const businessDate = (date = new Date()) =>
   new Date(date.getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -207,7 +212,7 @@ const defaultBusinessSettings: BusinessSettingsRecord = {
   updatedAt: new Date(0).toISOString(),
 };
 
-const defaultVariant = (product: Pick<ProductRecord, "id" | "name" | "sku" | "barcode" | "sellingPrice">): SaleVariantRecord => ({ id: `${product.id}-default`, name: product.name, sku: product.sku, barcode: product.barcode, quantityInBaseUnits: 1, sellingPrice: product.sellingPrice, status: "active" });
+const defaultVariant = (product: Pick<ProductRecord, "id" | "name" | "sku" | "barcode" | "sellingPrice" | "stockUnit">): SaleVariantRecord => ({ id: `${product.id}-default`, name: `1 ${product.stockUnit}`, sku: product.sku, barcode: product.barcode, quantityInBaseUnits: measurementUnit(product.stockUnit).baseUnits, sellingPrice: product.sellingPrice, status: "active" });
 const variantsOf = (product: ProductRecord) => product.saleVariants?.length ? product.saleVariants : [defaultVariant(product)];
 const validateVariants = (variants: SaleVariantRecord[]) => {
   if (!variants.length || variants.length > 20) throw new Error("A product must have 1 to 20 sale variants");
@@ -531,16 +536,16 @@ export const deleteCategory = async (
 
 export const createProduct = async (
   tenantId: string,
-  input: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "baseUnit" | "tracksExpiry"> & { saleVariants?: SaleVariantRecord[]; promotionPrice?: number | null; promotionStartsAt?: string | null; promotionEndsAt?: string | null },
+  input: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry"> & { saleVariants?: SaleVariantRecord[]; promotionPrice?: number | null; promotionStartsAt?: string | null; promotionEndsAt?: string | null },
   actor: { id: string; name: string },
 ) => {
   const category = await getCategory(tenantId, input.categoryId);
   if (!category || category.status !== "active") throw new Error("Select an active category");
   const id = randomUUID();
   const now = new Date().toISOString();
-  const provisional = { id, ...input, name: input.name.trim(), description: input.description.trim(), baseUnit: input.baseUnit.trim().toLowerCase(), sku: normalizeLookup(input.sku) || `PRD-${id.slice(0, 8).toUpperCase()}`, barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active" as const, createdAt: now, updatedAt: now };
+  const unit = measurementUnit(input.stockUnit);
+  const provisional = { id, ...input, name: input.name.trim(), description: input.description.trim(), baseUnit: unit.baseUnit, stockUnit: unit.code, sku: normalizeLookup(input.sku) || `PRD-${id.slice(0, 8).toUpperCase()}`, barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active" as const, createdAt: now, updatedAt: now };
   if (!provisional.name) throw new Error("Product name is required");
-  if (!BASE_UNITS.has(provisional.baseUnit)) throw new Error("Select a supported base inventory unit");
   const saleVariants = validateVariants(input.saleVariants?.length ? input.saleVariants : [defaultVariant(provisional)]);
   const product: ProductRecord = { ...provisional, sellingPrice: saleVariants[0].sellingPrice, saleVariants };
   const item = { ...productKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#PRODUCT"), accessSort: `${product.name.toLowerCase()}#${id}`, entityType: "product", tenantId, ...product };
@@ -557,7 +562,7 @@ export const createProduct = async (
 export const updateProduct = async (
   tenantId: string,
   id: string,
-  updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "baseUnit" | "tracksExpiry" | "saleVariants" | "promotionPrice" | "promotionStartsAt" | "promotionEndsAt" | "status">>,
+  updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "saleVariants" | "promotionPrice" | "promotionStartsAt" | "promotionEndsAt" | "status">>,
   actor: { id: string; name: string },
 ) => {
   const current = await getProduct(tenantId, id);
@@ -569,8 +574,9 @@ export const updateProduct = async (
   const saleVariants = validateVariants(updates.saleVariants ?? variantsOf(current));
   const sellingPrice = updates.saleVariants ? saleVariants[0].sellingPrice : updates.sellingPrice ?? current.sellingPrice;
   const buyingPrice = updates.buyingPrice ?? current.buyingPrice;
-  const next: ProductRecord = { ...current, ...updates, saleVariants, sellingPrice, buyingPrice, baseUnit: (updates.baseUnit ?? current.baseUnit).trim().toLowerCase(), tracksExpiry: updates.tracksExpiry ?? current.tracksExpiry, sku: normalizeLookup(updates.sku ?? current.sku), barcode: normalizeLookup(updates.barcode ?? current.barcode), categoryId, categoryName: category.name, updatedAt: now };
-  if (!BASE_UNITS.has(next.baseUnit)) throw new Error("Select a supported base inventory unit");
+  const unit = measurementUnit(updates.stockUnit ?? current.stockUnit);
+  if (unit.baseUnit !== current.baseUnit) throw new Error("A product's measurement type cannot be changed after creation");
+  const next: ProductRecord = { ...current, ...updates, saleVariants, sellingPrice, buyingPrice, baseUnit: unit.baseUnit, stockUnit: unit.code, tracksExpiry: updates.tracksExpiry ?? current.tracksExpiry, sku: normalizeLookup(updates.sku ?? current.sku), barcode: normalizeLookup(updates.barcode ?? current.barcode), categoryId, categoryName: category.name, updatedAt: now };
   const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
   const oldAliases = productAliases(current); const newAliases = productAliases(next);
   for (const [aliasKey, alias] of newAliases) if (!oldAliases.has(aliasKey) && (await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: lookupKey(tenantId, alias.kind, alias.value) }))).Item) throw new Error(`${alias.kind === "SKU" ? "SKU" : "Barcode"} is already used by another product or sale variant`);
@@ -773,6 +779,7 @@ export const businessReport = async (tenantId: string, range: { from: string; to
   const reorderByProduct = new Map<string, number>();
   for (const position of storePositions) reorderByProduct.set(position.productId, (reorderByProduct.get(position.productId) ?? 0) + position.reorderPoint);
   const products = catalogProducts.map((product) => ({ ...product, quantity: quantityByProduct.get(product.id) ?? 0, reorderPoint: reorderByProduct.get(product.id) }));
+  const productById = new Map(products.map((product) => [product.id, product]));
   const productTotals = new Map<string, ReportProductRecord>();
   const promotionTotals = new Map<string, ReportProductRecord>();
   let promotionUnitsSold = 0;
@@ -780,8 +787,9 @@ export const businessReport = async (tenantId: string, range: { from: string; to
   let promotionSavings = 0;
   for (const sale of filteredSales) {
     for (const item of sale.items) {
-      const current = productTotals.get(item.productId) ?? { productId: item.productId, productName: item.productName, units: 0, revenue: 0, grossProfit: 0, savings: 0 };
-      current.units += item.quantity;
+      const product = productById.get(item.productId);
+      const current = productTotals.get(item.productId) ?? { productId: item.productId, productName: item.productName, baseUnit: product?.baseUnit ?? "each", stockUnit: product?.stockUnit ?? "each", units: 0, revenue: 0, grossProfit: 0, savings: 0 };
+      current.units += item.inventoryQuantity / measurementUnit(current.stockUnit).baseUnits;
       current.revenue = roundMoney(current.revenue + item.total);
       current.grossProfit = roundMoney(current.grossProfit + (item.price - item.cost) * item.quantity);
       productTotals.set(item.productId, current);
@@ -790,8 +798,8 @@ export const businessReport = async (tenantId: string, range: { from: string; to
         promotionUnitsSold += item.quantity;
         promotionRevenue = roundMoney(promotionRevenue + item.total);
         promotionSavings = roundMoney(promotionSavings + saving);
-        const promotional = promotionTotals.get(item.productId) ?? { productId: item.productId, productName: item.productName, units: 0, revenue: 0, grossProfit: 0, savings: 0 };
-        promotional.units += item.quantity;
+        const promotional = promotionTotals.get(item.productId) ?? { productId: item.productId, productName: item.productName, baseUnit: product?.baseUnit ?? "each", stockUnit: product?.stockUnit ?? "each", units: 0, revenue: 0, grossProfit: 0, savings: 0 };
+        promotional.units += item.inventoryQuantity / measurementUnit(promotional.stockUnit).baseUnits;
         promotional.revenue = roundMoney(promotional.revenue + item.total);
         promotional.grossProfit = roundMoney(promotional.grossProfit + (item.price - item.cost) * item.quantity);
         promotional.savings = roundMoney(promotional.savings + saving);
@@ -804,7 +812,7 @@ export const businessReport = async (tenantId: string, range: { from: string; to
   const revenue = roundMoney(filteredSales.reduce((sum, sale) => sum + sale.totalAmount, 0));
   const grossProfit = roundMoney(filteredSales.flatMap(({ items }) => items).reduce((sum, item) => sum + (item.price - item.cost) * item.quantity, 0));
   const stockCostValue = roundMoney([...valueByProduct.values()].reduce((sum, value) => sum + value, 0));
-  const stockRetailValue = roundMoney(products.reduce((sum, product) => sum + product.quantity * product.sellingPrice, 0));
+  const stockRetailValue = roundMoney(products.reduce((sum, product) => sum + (product.quantity / measurementUnit(product.stockUnit).baseUnits) * product.sellingPrice, 0));
   return {
     from: range.from,
     to: range.to,
@@ -830,11 +838,13 @@ export const businessReport = async (tenantId: string, range: { from: string; to
       productId: product.id,
       productName: product.name,
       sku: product.sku,
+      baseUnit: product.baseUnit,
+      stockUnit: product.stockUnit,
       quantity: product.quantity,
       reorderPoint: product.reorderPoint ?? 0,
       actualCostValue: valueByProduct.get(product.id) ?? 0,
       sellingPrice: product.sellingPrice,
-      retailValue: roundMoney(product.quantity * product.sellingPrice),
+      retailValue: roundMoney((product.quantity / measurementUnit(product.stockUnit).baseUnits) * product.sellingPrice),
       status: product.status,
     })).sort((a, b) => Number(a.quantity > a.reorderPoint) - Number(b.quantity > b.reorderPoint) || a.productName.localeCompare(b.productName)),
     stockAdjustments: stockAdjustments.slice(0, 100),

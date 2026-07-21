@@ -123,12 +123,16 @@ one primary plus additional active stores. Staff-selected store scope is checked
 against those assignments on the server. Each new sale snapshots `storeId` and `storeName`, so moving a
 staff member later does not alter historical store reporting.
 
-Products keep inventory in integer minor measurement units. A bulk product can
-use `gram` as its base unit and define sale variants such as 500 g and 1 kg;
-checkout multiplies the sold variant count by 500 or 1,000 before the store-only
-FEFO allocation. Variant prices and identifiers are snapshotted on each sale
-line. Stock requisitions optionally add request/approve/reject/convert states
-before the existing dispatch-and-receive transfer workflow.
+Products expose a normal stock and pricing unit such as kilogram, litre, metre,
+or tonne. Default buying and selling prices are per one of that unit. Inventory
+transactions remain exact integers in a derived minor unit internally, so a
+kilogram product may be sold as 500 g or 2.5 kg without floating-point stock.
+Supplier catalog entries state both the order unit and its contents: for
+example, one bag contains 25 kg or one bulk unit contains one tonne. Purchase
+receipts derive the exact inventory conversion on the server. Variant prices
+and identifiers are snapshotted on each sale line. Stock requisitions
+optionally add request/approve/reject/convert states before the existing
+dispatch-and-receive transfer workflow.
 
 Changing a staff email updates the existing Cognito identity and requires the
 new address to be verified; the stable Cognito `sub` means historical sales do

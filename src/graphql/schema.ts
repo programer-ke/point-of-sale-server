@@ -45,6 +45,7 @@ export const typeDefs = `#graphql
     sellingPrice: Float!
     buyingPrice: Float!
     baseUnit: String!
+    stockUnit: String!
     tracksExpiry: Boolean!
     saleVariants: [SaleVariant!]!
     promotionPrice: Float
@@ -148,6 +149,8 @@ export const typeDefs = `#graphql
     productId: ID!
     productName: String!
     sku: String!
+    baseUnit: String!
+    stockUnit: String!
     quantity: Int!
     reorderPoint: Int!
     actualCostValue: Float!
@@ -184,7 +187,9 @@ export const typeDefs = `#graphql
   type ReportProduct {
     productId: ID!
     productName: String!
-    units: Int!
+    baseUnit: String!
+    stockUnit: String!
+    units: Float!
     revenue: Float!
     grossProfit: Float!
     savings: Float!
@@ -257,6 +262,8 @@ export const typeDefs = `#graphql
     productId: ID!
     supplierSku: String!
     purchaseUnit: String!
+    purchaseQuantity: Float!
+    purchaseMeasurementUnit: String!
     unitsPerPurchaseUnit: Int!
     lastPurchasePrice: Float
     preferred: Boolean!
@@ -286,8 +293,11 @@ export const typeDefs = `#graphql
     productId: ID!
     productName: String!
     baseUnit: String!
+    stockUnit: String!
     supplierSku: String!
     purchaseUnit: String!
+    purchaseQuantity: Float!
+    purchaseMeasurementUnit: String!
     unitsPerPurchaseUnit: Int!
     orderedPurchaseQuantity: Int!
     acceptedBaseQuantity: Int!
@@ -320,7 +330,10 @@ export const typeDefs = `#graphql
     productId: ID!
     productName: String!
     baseUnit: String!
+    stockUnit: String!
     purchaseUnit: String!
+    purchaseQuantity: Float!
+    purchaseMeasurementUnit: String!
     unitsPerPurchaseUnit: Int!
     batchNumber: String
     expiryDate: String
@@ -388,7 +401,7 @@ export const typeDefs = `#graphql
 
   type TransferAllocation { lotId: ID!, quantity: Int!, unitCost: Float!, batchNumber: String!, expiryDate: String, supplierId: ID }
   type TransferReceiptLine { lotId: ID!, productId: ID!, productName: String!, dispatchedQuantity: Int!, receivedQuantity: Int!, damagedQuantity: Int!, missingQuantity: Int!, reason: String!, destinationLotId: ID }
-  type StockTransferLine { productId: ID!, productName: String!, quantity: Int!, allocations: [TransferAllocation!] }
+  type StockTransferLine { productId: ID!, productName: String!, baseUnit: String!, stockUnit: String!, quantity: Int!, allocations: [TransferAllocation!] }
   type StockTransfer {
     id: ID!
     transferNumber: String!
@@ -409,7 +422,7 @@ export const typeDefs = `#graphql
     createdAt: String!
     updatedAt: String!
   }
-  type StockRequisitionLine { productId: ID!, productName: String!, quantity: Int! }
+  type StockRequisitionLine { productId: ID!, productName: String!, baseUnit: String!, stockUnit: String!, quantity: Int! }
   type StockRequisition { id: ID!, requisitionNumber: String!, fromStoreId: ID!, fromStoreName: String!, toStoreId: ID!, toStoreName: String!, status: String!, notes: String!, decisionReason: String, lines: [StockRequisitionLine!]!, requestedBy: ID!, requestedByName: String!, decidedBy: ID, decidedByName: String, transferId: ID, createdAt: String!, updatedAt: String! }
 
   type StocktakeLine { lotId: ID!, productId: ID!, productName: String!, batchNumber: String!, expectedQuantity: Int!, countedQuantity: Int, variance: Int, unitCost: Float! }
@@ -511,15 +524,15 @@ export const typeDefs = `#graphql
     createCategory(code: String!, name: String!, description: String = ""): Category!
     updateCategory(id: ID!, code: String!, name: String!, description: String = ""): Category!
     deleteCategory(id: ID!): Boolean!
-    createProduct(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, baseUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!): Product!
-    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, baseUnit: String, tracksExpiry: Boolean, saleVariants: [SaleVariantInput!], promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
+    createProduct(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, stockUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!): Product!
+    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, stockUnit: String, tracksExpiry: Boolean, saleVariants: [SaleVariantInput!], promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
     archiveProduct(id: ID!): Product!
     completeSale(storeId: ID, customerName: String, paymentMethod: String!, amountTendered: Float, mpesaReference: String, items: [SaleItemInput!]!, requestId: ID!): Sale!
     createStore(code: String!, name: String!, address: String = "", receiptBusinessName: String = "", receiptAddress: String = "", receiptPhone: String = "", receiptEmail: String = "", receiptFooter: String = "", receiptReturnPolicy: String = ""): Store!
     updateStore(id: ID!, name: String, address: String, receiptBusinessName: String, receiptAddress: String, receiptPhone: String, receiptEmail: String, receiptFooter: String, receiptReturnPolicy: String, status: String): Store!
     createSupplier(code: String!, name: String!, contactName: String = "", phone: String = "", email: String = "", address: String = ""): Supplier!
     updateSupplier(id: ID!, name: String, contactName: String, phone: String, email: String, address: String, status: String): Supplier!
-    upsertSupplierProduct(supplierId: ID!, productId: ID!, supplierSku: String = "", purchaseUnit: String!, unitsPerPurchaseUnit: Int!, lastPurchasePrice: Float, preferred: Boolean!): SupplierProduct!
+    upsertSupplierProduct(supplierId: ID!, productId: ID!, supplierSku: String = "", purchaseUnit: String!, purchaseQuantity: Float!, purchaseMeasurementUnit: String!, lastPurchasePrice: Float, preferred: Boolean!): SupplierProduct!
     upsertStorePolicy(storeId: ID!, productId: ID!, reorderPoint: Int!, targetQuantity: Int!): StoreProductPolicy!
     createPurchaseOrder(supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!, requestId: ID!): PurchaseOrder!
     updatePurchaseOrder(id: ID!, supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!): PurchaseOrder!

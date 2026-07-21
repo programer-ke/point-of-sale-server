@@ -21,6 +21,7 @@ const product = {
   sellingPrice: 125,
   buyingPrice: 80,
   baseUnit: "each",
+  stockUnit: "each",
   tracksExpiry: false,
   status: "active",
   createdAt: "2026-01-01T00:00:00.000Z",
@@ -168,7 +169,7 @@ async function main() {
     /already been used/,
   );
 
-  const rice = { ...product, name: "Rice", baseUnit: "gram", sellingPrice: 80, saleVariants: [
+  const rice = { ...product, name: "Rice", baseUnit: "gram", stockUnit: "kilogram", sellingPrice: 80, saleVariants: [
     { id: "rice-500g", name: "500 g", sku: "RICE-500", barcode: "500500", quantityInBaseUnits: 500, sellingPrice: 80, status: "active" },
     { id: "rice-1kg", name: "1 kg", sku: "RICE-1KG", barcode: "10001000", quantityInBaseUnits: 1000, sellingPrice: 150, status: "active" },
   ] };

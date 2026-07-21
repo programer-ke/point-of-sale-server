@@ -88,10 +88,14 @@ server; administrators may explicitly select another store. Sales snapshot the
 store ID and name. Stores cannot be deactivated while they own stock, assigned
 staff, open purchase orders, or open transfers.
 
-Products contain selling price, reference buying price, base unit, and expiry
-behavior but never opening stock. Supplier-product records define purchase
-units, pack conversions, supplier SKUs, quoted prices, and preferred suppliers.
-Reorder point and target quantity are configured per store and product.
+Products contain a user-facing stock/pricing unit, a derived atomic unit,
+selling price, reference buying price, and expiry behavior but never opening
+stock. Prices apply to one stock unit. Sale variants and supplier packaging are
+converted to integer atomic quantities before inventory writes. A supplier-
+product record preserves its order unit and stated contents (for example 25 kg
+per bag or one tonne per bulk unit), plus the server-derived conversion,
+optional supplier SKU, optional quote, and preferred-supplier flag. Reorder
+point and target quantity are configured per store and product.
 
 Purchase orders progress through draft, issued, partially received, completed,
 closed, or cancelled. Accepted goods create costed supplier-origin lots;

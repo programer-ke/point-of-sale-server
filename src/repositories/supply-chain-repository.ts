@@ -7,6 +7,7 @@ import {
   type TransactWriteCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import { dynamoDB, TABLE_NAME } from "../config/db";
+import { convertMeasurementToBaseUnits } from "../domain/measurements";
 
 export type Actor = { id: string; name: string };
 export type EntityStatus = "active" | "inactive";
@@ -45,6 +46,8 @@ export interface SupplierProductRecord {
   productId: string;
   supplierSku: string;
   purchaseUnit: string;
+  purchaseQuantity: number;
+  purchaseMeasurementUnit: string;
   unitsPerPurchaseUnit: number;
   lastPurchasePrice: number | null;
   preferred: boolean;
@@ -64,8 +67,11 @@ export interface PurchaseOrderLineRecord {
   productId: string;
   productName: string;
   baseUnit: string;
+  stockUnit: string;
   supplierSku: string;
   purchaseUnit: string;
+  purchaseQuantity: number;
+  purchaseMeasurementUnit: string;
   unitsPerPurchaseUnit: number;
   orderedPurchaseQuantity: number;
   acceptedBaseQuantity: number;
@@ -116,7 +122,7 @@ export interface GoodsReceiptRecord {
   storeName: string;
   deliveryNote: string;
   invoiceNumber: string;
-  lines: Array<ReceiptLineInput & { productId: string; productName: string; baseUnit: string; purchaseUnit: string; unitsPerPurchaseUnit: number; orderedPricePerPurchaseUnit: number; actualPricePerPurchaseUnit: number; priceVariance: number; unitCost: number; lotId?: string | null }>;
+  lines: Array<ReceiptLineInput & { productId: string; productName: string; baseUnit: string; stockUnit: string; purchaseUnit: string; purchaseQuantity: number; purchaseMeasurementUnit: string; unitsPerPurchaseUnit: number; orderedPricePerPurchaseUnit: number; actualPricePerPurchaseUnit: number; priceVariance: number; unitCost: number; lotId?: string | null }>;
   createdBy: string;
   createdByName: string;
   createdAt: string;
@@ -160,6 +166,8 @@ export interface StockMovementRecord {
 export interface TransferLineRecord {
   productId: string;
   productName: string;
+  baseUnit: string;
+  stockUnit: string;
   quantity: number;
   allocations?: Array<{ lotId: string; quantity: number; unitCost: number; batchNumber: string; expiryDate?: string | null; supplierId?: string | null }>;
 }
@@ -185,7 +193,7 @@ export interface StockTransferRecord {
   updatedAt: string;
 }
 
-export interface StockRequisitionRecord { id: string; requisitionNumber: string; fromStoreId: string; fromStoreName: string; toStoreId: string; toStoreName: string; status: "requested" | "approved" | "rejected" | "converted" | "cancelled"; notes: string; decisionReason?: string | null; lines: Array<{ productId: string; productName: string; quantity: number }>; requestedBy: string; requestedByName: string; decidedBy?: string | null; decidedByName?: string | null; transferId?: string | null; createdAt: string; updatedAt: string }
+export interface StockRequisitionRecord { id: string; requisitionNumber: string; fromStoreId: string; fromStoreName: string; toStoreId: string; toStoreName: string; status: "requested" | "approved" | "rejected" | "converted" | "cancelled"; notes: string; decisionReason?: string | null; lines: Array<{ productId: string; productName: string; baseUnit: string; stockUnit: string; quantity: number }>; requestedBy: string; requestedByName: string; decidedBy?: string | null; decidedByName?: string | null; transferId?: string | null; createdAt: string; updatedAt: string }
 
 export interface TransferReceiptLineRecord {
   lotId: string;
@@ -207,11 +215,11 @@ const normalized = (value: string) => value.trim().replace(/\s+/g, " ");
 const normalizedCode = (value: string) => normalized(value).toUpperCase();
 const PURCHASE_UNITS: Record<string, Set<string>> = {
   each: new Set(["each", "pack", "box", "inner carton", "carton", "case", "master carton", "tray", "crate", "bundle", "pallet"]),
-  gram: new Set(["bag", "sack", "bale", "tub", "bucket", "carton", "case", "drum", "pallet"]),
-  millilitre: new Set(["bottle", "can", "carton", "case", "crate", "jerrycan", "drum", "tank", "pallet"]),
-  millimetre: new Set(["roll", "reel", "bundle", "carton", "case", "pallet"]),
-  square_centimetre: new Set(["sheet", "roll", "bundle", "carton", "pallet"]),
-  cubic_centimetre: new Set(["container", "drum", "crate", "pallet"]),
+  gram: new Set(["bag", "sack", "bale", "tub", "bucket", "carton", "case", "drum", "bulk", "kilogram", "tonne", "pallet"]),
+  millilitre: new Set(["bottle", "can", "carton", "case", "crate", "jerrycan", "drum", "tank", "bulk", "litre", "pallet"]),
+  millimetre: new Set(["roll", "reel", "bundle", "carton", "case", "metre", "pallet"]),
+  square_centimetre: new Set(["sheet", "roll", "bundle", "carton", "square metre", "pallet"]),
+  cubic_centimetre: new Set(["container", "drum", "crate", "bulk", "cubic metre", "pallet"]),
 };
 const tenantKey = (tenantId: string, value: string) => `TENANT#${tenantId}#${value}`;
 const key = (tenantId: string, kind: string, id: string, sortKey = "PROFILE") => ({ partitionKey: tenantKey(tenantId, `${kind}#${id}`), sortKey });
@@ -253,7 +261,7 @@ const get = async <T>(tenantId: string, kind: string, id: string, sortKey = "PRO
   return stripKeys<T>(result.Item);
 };
 
-type CatalogProduct = { id: string; name: string; sku: string; baseUnit: string; tracksExpiry: boolean; status: EntityStatus };
+type CatalogProduct = { id: string; name: string; sku: string; baseUnit: string; stockUnit: string; buyingPrice: number; tracksExpiry: boolean; status: EntityStatus };
 const getCatalogProduct = (tenantId: string, id: string) => get<CatalogProduct>(tenantId, "PRODUCT", id);
 const getSupplierProduct = (tenantId: string, supplierId: string, productId: string) => get<SupplierProductRecord>(tenantId, "SUPPLIER_PRODUCT", `${supplierId}#${productId}`);
 
@@ -344,20 +352,20 @@ export const listSupplierProducts = (tenantId: string, supplierId?: string) => {
   return listSuppliers(tenantId).then((suppliers) => Promise.all(suppliers.map((supplier) => queryCollection<SupplierProductRecord>(tenantId, `SUPPLIER#${supplier.id}#PRODUCT`))).then((values) => values.flat()));
 };
 
-export const upsertSupplierProduct = async (tenantId: string, input: SupplierProductRecord) => {
-  validateCount(input.unitsPerPurchaseUnit, "Units per purchase unit", false);
+export const upsertSupplierProduct = async (tenantId: string, input: Omit<SupplierProductRecord, "unitsPerPurchaseUnit" | "updatedAt">) => {
   if (input.lastPurchasePrice != null && (!Number.isFinite(input.lastPurchasePrice) || input.lastPurchasePrice < 0)) throw new Error("Purchase price must be zero or greater when provided");
   if (!normalized(input.purchaseUnit)) throw new Error("Purchase unit is required");
   const now = new Date().toISOString();
-  const record = { ...input, supplierSku: normalizedCode(input.supplierSku), purchaseUnit: normalized(input.purchaseUnit).toLowerCase(), updatedAt: now };
-  const preferredKey = key(tenantId, "PREFERRED_SUPPLIER", record.productId);
+  const preferredKey = key(tenantId, "PREFERRED_SUPPLIER", input.productId);
   const [supplier, product, current, preferredLookup] = await Promise.all([
-    getSupplier(tenantId, record.supplierId), getCatalogProduct(tenantId, record.productId),
-    getSupplierProduct(tenantId, record.supplierId, record.productId),
+    getSupplier(tenantId, input.supplierId), getCatalogProduct(tenantId, input.productId),
+    getSupplierProduct(tenantId, input.supplierId, input.productId),
     dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: preferredKey })).then((value) => value.Item),
   ]);
   if (!supplier || supplier.status !== "active") throw new Error("Select an active supplier");
   if (!product || product.status !== "active") throw new Error("Select an active product");
+  const unitsPerPurchaseUnit = convertMeasurementToBaseUnits(input.purchaseQuantity, input.purchaseMeasurementUnit, product.baseUnit);
+  const record: SupplierProductRecord = { ...input, unitsPerPurchaseUnit, supplierSku: normalizedCode(input.supplierSku), purchaseUnit: normalized(input.purchaseUnit).toLowerCase(), purchaseMeasurementUnit: input.purchaseMeasurementUnit.trim().toLowerCase(), updatedAt: now };
   if (!PURCHASE_UNITS[product.baseUnit]?.has(record.purchaseUnit.toLowerCase())) throw new Error(`${record.purchaseUnit} is not a supported purchase package for ${product.name}`);
   const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
   const skuLookup = record.supplierSku ? key(tenantId, `LOOKUP#SUPPLIER_SKU#${record.supplierId}`, record.supplierSku) : null;
@@ -436,7 +444,7 @@ const resolvePurchaseOrderLines = async (tenantId: string, supplierId: string, i
     if (!supplierProduct) throw new Error(`${product.name} is not configured for the selected supplier`);
     const pricePerPurchaseUnit = input.pricePerPurchaseUnit ?? supplierProduct.lastPurchasePrice;
     if (typeof pricePerPurchaseUnit !== "number" || !Number.isFinite(pricePerPurchaseUnit) || pricePerPurchaseUnit < 0) throw new Error(`Enter a purchase price for ${product.name} on this purchase order`);
-    return { id: existing?.lines.find((line) => line.productId === input.productId)?.id ?? randomUUID(), productId: product.id, productName: product.name, baseUnit: product.baseUnit, supplierSku: supplierProduct.supplierSku, purchaseUnit: supplierProduct.purchaseUnit, unitsPerPurchaseUnit: supplierProduct.unitsPerPurchaseUnit, orderedPurchaseQuantity: input.orderedPurchaseQuantity, acceptedBaseQuantity: 0, pricePerPurchaseUnit: pricePerPurchaseUnit! };
+    return { id: existing?.lines.find((line) => line.productId === input.productId)?.id ?? randomUUID(), productId: product.id, productName: product.name, baseUnit: product.baseUnit, stockUnit: product.stockUnit, supplierSku: supplierProduct.supplierSku, purchaseUnit: supplierProduct.purchaseUnit, purchaseQuantity: supplierProduct.purchaseQuantity, purchaseMeasurementUnit: supplierProduct.purchaseMeasurementUnit, unitsPerPurchaseUnit: supplierProduct.unitsPerPurchaseUnit, orderedPurchaseQuantity: input.orderedPurchaseQuantity, acceptedBaseQuantity: 0, pricePerPurchaseUnit: pricePerPurchaseUnit! };
   }));
 };
 export const createPurchaseOrder = async (tenantId: string, input: { supplierId: string; storeId: string; expectedDeliveryDate?: string | null; notes: string; lines: PurchaseOrderLineInput[] }, actor: Actor, requestId: string) => {
@@ -500,7 +508,7 @@ export const receivePurchaseOrder = async (tenantId: string, purchaseOrderId: st
       lotId = randomUUID(); const lot: InventoryLotRecord = { id: lotId, storeId: po.storeId, productId: poLine.productId, productName: poLine.productName, supplierId: po.supplierId, receiptId: id, batchNumber: normalized(input.batchNumber ?? "") || `GRN-${id.slice(0, 8).toUpperCase()}`, expiryDate: input.expiryDate ?? null, receivedQuantity: input.acceptedBaseQuantity, remainingQuantity: input.acceptedBaseQuantity, unitCost, origin: "supplier_receipt", status: "active", receivedAt: now, updatedAt: now };
       lotWrites.push({ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "LOT", lotId), accessPartition: collection(tenantId, `STORE#${lot.storeId}#INVENTORY#ACTIVE`), accessSort: `${lot.expiryDate ?? "9999-12-31"}#${now}#${lotId}`, entityType: "inventory_lot", tenantId, ...lot }, ConditionExpression: "attribute_not_exists(partitionKey)" } }, stockMovementPut(tenantId, { type: "receipt", storeId: po.storeId, productId: poLine.productId, productName: poLine.productName, lotId, quantity: input.acceptedBaseQuantity, unitCost, reason: `Receipt for ${po.orderNumber}`, referenceId: id, actorId: actor.id, actorName: actor.name }, now));
     }
-    receiptLines.push({ ...input, productId: poLine.productId, productName: poLine.productName, baseUnit: poLine.baseUnit, purchaseUnit: poLine.purchaseUnit, unitsPerPurchaseUnit: poLine.unitsPerPurchaseUnit, orderedPricePerPurchaseUnit: poLine.pricePerPurchaseUnit, priceVariance: roundMoney(input.actualPricePerPurchaseUnit - poLine.pricePerPurchaseUnit), unitCost, lotId });
+    receiptLines.push({ ...input, productId: poLine.productId, productName: poLine.productName, baseUnit: poLine.baseUnit, stockUnit: poLine.stockUnit, purchaseUnit: poLine.purchaseUnit, purchaseQuantity: poLine.purchaseQuantity, purchaseMeasurementUnit: poLine.purchaseMeasurementUnit, unitsPerPurchaseUnit: poLine.unitsPerPurchaseUnit, orderedPricePerPurchaseUnit: poLine.pricePerPurchaseUnit, priceVariance: roundMoney(input.actualPricePerPurchaseUnit - poLine.pricePerPurchaseUnit), unitCost, lotId });
   }
   const nextLines = po.lines.map((line) => ({ ...line, acceptedBaseQuantity: line.acceptedBaseQuantity + (acceptedByLine.get(line.id) ?? 0) }));
   const complete = nextLines.every((line) => line.acceptedBaseQuantity >= line.orderedPurchaseQuantity * line.unitsPerPurchaseUnit);
@@ -552,7 +560,7 @@ export const getTransfer = (tenantId: string, id: string) => get<StockTransferRe
 export const listRequisitions = (tenantId: string, limit = 200) => queryCollection<StockRequisitionRecord>(tenantId, "REQUISITION", { limit, descending: true });
 export const getRequisition = (tenantId: string, id: string) => get<StockRequisitionRecord>(tenantId, "REQUISITION", id);
 const putRequisition = (tenantId: string, requisition: StockRequisitionRecord, expectedUpdatedAt?: string) => ({ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "REQUISITION", requisition.id), accessPartition: collection(tenantId, "REQUISITION"), accessSort: `${requisition.createdAt}#${requisition.id}`, entityType: "stock_requisition", tenantId, ...requisition }, ...(expectedUpdatedAt ? { ConditionExpression: "updatedAt = :expected", ExpressionAttributeValues: { ":expected": expectedUpdatedAt } } : { ConditionExpression: "attribute_not_exists(partitionKey)" }) } });
-export const createRequisition = async (tenantId: string, input: { fromStoreId: string; toStoreId: string; notes: string; lines: Array<{ productId: string; quantity: number }> }, actor: Actor, requestId: string) => { const previous = await existingIdempotentResult<StockRequisitionRecord>(tenantId, "create_requisition", requestId, input); if (previous) return previous; if (input.fromStoreId === input.toStoreId) throw new Error("Requisition stores must be different"); if (input.lines.length < 1 || input.lines.length > 40 || new Set(input.lines.map((line) => line.productId)).size !== input.lines.length) throw new Error("A requisition must contain 1 to 40 unique products"); input.lines.forEach((line) => validateCount(line.quantity, "Requested quantity", false)); const [from, to, products] = await Promise.all([getStore(tenantId, input.fromStoreId), getStore(tenantId, input.toStoreId), Promise.all(input.lines.map((line) => getCatalogProduct(tenantId, line.productId)))]); if (!from || !to || from.status !== "active" || to.status !== "active") throw new Error("Select two active stores"); if (products.some((product) => !product || product.status !== "active")) throw new Error("One or more requested products are unavailable"); const now = new Date().toISOString(); const id = randomUUID(); const requisition: StockRequisitionRecord = { id, requisitionNumber: `REQ-${now.slice(0, 10).replaceAll("-", "")}-${id.slice(0, 8).toUpperCase()}`, fromStoreId: from.id, fromStoreName: from.name, toStoreId: to.id, toStoreName: to.name, status: "requested", notes: input.notes.trim(), lines: input.lines.map((line, index) => ({ ...line, productName: products[index]!.name })), requestedBy: actor.id, requestedByName: actor.name, createdAt: now, updatedAt: now }; return commitIdempotent(tenantId, "create_requisition", requestId, input, requisition, [putRequisition(tenantId, requisition)]); };
+export const createRequisition = async (tenantId: string, input: { fromStoreId: string; toStoreId: string; notes: string; lines: Array<{ productId: string; quantity: number }> }, actor: Actor, requestId: string) => { const previous = await existingIdempotentResult<StockRequisitionRecord>(tenantId, "create_requisition", requestId, input); if (previous) return previous; if (input.fromStoreId === input.toStoreId) throw new Error("Requisition stores must be different"); if (input.lines.length < 1 || input.lines.length > 40 || new Set(input.lines.map((line) => line.productId)).size !== input.lines.length) throw new Error("A requisition must contain 1 to 40 unique products"); input.lines.forEach((line) => validateCount(line.quantity, "Requested quantity", false)); const [from, to, products] = await Promise.all([getStore(tenantId, input.fromStoreId), getStore(tenantId, input.toStoreId), Promise.all(input.lines.map((line) => getCatalogProduct(tenantId, line.productId)))]); if (!from || !to || from.status !== "active" || to.status !== "active") throw new Error("Select two active stores"); if (products.some((product) => !product || product.status !== "active")) throw new Error("One or more requested products are unavailable"); const now = new Date().toISOString(); const id = randomUUID(); const requisition: StockRequisitionRecord = { id, requisitionNumber: `REQ-${now.slice(0, 10).replaceAll("-", "")}-${id.slice(0, 8).toUpperCase()}`, fromStoreId: from.id, fromStoreName: from.name, toStoreId: to.id, toStoreName: to.name, status: "requested", notes: input.notes.trim(), lines: input.lines.map((line, index) => ({ ...line, productName: products[index]!.name, baseUnit: products[index]!.baseUnit, stockUnit: products[index]!.stockUnit })), requestedBy: actor.id, requestedByName: actor.name, createdAt: now, updatedAt: now }; return commitIdempotent(tenantId, "create_requisition", requestId, input, requisition, [putRequisition(tenantId, requisition)]); };
 export const decideRequisition = async (tenantId: string, id: string, decision: "approve" | "reject" | "cancel", reason: string, actor: Actor) => { const current = await getRequisition(tenantId, id); if (!current || current.status !== "requested") throw new Error("Only requested requisitions can be decided"); if ((decision === "reject" || decision === "cancel") && reason.trim().length < 3) throw new Error("A decision reason is required"); const next: StockRequisitionRecord = { ...current, status: decision === "approve" ? "approved" : decision === "reject" ? "rejected" : "cancelled", decisionReason: reason.trim() || null, decidedBy: actor.id, decidedByName: actor.name, updatedAt: new Date().toISOString() }; await dynamoDB.send(new TransactWriteCommand({ TransactItems: [putRequisition(tenantId, next, current.updatedAt)] })); return next; };
 export const convertRequisitionToTransfer = async (tenantId: string, id: string, actor: Actor, requestId: string) => { const payload = { id }; const previous = await existingIdempotentResult<StockTransferRecord>(tenantId, "convert_requisition", requestId, payload); if (previous) return previous; const requisition = await getRequisition(tenantId, id); if (!requisition || requisition.status !== "approved") throw new Error("Only approved requisitions can become transfers"); const now = new Date().toISOString(); const transferId = randomUUID(); const transfer: StockTransferRecord = { id: transferId, transferNumber: `TR-${now.slice(0, 10).replaceAll("-", "")}-${transferId.slice(0, 8).toUpperCase()}`, fromStoreId: requisition.fromStoreId, fromStoreName: requisition.fromStoreName, toStoreId: requisition.toStoreId, toStoreName: requisition.toStoreName, status: "draft", notes: [requisition.notes, `From ${requisition.requisitionNumber}`].filter(Boolean).join("\n"), lines: requisition.lines, createdBy: actor.id, createdByName: actor.name, createdAt: now, updatedAt: now }; const converted: StockRequisitionRecord = { ...requisition, status: "converted", transferId, updatedAt: now }; return commitIdempotent(tenantId, "convert_requisition", requestId, payload, transfer, [{ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "TRANSFER", transferId), accessPartition: collection(tenantId, "TRANSFER"), accessSort: `${now}#${transferId}`, entityType: "stock_transfer", tenantId, ...transfer }, ConditionExpression: "attribute_not_exists(partitionKey)" } }, putRequisition(tenantId, converted, requisition.updatedAt)]); };
 export const createTransfer = async (tenantId: string, input: { fromStoreId: string; toStoreId: string; notes: string; lines: Array<{ productId: string; quantity: number }> }, actor: Actor, requestId: string) => {
@@ -561,7 +569,7 @@ export const createTransfer = async (tenantId: string, input: { fromStoreId: str
   if (new Set(input.lines.map((line) => line.productId)).size !== input.lines.length) throw new Error("Each product can appear only once on a transfer");
   const [from, to] = await Promise.all([getStore(tenantId, input.fromStoreId), getStore(tenantId, input.toStoreId)]); if (!from || !to || from.status !== "active" || to.status !== "active") throw new Error("Select two active stores");
   const products = await Promise.all(input.lines.map((line) => getCatalogProduct(tenantId, line.productId))); if (products.some((product) => !product || product.status !== "active")) throw new Error("One or more transfer products are unavailable");
-  const lines = input.lines.map((line, index) => ({ ...line, productName: products[index]!.name }));
+  const lines = input.lines.map((line, index) => ({ ...line, productName: products[index]!.name, baseUnit: products[index]!.baseUnit, stockUnit: products[index]!.stockUnit }));
   const now = new Date().toISOString(); const id = randomUUID(); const transfer: StockTransferRecord = { id, transferNumber: `TR-${now.slice(0, 10).replaceAll("-", "")}-${id.slice(0, 8).toUpperCase()}`, fromStoreId: from.id, fromStoreName: from.name, toStoreId: to.id, toStoreName: to.name, status: "draft", notes: input.notes.trim(), lines, createdBy: actor.id, createdByName: actor.name, createdAt: now, updatedAt: now };
   return commitIdempotent(tenantId, "create_transfer", requestId, input, transfer, [{ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "TRANSFER", id), accessPartition: collection(tenantId, "TRANSFER"), accessSort: `${now}#${id}`, entityType: "stock_transfer", tenantId, ...transfer }, ConditionExpression: "attribute_not_exists(partitionKey)" } }]);
 };

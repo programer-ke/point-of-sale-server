@@ -492,13 +492,13 @@ export const resolvers = {
     },
     createProduct: (
       _: unknown,
-      args: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "baseUnit" | "tracksExpiry" | "saleVariants">,
+      args: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "saleVariants">,
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
       validateMoney(args.sellingPrice, "Selling price");
       validateMoney(args.buyingPrice, "Buying price");
-      if (!args.baseUnit.trim()) throw new Error("Base unit is required");
+      if (!args.stockUnit.trim()) throw new Error("Stock and pricing unit is required");
       return createProduct(tenant(context), args, actor(context));
     },
     updateProduct: async (
@@ -551,7 +551,7 @@ export const resolvers = {
     updateStore: async (_: unknown, { id, ...input }: { id: string } & Parameters<typeof updateStore>[2], context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); if (input.status === "inactive") { const memberships = await listTenantMemberships(tenantId); const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId)); if ([...profiles.values()].some((profile) => profile.storeIds?.includes(id) || profile.storeId === id)) throw new Error("Reassign staff before deactivating this store"); } return updateStore(tenantId, id, input); },
     createSupplier: (_: unknown, input: { code: string; name: string; contactName: string; phone: string; email: string; address: string }, context: GraphQLContext) => { requireAdmin(context); return createSupplier(tenant(context), input); },
     updateSupplier: (_: unknown, { id, ...input }: { id: string; name?: string; contactName?: string; phone?: string; email?: string; address?: string; status?: "active" | "inactive" }, context: GraphQLContext) => { requireAdmin(context); return updateSupplier(tenant(context), id, input); },
-    upsertSupplierProduct: (_: unknown, input: { supplierId: string; productId: string; supplierSku: string; purchaseUnit: string; unitsPerPurchaseUnit: number; lastPurchasePrice?: number | null; preferred: boolean }, context: GraphQLContext) => { requireAdmin(context); return upsertSupplierProduct(tenant(context), { ...input, lastPurchasePrice: input.lastPurchasePrice ?? null, updatedAt: new Date().toISOString() }); },
+    upsertSupplierProduct: (_: unknown, input: { supplierId: string; productId: string; supplierSku: string; purchaseUnit: string; purchaseQuantity: number; purchaseMeasurementUnit: string; lastPurchasePrice?: number | null; preferred: boolean }, context: GraphQLContext) => { requireAdmin(context); return upsertSupplierProduct(tenant(context), { ...input, lastPurchasePrice: input.lastPurchasePrice ?? null }); },
     upsertStorePolicy: (_: unknown, input: { storeId: string; productId: string; reorderPoint: number; targetQuantity: number }, context: GraphQLContext) => { requireAdmin(context); return upsertStorePolicy(tenant(context), input); },
     createPurchaseOrder: (_: unknown, input: { supplierId: string; storeId: string; expectedDeliveryDate?: string; notes: string; lines: Array<{ productId: string; orderedPurchaseQuantity: number; pricePerPurchaseUnit?: number }>; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createPurchaseOrder(tenant(context), input, actor(context), input.requestId); },
     updatePurchaseOrder: (_: unknown, { id, ...input }: { id: string; supplierId: string; storeId: string; expectedDeliveryDate?: string; notes: string; lines: Array<{ productId: string; orderedPurchaseQuantity: number; pricePerPurchaseUnit?: number }> }, context: GraphQLContext) => { requireAdmin(context); return updatePurchaseOrder(tenant(context), id, input); },

@@ -2,12 +2,13 @@ const assert = require("node:assert/strict");
 process.env.AWS_DYNAMODB_TABLE = "test-table";
 const { dynamoDB } = require("../dist/config/db.js");
 const supply = require("../dist/repositories/supply-chain-repository.js");
+const measurements = require("../dist/domain/measurements.js");
 const tenantId = "tenant-1";
 const now = "2026-07-20T10:00:00.000Z";
 const store = { id: "store-1", code: "MAIN", name: "Main Store", address: "", status: "active", createdAt: now, updatedAt: now };
 const supplier = { id: "supplier-1", code: "SUP", name: "Supplier", contactName: "", phone: "", email: "", address: "", status: "active", createdAt: now, updatedAt: now };
-const product = { id: "product-1", name: "Tea", sku: "TEA", baseUnit: "each", tracksExpiry: true, status: "active" };
-const supplierProduct = { supplierId: supplier.id, productId: product.id, supplierSku: "TEA-CASE", purchaseUnit: "carton", unitsPerPurchaseUnit: 12, lastPurchasePrice: 960, preferred: true, updatedAt: now };
+const product = { id: "product-1", name: "Tea", sku: "TEA", baseUnit: "each", stockUnit: "each", tracksExpiry: true, status: "active" };
+const supplierProduct = { supplierId: supplier.id, productId: product.id, supplierSku: "TEA-CASE", purchaseUnit: "carton", purchaseQuantity: 12, purchaseMeasurementUnit: "each", unitsPerPurchaseUnit: 12, lastPurchasePrice: 960, preferred: true, updatedAt: now };
 
 const assertUsesEveryExpressionValue = (operation, label) => {
   const expressions = [operation.UpdateExpression, operation.ConditionExpression].filter(Boolean).join(" ");
@@ -17,6 +18,10 @@ const assertUsesEveryExpressionValue = (operation, label) => {
 };
 
 async function main() {
+  assert.equal(measurements.convertMeasurementToBaseUnits(0.5, "kilogram", "gram"), 500, "500 g must be represented exactly beneath a kilogram stock unit");
+  assert.equal(measurements.convertMeasurementToBaseUnits(2.5, "kilogram", "gram"), 2500, "fractional kilogram sale quantities must remain exact");
+  assert.equal(measurements.convertMeasurementToBaseUnits(2, "tonne", "gram"), 2000000, "supplier tonnes must convert to exact weight inventory");
+  assert.throws(() => measurements.convertMeasurementToBaseUnits(1, "litre", "gram"), /not compatible/, "measurement dimensions must not be mixed");
   let transaction;
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") {
