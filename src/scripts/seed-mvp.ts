@@ -5,17 +5,23 @@ import {
   findProduct,
   listCategories,
   type ProductRecord,
+  updateCategory,
   updateProduct,
 } from "../repositories/pos-repository";
 import {
   createPurchaseOrder,
   createStore,
   createSupplier,
+  createTransfer,
+  dispatchTransfer,
   listPurchaseOrders,
   listStores,
   listSuppliers,
+  listTransfers,
   receivePurchaseOrder,
+  receiveTransfer,
   setPurchaseOrderStatus,
+  updateStore,
   updateSupplier,
   upsertStorePolicy,
   upsertSupplierProduct,
@@ -39,6 +45,21 @@ const assertSeedFile: (value: unknown) => asserts value is SeedFile = (value) =>
     if (categoryCodes.has(code)) throw new Error(`Duplicate category code: ${code}`);
     categoryCodes.add(code);
   }
+  for (const category of seed.categories) {
+    const parentCode = category.parentCode?.trim().toUpperCase();
+    if (parentCode && !categoryCodes.has(parentCode)) throw new Error(`Unknown parent category code for ${category.code}: ${parentCode}`);
+    if (parentCode === category.code.trim().toUpperCase()) throw new Error(`${category.code} cannot be its own parent`);
+  }
+  const categoryParents = new Map(seed.categories.map((category) => [category.code.trim().toUpperCase(), category.parentCode?.trim().toUpperCase()]));
+  for (const code of categoryCodes) {
+    const visited = new Set<string>();
+    let cursor: string | undefined = code;
+    while (cursor) {
+      if (visited.has(cursor)) throw new Error(`Category hierarchy contains a cycle at ${cursor}`);
+      visited.add(cursor);
+      cursor = categoryParents.get(cursor);
+    }
+  }
   const skus = new Set<string>();
   const barcodes = new Set<string>();
   for (const product of seed.products) {
@@ -55,6 +76,13 @@ const assertSeedFile: (value: unknown) => asserts value is SeedFile = (value) =>
     }
   }
   if (!seed.supplyChain) return;
+  const storeCodes = new Set<string>();
+  for (const store of seed.supplyChain.stores) {
+    const code = store.code?.trim().toUpperCase();
+    if (!code || !store.name?.trim() || !store.address?.trim()) throw new Error("Every seed store needs code, name, and address");
+    if (storeCodes.has(code)) throw new Error(`Duplicate seed store code: ${code}`);
+    storeCodes.add(code);
+  }
   const supplierCodes = new Set<string>();
   for (const supplier of seed.supplyChain.suppliers) {
     const code = supplier.code?.trim().toUpperCase();
@@ -83,12 +111,33 @@ const assertSeedFile: (value: unknown) => asserts value is SeedFile = (value) =>
     purchaseOrderKeys.add(order.key);
     const supplierCode = order.supplierCode.trim().toUpperCase();
     if (!supplierCodes.has(supplierCode)) throw new Error(`Unknown purchase-order supplier: ${supplierCode}`);
+    if (!storeCodes.has(order.storeCode.trim().toUpperCase())) throw new Error(`Unknown purchase-order store: ${order.storeCode}`);
     if (!order.lines.length || order.lines.length > 40) throw new Error(`${order.key} must contain 1 to 40 lines`);
     for (const line of order.lines) {
       const productSku = line.productSku.trim().toUpperCase();
       if (!supplierProducts.has(`${supplierCode}#${productSku}`)) throw new Error(`${productSku} is not configured for supplier ${supplierCode}`);
       if (!Number.isInteger(line.orderedPurchaseQuantity) || line.orderedPurchaseQuantity < 1) throw new Error(`${order.key} has an invalid ordered quantity`);
+      if (line.expiryDays != null && (!Number.isInteger(line.expiryDays) || line.expiryDays < 0)) throw new Error(`${order.key} has an invalid expiry offset`);
     }
+  }
+  const policyKeys = new Set<string>();
+  for (const policy of seed.supplyChain.storePolicies) {
+    if (!storeCodes.has(policy.storeCode.trim().toUpperCase())) throw new Error(`Unknown policy store: ${policy.storeCode}`);
+    if (!productSkus.has(policy.productSku.trim().toUpperCase())) throw new Error(`Unknown policy product: ${policy.productSku}`);
+    if (!Number.isInteger(policy.reorderPoint) || !Number.isInteger(policy.targetQuantity) || policy.reorderPoint < 0 || policy.targetQuantity < policy.reorderPoint) throw new Error(`Invalid store policy for ${policy.productSku}`);
+    const key = `${policy.storeCode.trim().toUpperCase()}#${policy.productSku.trim().toUpperCase()}`;
+    if (policyKeys.has(key)) throw new Error(`Duplicate store policy: ${key}`);
+    policyKeys.add(key);
+  }
+  const transferKeys = new Set<string>();
+  for (const transfer of seed.supplyChain.transfers) {
+    if (!transfer.key?.trim() || transferKeys.has(transfer.key)) throw new Error(`Duplicate or missing seed transfer key: ${transfer.key}`);
+    transferKeys.add(transfer.key);
+    if (!storeCodes.has(transfer.fromStoreCode.trim().toUpperCase()) || !storeCodes.has(transfer.toStoreCode.trim().toUpperCase())) throw new Error(`${transfer.key} references an unknown store`);
+    if (transfer.fromStoreCode.trim().toUpperCase() === transfer.toStoreCode.trim().toUpperCase()) throw new Error(`${transfer.key} must use different stores`);
+    if (!transfer.lines.length || transfer.lines.length > 40) throw new Error(`${transfer.key} must contain 1 to 40 lines`);
+    if (new Set(transfer.lines.map((line) => line.productSku.trim().toUpperCase())).size !== transfer.lines.length) throw new Error(`${transfer.key} contains duplicate products`);
+    for (const line of transfer.lines) if (!productSkus.has(line.productSku.trim().toUpperCase()) || !Number.isInteger(line.quantity) || line.quantity < 1) throw new Error(`${transfer.key} has an invalid line`);
   }
 };
 
@@ -103,7 +152,7 @@ async function main() {
   const parsed: unknown = file ? JSON.parse(await readFile(file, "utf8")) : buildMvpSeed();
   assertSeedFile(parsed);
   if (process.argv.includes("--validate-only")) {
-    const supplySummary = parsed.supplyChain ? `, ${parsed.supplyChain.suppliers.length} suppliers, ${parsed.supplyChain.supplierProducts.length} supplier catalog entries, and ${parsed.supplyChain.purchaseOrders.length} purchase orders` : "";
+    const supplySummary = parsed.supplyChain ? `, ${parsed.supplyChain.stores.length} stores, ${parsed.supplyChain.suppliers.length} suppliers, ${parsed.supplyChain.supplierProducts.length} supplier catalog entries, ${parsed.supplyChain.purchaseOrders.length} purchase orders, and ${parsed.supplyChain.transfers.length} transfers` : "";
     console.log(`Validated ${parsed.categories.length} categories and ${parsed.products.length} products${supplySummary}`);
     return;
   }
@@ -118,11 +167,18 @@ async function main() {
   for (const category of parsed.categories) {
     const code = category.code.trim().toUpperCase();
     if (!categoriesByCode.has(code)) {
-      const created = await createCategory(tenantId, { code, name: category.name.trim(), description: category.description?.trim() ?? "", status: "active" }, actor);
+      const parentId = category.parentCode ? categoriesByCode.get(category.parentCode.trim().toUpperCase())?.id : null;
+      if (category.parentCode && !parentId) throw new Error(`Parent category ${category.parentCode} must be seeded before ${code}`);
+      const created = await createCategory(tenantId, { code, name: category.name.trim(), description: category.description?.trim() ?? "", parentId, status: "active" }, actor);
       categoriesByCode.set(code, created);
       console.log(`Created category ${code}`);
     } else {
-      console.log(`Kept existing category ${code}`);
+      const existing = categoriesByCode.get(code)!;
+      const parentId = category.parentCode ? categoriesByCode.get(category.parentCode.trim().toUpperCase())?.id : null;
+      if (category.parentCode && !parentId) throw new Error(`Parent category ${category.parentCode} must be seeded before ${code}`);
+      const saved = await updateCategory(tenantId, existing.id, { code, name: category.name.trim(), description: category.description?.trim() ?? "", parentId }, actor);
+      categoriesByCode.set(code, saved);
+      console.log(`Updated category ${code}`);
     }
   }
 
@@ -169,12 +225,16 @@ async function main() {
   }
 
   if (!parsed.supplyChain) return;
-  const activeStores = (await listStores(tenantId)).filter((store) => store.status === "active");
-  const store = activeStores.find((item) => item.code === "MAIN") ?? activeStores[0] ?? await createStore(tenantId, {
-    code: "MAIN",
-    name: "Main Store",
-    address: "Main business location",
-  }, actor);
+  const storesByCode = new Map((await listStores(tenantId)).map((store) => [store.code, store]));
+  for (const input of parsed.supplyChain.stores) {
+    const code = input.code.trim().toUpperCase();
+    const existing = storesByCode.get(code);
+    const saved = existing
+      ? await updateStore(tenantId, existing.id, { name: input.name, address: input.address, receiptPhone: input.receiptPhone ?? "", receiptFooter: input.receiptFooter ?? "", status: "active" })
+      : await createStore(tenantId, { ...input, code }, actor);
+    storesByCode.set(code, saved);
+    console.log(`${existing ? "Updated" : "Created"} store ${code}`);
+  }
 
   const existingSuppliers = await listSuppliers(tenantId);
   const suppliersByCode = new Map(existingSuppliers.map((supplier) => [supplier.code, supplier]));
@@ -201,11 +261,11 @@ async function main() {
       lastPurchasePrice: input.lastPurchasePrice ?? null,
       preferred: input.preferred ?? false,
     });
-    if (input.reorderPoint != null && input.targetQuantity != null) {
-      await upsertStorePolicy(tenantId, { storeId: store.id, productId: product.id, reorderPoint: input.reorderPoint, targetQuantity: input.targetQuantity });
-    }
   }
-  console.log(`Configured ${parsed.supplyChain.supplierProducts.length} supplier catalog entries for ${store.name}`);
+  for (const input of parsed.supplyChain.storePolicies) {
+    await upsertStorePolicy(tenantId, { storeId: storesByCode.get(input.storeCode.trim().toUpperCase())!.id, productId: productsBySku.get(input.productSku.trim().toUpperCase())!.id, reorderPoint: input.reorderPoint, targetQuantity: input.targetQuantity });
+  }
+  console.log(`Configured ${parsed.supplyChain.supplierProducts.length} supplier catalog entries and ${parsed.supplyChain.storePolicies.length} store policies`);
 
   const productsById = new Map([...productsBySku.values()].map((product) => [product.id, product]));
   const existingOrders = await listPurchaseOrders(tenantId, { limit: 200 });
@@ -216,7 +276,7 @@ async function main() {
       const supplier = suppliersByCode.get(specification.supplierCode.trim().toUpperCase())!;
       order = await createPurchaseOrder(tenantId, {
         supplierId: supplier.id,
-        storeId: store.id,
+        storeId: storesByCode.get(specification.storeCode.trim().toUpperCase())!.id,
         expectedDeliveryDate: dateAfterDays(specification.status === "completed" ? 0 : 7),
         notes: `${specification.notes}\n${marker}`,
         lines: specification.lines.map((line) => ({
@@ -239,7 +299,7 @@ async function main() {
         return {
           purchaseOrderLineId: line.id,
           batchNumber: `SEED-${specification.key.slice(0, 8).toUpperCase()}-${index + 1}`,
-          expiryDate: product.tracksExpiry ? dateAfterDays(product.categoryName.toLowerCase().includes("bakery") ? 14 : 180) : null,
+          expiryDate: product.tracksExpiry ? dateAfterDays(specification.lines[index]?.expiryDays ?? (product.categoryName.toLowerCase().includes("bakery") ? 14 : 180)) : null,
           deliveredBaseQuantity: acceptedBaseQuantity + damagedBaseQuantity,
           acceptedBaseQuantity,
           damagedBaseQuantity,
@@ -252,6 +312,29 @@ async function main() {
     } else {
       console.log(`Kept ${order.orderNumber} in ${order.status} status`);
     }
+  }
+
+  const existingTransfers = await listTransfers(tenantId, { limit: 200 });
+  for (const specification of parsed.supplyChain.transfers) {
+    const marker = `[seed:mvp:${specification.key}]`;
+    let transfer = existingTransfers.find((item) => item.notes.includes(marker));
+    if (!transfer) {
+      transfer = await createTransfer(tenantId, {
+        fromStoreId: storesByCode.get(specification.fromStoreCode.trim().toUpperCase())!.id,
+        toStoreId: storesByCode.get(specification.toStoreCode.trim().toUpperCase())!.id,
+        notes: `${specification.notes}\n${marker}`,
+        lines: specification.lines.map((line) => ({ productId: productsBySku.get(line.productSku.trim().toUpperCase())!.id, quantity: line.quantity })),
+      }, actor, `mvp-seed-create-transfer-${specification.key}`);
+      console.log(`Created ${specification.key} as ${transfer.transferNumber}`);
+    }
+    if (specification.status !== "draft" && transfer.status === "draft") {
+      transfer = await dispatchTransfer(tenantId, transfer.id, actor, `mvp-seed-dispatch-transfer-${specification.key}`);
+    }
+    if (specification.status === "completed" && transfer.status === "dispatched") {
+      const receiptLines = transfer.lines.flatMap((line) => (line.allocations ?? []).map((allocation) => ({ lotId: allocation.lotId, receivedQuantity: allocation.quantity, damagedQuantity: 0, missingQuantity: 0, reason: "" })));
+      transfer = await receiveTransfer(tenantId, transfer.id, receiptLines, actor, `mvp-seed-receive-transfer-${specification.key}`);
+    }
+    console.log(`Kept ${transfer.transferNumber} in ${transfer.status} status`);
   }
 }
 

@@ -19,6 +19,8 @@ export interface CategoryRecord {
   code: string;
   name: string;
   description: string;
+  parentId?: string | null;
+  parentName?: string | null;
   status: "active" | "inactive";
   createdAt: string;
   updatedAt: string;
@@ -450,12 +452,14 @@ export const findProduct = async (tenantId: string, term: string) => {
 
 export const createCategory = async (
   tenantId: string,
-  input: Omit<CategoryRecord, "id" | "createdAt" | "updatedAt">,
+  input: Pick<CategoryRecord, "code" | "name" | "description" | "status"> & { parentId?: string | null },
   actor: { id: string; name: string },
 ) => {
   const id = randomUUID();
   const now = new Date().toISOString();
-  const category = { ...input, code: normalizeLookup(input.code) };
+  const parent = input.parentId ? await getCategory(tenantId, input.parentId) : null;
+  if (input.parentId && (!parent || parent.status !== "active")) throw new Error("Select an active parent category");
+  const category = { ...input, parentId: parent?.id ?? null, parentName: parent?.name ?? null, code: normalizeLookup(input.code) };
   if ((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: lookupKey(tenantId, "CATEGORY", category.code) }))).Item) throw new Error("Category code is already in use");
   const item = { ...categoryKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#CATEGORY"), accessSort: `${category.name.toLowerCase()}#${id}`, entityType: "category", tenantId, id, ...category, createdAt: now, updatedAt: now };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
@@ -469,22 +473,37 @@ export const createCategory = async (
 export const updateCategory = async (
   tenantId: string,
   id: string,
-  input: Pick<CategoryRecord, "code" | "name" | "description">,
+  input: Pick<CategoryRecord, "code" | "name" | "description"> & { parentId?: string | null },
   actor: { id: string; name: string },
 ) => {
   const current = await getCategory(tenantId, id);
   if (!current) throw new Error("Category not found");
+  const categories = await listCategories(tenantId);
+  const parent = input.parentId ? categories.find((category) => category.id === input.parentId) : null;
+  if (input.parentId && (!parent || parent.status !== "active")) throw new Error("Select an active parent category");
+  if (parent?.id === id) throw new Error("A category cannot be its own parent");
+  let ancestor = parent;
+  const visited = new Set<string>();
+  while (ancestor) {
+    if (ancestor.id === id) throw new Error("A category cannot be moved below one of its descendants");
+    if (visited.has(ancestor.id)) throw new Error("The selected category hierarchy contains a cycle");
+    visited.add(ancestor.id);
+    ancestor = ancestor.parentId ? categories.find((category) => category.id === ancestor!.parentId) : undefined;
+  }
   const now = new Date().toISOString();
   const next: CategoryRecord = {
     ...current,
     code: normalizeLookup(input.code),
     name: input.name.trim(),
     description: input.description.trim(),
+    parentId: parent?.id ?? null,
+    parentName: parent?.name ?? null,
     updatedAt: now,
   };
   const products = next.name === current.name
     ? []
     : (await listProducts(tenantId)).filter((product) => product.categoryId === id);
+  const children = next.name === current.name ? [] : categories.filter((category) => category.parentId === id);
   const codeChanged = next.code !== current.code;
   if (codeChanged) {
     const existingCode = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: lookupKey(tenantId, "CATEGORY", next.code) }));
@@ -507,10 +526,17 @@ export const updateCategory = async (
       ConditionExpression: "categoryId = :categoryId",
       ExpressionAttributeValues: { ":categoryId": id, ":categoryName": next.name, ":updatedAt": now },
     } })),
+    ...children.map((child) => ({ Update: {
+      TableName: TABLE_NAME,
+      Key: categoryKey(tenantId, child.id),
+      UpdateExpression: "SET parentName = :parentName, updatedAt = :updatedAt",
+      ConditionExpression: "parentId = :parentId",
+      ExpressionAttributeValues: { ":parentId": id, ":parentName": next.name, ":updatedAt": now },
+    } })),
     auditPut(tenantId, { action: "category.updated", entityType: "category", entityId: id, reason: "Category updated", actorId: actor.id, actorName: actor.name }, now),
   ];
   if (transactionItems.length > 100) {
-    throw new Error("This category has too many products to rename safely in one operation");
+    throw new Error("This category has too many products or child categories to rename safely in one operation");
   }
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: transactionItems }));
   return next;
@@ -525,6 +551,9 @@ export const deleteCategory = async (
   if (!current) throw new Error("Category not found");
   if ((await listProducts(tenantId)).some((product) => product.categoryId === id)) {
     throw new Error("Move this category's products before deleting it");
+  }
+  if ((await listCategories(tenantId)).some((category) => category.parentId === id)) {
+    throw new Error("Move or delete this category's child categories first");
   }
   const now = new Date().toISOString();
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [

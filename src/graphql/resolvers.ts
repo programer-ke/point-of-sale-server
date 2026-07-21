@@ -144,8 +144,8 @@ const validateMoney = (value: number, name: string) => {
 };
 
 
-const validateCategory = (input: { code: string; name: string; description: string }) => {
-  const category = { code: input.code.trim().toUpperCase(), name: input.name.trim(), description: input.description.trim() };
+const validateCategory = (input: { code: string; name: string; description: string; parentId?: string | null }) => {
+  const category = { code: input.code.trim().toUpperCase(), name: input.name.trim(), description: input.description.trim(), parentId: input.parentId?.trim() || null };
   if (!category.code || !category.name) throw new Error("Category code and name are required");
   if (category.code.length > 40) throw new Error("Category code must be 40 characters or fewer");
   if (category.name.length > 80) throw new Error("Category name must be 80 characters or fewer");
@@ -477,11 +477,11 @@ export const resolvers = {
       if (input.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email.trim())) throw new Error("Enter a valid contact email");
       return updateBusinessSettings(tenant(context), input, actor(context));
     },
-    createCategory: (_: unknown, args: { code: string; name: string; description: string }, context: GraphQLContext) => {
+    createCategory: (_: unknown, args: { code: string; name: string; description: string; parentId?: string | null }, context: GraphQLContext) => {
       requireAdmin(context);
       return createCategory(tenant(context), { ...validateCategory(args), status: "active" }, actor(context));
     },
-    updateCategory: (_: unknown, { id, ...input }: { id: string; code: string; name: string; description: string }, context: GraphQLContext) => {
+    updateCategory: (_: unknown, { id, ...input }: { id: string; code: string; name: string; description: string; parentId?: string | null }, context: GraphQLContext) => {
       requireAdmin(context);
       return updateCategory(tenant(context), id, validateCategory(input), actor(context));
     },

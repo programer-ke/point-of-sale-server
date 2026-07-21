@@ -1,7 +1,7 @@
 import { buildMvpSupplyChainSeed } from "./mvp-supply-chain";
 
 export interface SeedFile {
-  categories: Array<{ code: string; name: string; description?: string }>;
+  categories: Array<{ code: string; name: string; description?: string; parentCode?: string | null }>;
   products: Array<{
     name: string;
     description?: string;
@@ -21,12 +21,18 @@ type CategorySpec = {
   code: string;
   name: string;
   description: string;
+  parentCode?: string;
   products: Array<[name: string, priceKes: number]>;
 };
 
 const categorySpecs: CategorySpec[] = [
+  { code: "RETAIL", name: "Retail catalogue", description: "Top-level retail product catalogue", products: [] },
+  { code: "FOOD", name: "Food and drink", description: "Food, drink, and grocery departments", parentCode: "RETAIL", products: [] },
+  { code: "FRESH", name: "Fresh and chilled", description: "Short-life fresh, chilled, and bakery departments", parentCode: "FOOD", products: [] },
+  { code: "GENERAL", name: "General merchandise", description: "Household, care, and office merchandise", parentCode: "RETAIL", products: [] },
+  { code: "CARE", name: "Personal and family care", description: "Personal hygiene and family care departments", parentCode: "GENERAL", products: [] },
   {
-    code: "STAPLES", name: "Food staples", description: "Flour, grains, cooking essentials, and canned food",
+    code: "STAPLES", name: "Food staples", description: "Flour, grains, cooking essentials, and canned food", parentCode: "FOOD",
     products: [
       ["Maize Flour 1kg", 115], ["Maize Flour 2kg", 210], ["Wheat Flour 1kg", 125], ["Wheat Flour 2kg", 225],
       ["White Sugar 1kg", 180], ["White Sugar 2kg", 345], ["Pishori Rice 1kg", 240], ["Pishori Rice 2kg", 465],
@@ -36,7 +42,7 @@ const categorySpecs: CategorySpec[] = [
     ],
   },
   {
-    code: "BEVERAGES", name: "Beverages", description: "Water, juice, tea, coffee, and soft drinks",
+    code: "BEVERAGES", name: "Beverages", description: "Water, juice, tea, coffee, and soft drinks", parentCode: "FOOD",
     products: [
       ["Drinking Water 500ml", 50], ["Drinking Water 1L", 80], ["Drinking Water 1.5L", 110], ["Sparkling Water 500ml", 95],
       ["Orange Soda 300ml", 60], ["Orange Soda 500ml", 85], ["Cola Soda 300ml", 60], ["Cola Soda 500ml", 85],
@@ -46,7 +52,7 @@ const categorySpecs: CategorySpec[] = [
     ],
   },
   {
-    code: "DAIRY", name: "Dairy and chilled", description: "Milk, yoghurt, cheese, margarine, and chilled products",
+    code: "DAIRY", name: "Dairy and chilled", description: "Milk, yoghurt, cheese, margarine, and chilled products", parentCode: "FRESH",
     products: [
       ["Fresh Milk 500ml", 65], ["Fresh Milk 1L", 120], ["Long Life Milk 500ml", 75], ["Long Life Milk 1L", 140],
       ["Mala Fermented Milk 500ml", 90], ["Mala Fermented Milk 1L", 170], ["Natural Yoghurt 150ml", 75], ["Vanilla Yoghurt 150ml", 80],
@@ -56,7 +62,7 @@ const categorySpecs: CategorySpec[] = [
     ],
   },
   {
-    code: "SNACKS", name: "Snacks and confectionery", description: "Biscuits, crisps, sweets, nuts, and quick snacks",
+    code: "SNACKS", name: "Snacks and confectionery", description: "Biscuits, crisps, sweets, nuts, and quick snacks", parentCode: "FOOD",
     products: [
       ["Salted Potato Crisps 30g", 50], ["Salted Potato Crisps 100g", 145], ["Chilli Potato Crisps 100g", 150], ["Corn Puffs 50g", 65],
       ["Roasted Peanuts 100g", 95], ["Roasted Cashews 100g", 260], ["Digestive Biscuits 200g", 145], ["Glucose Biscuits 200g", 95],
@@ -66,7 +72,7 @@ const categorySpecs: CategorySpec[] = [
     ],
   },
   {
-    code: "HOUSEHOLD", name: "Household cleaning", description: "Laundry, dishwashing, surface cleaning, and home care",
+    code: "HOUSEHOLD", name: "Household cleaning", description: "Laundry, dishwashing, surface cleaning, and home care", parentCode: "GENERAL",
     products: [
       ["Laundry Bar Soap 200g", 85], ["Laundry Bar Soap 800g", 270], ["Washing Powder 500g", 145], ["Washing Powder 1kg", 275],
       ["Washing Powder 2kg", 520], ["Dishwashing Liquid 250ml", 110], ["Dishwashing Liquid 500ml", 195], ["Dishwashing Liquid 1L", 340],
@@ -76,7 +82,7 @@ const categorySpecs: CategorySpec[] = [
     ],
   },
   {
-    code: "PERSONAL", name: "Personal care", description: "Bathing, dental, hair, and everyday hygiene products",
+    code: "PERSONAL", name: "Personal care", description: "Bathing, dental, hair, and everyday hygiene products", parentCode: "CARE",
     products: [
       ["Bathing Soap 100g", 85], ["Bathing Soap 175g", 135], ["Body Wash 500ml", 390], ["Body Lotion 200ml", 260],
       ["Body Lotion 400ml", 440], ["Petroleum Jelly 100ml", 155], ["Petroleum Jelly 250ml", 295], ["Toothpaste 70ml", 150],
@@ -86,7 +92,7 @@ const categorySpecs: CategorySpec[] = [
     ],
   },
   {
-    code: "PRODUCE", name: "Fresh produce", description: "Common fresh fruit and vegetables sold by retail pack",
+    code: "PRODUCE", name: "Fresh produce", description: "Common fresh fruit and vegetables sold by retail pack", parentCode: "FRESH",
     products: [
       ["Bananas 1kg", 180], ["Oranges 1kg", 220], ["Apples 1kg", 340], ["Mangoes 1kg", 250],
       ["Avocados 4 Pack", 200], ["Lemons 500g", 150], ["Watermelon Whole", 420], ["Pineapple Whole", 230],
@@ -96,7 +102,7 @@ const categorySpecs: CategorySpec[] = [
     ],
   },
   {
-    code: "BAKERY", name: "Bakery", description: "Bread, cakes, pastries, and breakfast bakery items",
+    code: "BAKERY", name: "Bakery", description: "Bread, cakes, pastries, and breakfast bakery items", parentCode: "FRESH",
     products: [
       ["White Bread 400g", 65], ["White Bread 600g", 90], ["Brown Bread 400g", 75], ["Brown Bread 600g", 105],
       ["Wholemeal Bread 400g", 110], ["Milk Bread 400g", 95], ["Burger Buns 6 Pack", 180], ["Hot Dog Rolls 6 Pack", 175],
@@ -106,7 +112,7 @@ const categorySpecs: CategorySpec[] = [
     ],
   },
   {
-    code: "BABY", name: "Baby care", description: "Diapers, wipes, feeding, and baby hygiene essentials",
+    code: "BABY", name: "Baby care", description: "Diapers, wipes, feeding, and baby hygiene essentials", parentCode: "CARE",
     products: [
       ["Newborn Diapers 24 Pack", 620], ["Small Diapers 40 Pack", 980], ["Medium Diapers 40 Pack", 1050], ["Large Diapers 36 Pack", 1080],
       ["Extra Large Diapers 32 Pack", 1120], ["Baby Wipes 40 Pack", 180], ["Baby Wipes 80 Pack", 320], ["Baby Petroleum Jelly 100ml", 170],
@@ -116,7 +122,7 @@ const categorySpecs: CategorySpec[] = [
     ],
   },
   {
-    code: "STATIONERY", name: "Stationery", description: "School, office, till, and packaging supplies",
+    code: "STATIONERY", name: "Stationery", description: "School, office, till, and packaging supplies", parentCode: "GENERAL",
     products: [
       ["Blue Ballpoint Pen", 25], ["Black Ballpoint Pen", 25], ["Red Ballpoint Pen", 25], ["HB Pencil", 20],
       ["Pencil Eraser", 15], ["Pencil Sharpener", 25], ["A5 Exercise Book 80 Page", 70], ["A4 Exercise Book 120 Page", 145],
@@ -136,7 +142,7 @@ const ean13 = (itemNumber: number) => {
 export const buildMvpSeed = (): SeedFile => {
   let productNumber = 1;
   return {
-    categories: categorySpecs.map(({ code, name, description }) => ({ code, name, description })),
+    categories: categorySpecs.map(({ code, name, description, parentCode }) => ({ code, name, description, parentCode: parentCode ?? null })),
     products: categorySpecs.flatMap((category) => category.products.map(([name, price]) => {
       const index = productNumber++;
       const costRatio = 0.68 + (index % 10) * 0.012;

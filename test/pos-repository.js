@@ -279,6 +279,40 @@ async function main() {
   await repository.deleteCategory(tenantId, "category-1", { id: "admin", name: "Admin" });
   assert.equal(transaction.length, 3, "unused category, lookup, and audit must delete atomically");
 
+  const childCategory = { ...category, id: "category-2", code: "TEA", name: "Tea", parentId: "category-1", parentName: "Beverages" };
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return command.input.Key.partitionKey.includes("LOOKUP#CATEGORY") ? {} : { Item: category };
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  const createdChild = await repository.createCategory(tenantId, { code: "TEA", name: "Tea", description: "Tea products", parentId: category.id, status: "active" }, { id: "admin", name: "Admin" });
+  assert.equal(createdChild.parentId, category.id);
+  assert.equal(createdChild.parentName, category.name);
+  assert.equal(transaction[0].Put.Item.parentId, category.id, "category hierarchy must be stored on the category record");
+
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return { Item: category };
+    if (command.constructor.name === "QueryCommand") return { Items: [category, childCategory] };
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  await assert.rejects(
+    () => repository.updateCategory(tenantId, category.id, { code: category.code, name: category.name, description: category.description, parentId: childCategory.id }, { id: "admin", name: "Admin" }),
+    /descendants/,
+    "a category must not be moved under its own child",
+  );
+
+  let categoryQuery = 0;
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return { Item: category };
+    if (command.constructor.name === "QueryCommand") return { Items: categoryQuery++ === 0 ? [] : [childCategory] };
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  await assert.rejects(
+    () => repository.deleteCategory(tenantId, category.id, { id: "admin", name: "Admin" }),
+    /child categories/,
+    "parent categories must not be deleted while children still reference them",
+  );
+
   const profile = {
     partitionKey: "USER#cashier-1",
     sortKey: "PROFILE",

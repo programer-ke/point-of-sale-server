@@ -158,17 +158,19 @@ yarn seed:mvp --tenant='<workspace-id>'
 
 The default dataset is generated deterministically from the version-controlled
 specifications in `src/seed/mvp-catalog.ts` and `src/seed/mvp-supply-chain.ts`.
-It contains 10 categories and 200 realistic Kenyan retail products with EAN-13
+It contains 15 categories in a multi-level hierarchy and 200 realistic Kenyan retail products with EAN-13
 test barcodes, SKU values, KES buying and selling prices, units, expiry flags,
-and 20 promotional prices for checkout testing. It also configures three
-suppliers, 12 supplier catalog/package records, store reorder policies, and four
-purchase orders demonstrating completed, partially received, issued, and draft
-states. Accepted demo receipts create the inventory lots, costs, expiry dates,
-and stock movements; the loader never creates anonymous opening stock.
+and 20 promotional prices for checkout testing. It also configures three stores,
+three suppliers, 12 supplier catalog/package records, nine store reorder policies,
+and five purchase orders demonstrating completed, partially received, issued, and
+draft states. Accepted demo receipts create store-specific inventory, including
+short-life lots expiring today and soon. Completed, dispatched/in-transit, and
+draft transfers demonstrate stock movement between branches. The loader never
+creates anonymous opening stock.
 
-Re-running the loader updates products and suppliers by their stable codes and
-reuses its marked purchase orders instead of intentionally adding more demo
-documents. Validate the full specification without AWS access:
+Re-running the loader updates catalog, store, and supplier records by stable codes
+and reuses marked purchase orders and transfers instead of intentionally adding
+more demo documents. Validate the full specification without AWS access:
 
 ```sh
 yarn seed:mvp --validate-only

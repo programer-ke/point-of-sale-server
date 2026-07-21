@@ -29,6 +29,8 @@ export const typeDefs = `#graphql
     code: String!
     name: String!
     description: String!
+    parentId: ID
+    parentName: String
     status: String!
     createdAt: String!
     updatedAt: String!
@@ -521,8 +523,8 @@ export const typeDefs = `#graphql
     updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, storeId: ID!, storeIds: [ID!] = [], phone: String!): StaffProfile!
     updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
 
-    createCategory(code: String!, name: String!, description: String = ""): Category!
-    updateCategory(id: ID!, code: String!, name: String!, description: String = ""): Category!
+    createCategory(code: String!, name: String!, description: String = "", parentId: ID): Category!
+    updateCategory(id: ID!, code: String!, name: String!, description: String = "", parentId: ID): Category!
     deleteCategory(id: ID!): Boolean!
     createProduct(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, stockUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!): Product!
     updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, stockUnit: String, tracksExpiry: Boolean, saleVariants: [SaleVariantInput!], promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!

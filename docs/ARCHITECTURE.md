@@ -115,10 +115,12 @@ Products are never physically deleted through the application. Archive sets
 receipts, but is excluded from staff catalog/POS queries and rejected by
 checkout. Administrators may reactivate it from product editing.
 
-Categories can be edited or deleted by administrators. Category name changes
-and denormalized product category names are committed in one transaction. A
-category cannot be deleted while any product, including an archived product,
-still references it.
+Categories form an arbitrary-depth parent/child hierarchy and can be moved or
+renamed by administrators. Cycle checks prevent a category from becoming its
+own ancestor. Category name changes, direct-child parent snapshots, and
+denormalized product category names are committed in one transaction. A
+category cannot be deleted while a child category or any product, including an
+archived product, still references it.
 
 ## Tenant-specific seed data
 
@@ -129,8 +131,11 @@ yarn seed:mvp --tenant='<workspace-id>'
 ```
 
 The workspace ID is shown to administrators in Business setup. The loader
-creates or updates only that tenant's catalog and pricing. It never creates
-inventory. New inventory must enter through an accepted supplier receipt.
+creates or updates only that tenant's hierarchical demo catalog, stores,
+suppliers, purchasing documents, store policies, and pricing. Seeded inventory
+is created through the same accepted supplier-receipt workflow as normal stock;
+completed and in-transit transfers then exercise branch movement without creating
+anonymous opening inventory.
 
 ## Reporting
 
