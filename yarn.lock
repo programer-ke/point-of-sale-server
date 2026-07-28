@@ -164,19 +164,19 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@aws-sdk/client-dynamodb@^3.1089.0":
-  version "3.1090.0"
-  resolved "https://registry.yarnpkg.com/@aws-sdk/client-dynamodb/-/client-dynamodb-3.1090.0.tgz#6764b87d0bed12c3c0f8eaa9f96c45c0ecb510c7"
-  integrity sha512-JjmuzG6XZG9vQFZ1Ob6kxJHz9U+x4Yxz+r717HeyYItRp+xRrGLNI5IggLDa9OfeYhq6mHJTZ6QMlyLI4EWK6w==
+"@aws-sdk/client-dynamodb@^3.1096.0":
+  version "3.1096.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/client-dynamodb/-/client-dynamodb-3.1096.0.tgz#f90866ee41760b1b6271800036a20e0e9fcc9cfe"
+  integrity sha512-MECHramebCF5ThSH+hNFKeZBwrT2k1w3Vhn7tVGG1UYEgZZSDeP1okNN2rIzCXaGuACHDa+EyqksAfJAqLj7Xw==
   dependencies:
-    "@aws-sdk/core" "^3.975.3"
-    "@aws-sdk/credential-provider-node" "^3.972.70"
-    "@aws-sdk/dynamodb-codec" "^3.973.33"
-    "@aws-sdk/middleware-endpoint-discovery" "^3.972.25"
+    "@aws-sdk/core" "^3.977.1"
+    "@aws-sdk/credential-provider-node" "^3.972.73"
+    "@aws-sdk/dynamodb-codec" "^3.973.36"
+    "@aws-sdk/middleware-endpoint-discovery" "^3.972.26"
     "@aws-sdk/types" "^3.974.2"
-    "@smithy/core" "^3.29.4"
-    "@smithy/fetch-http-handler" "^5.6.6"
-    "@smithy/node-http-handler" "^4.9.6"
+    "@smithy/core" "^3.29.8"
+    "@smithy/fetch-http-handler" "^5.6.10"
+    "@smithy/node-http-handler" "^4.9.10"
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
@@ -278,7 +278,7 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@aws-sdk/credential-provider-node@^3.972.70", "@aws-sdk/credential-provider-node@^3.972.73":
+"@aws-sdk/credential-provider-node@^3.972.73":
   version "3.972.73"
   resolved "https://registry.yarnpkg.com/@aws-sdk/credential-provider-node/-/credential-provider-node-3.972.73.tgz#b0184a78073b6b3a0946f8e22c9aa1a877a0f2ac"
   integrity sha512-VTzdbf8Ukjdb9yUubZzRI678CWZvKovhE8Nv3qihwhC187sRMGls+r9N8Wuht5q1xjKx2nmpS48ar8ppupjkCA==
@@ -331,13 +331,13 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@aws-sdk/dynamodb-codec@^3.973.33":
-  version "3.973.33"
-  resolved "https://registry.yarnpkg.com/@aws-sdk/dynamodb-codec/-/dynamodb-codec-3.973.33.tgz#cb79880f4e02a8ff81174b956dec09c2f62b7c65"
-  integrity sha512-/awY2mG1zvTy22j4ryZL8jfWQdcuppsw17Mxw1tjG92hO+52JoFZaaTWrJIQp066t/aj4JC4II29UJb6g644vA==
+"@aws-sdk/dynamodb-codec@^3.973.36":
+  version "3.973.36"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/dynamodb-codec/-/dynamodb-codec-3.973.36.tgz#87c2c0ac7e9c656f9bd688c269824ab7650318f2"
+  integrity sha512-CzSjdIF8ZqSad5wUaqJbHZ8sF7tOKRHZJYoOG95J54n+OpE/ByrWm7mUP8wvNdnu99eZkSCA2cPFIci834SJBg==
   dependencies:
-    "@aws-sdk/core" "^3.975.3"
-    "@smithy/core" "^3.29.4"
+    "@aws-sdk/core" "^3.977.1"
+    "@smithy/core" "^3.29.8"
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
@@ -360,14 +360,14 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@aws-sdk/middleware-endpoint-discovery@^3.972.25":
-  version "3.972.25"
-  resolved "https://registry.yarnpkg.com/@aws-sdk/middleware-endpoint-discovery/-/middleware-endpoint-discovery-3.972.25.tgz#251d2be29c82027e8e3f9810b9fe0964894358f3"
-  integrity sha512-5G2aVPmbWC5dFI76D0vsNg2L0fgWP4uybcetf+06dzeZuRtpihnow88fOl5zm3+ABdIw27FKgyFzV4yB5Bm29Q==
+"@aws-sdk/middleware-endpoint-discovery@^3.972.26":
+  version "3.972.26"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/middleware-endpoint-discovery/-/middleware-endpoint-discovery-3.972.26.tgz#1e251344676389c8a716852d31740a6ee79f06db"
+  integrity sha512-suOMAYAM43aSyC3cLBvvJIuNyg96nUsPvYQUrq4G+8Prt2qTpFETgaiXX7JP1gIcK5FF0Z2IdyEsPXseZATOPw==
   dependencies:
     "@aws-sdk/endpoint-cache" "^3.972.9"
     "@aws-sdk/types" "^3.974.2"
-    "@smithy/core" "^3.29.4"
+    "@smithy/core" "^3.29.8"
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
@@ -666,7 +666,7 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@smithy/fetch-http-handler@^5.6.10", "@smithy/fetch-http-handler@^5.6.6":
+"@smithy/fetch-http-handler@^5.6.10":
   version "5.6.12"
   resolved "https://registry.yarnpkg.com/@smithy/fetch-http-handler/-/fetch-http-handler-5.6.12.tgz#cedde1c9c3b01e0d2089480908c9ef952d273ebb"
   integrity sha512-OpQgP6IGH4j0NJ2zjfYZLjQL85ai+Wi/q51EmZJovXsEwKSvu89qiXUq77Q6EmwZ/hSl7fKpn2Z9mhiDN6OM+Q==
@@ -675,7 +675,7 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@smithy/node-http-handler@^4.9.10", "@smithy/node-http-handler@^4.9.6":
+"@smithy/node-http-handler@^4.9.10":
   version "4.9.12"
   resolved "https://registry.yarnpkg.com/@smithy/node-http-handler/-/node-http-handler-4.9.12.tgz#da7ede54a652f47aa3ac771d178fc6424ad3ca77"
   integrity sha512-dWW5KRt4mnEvjNzbGqGeCuAvgum85Y9ZoyuMQqcTEfapndyVJ1k9BEHK7kdXJZ32enyRmmwcFjMwlB/KgLKI3Q==
