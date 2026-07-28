@@ -54,6 +54,39 @@ async function main() {
   const storedPo = transaction[0].Put.Item;
 
   dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") {
+      const key = command.input.Key.partitionKey;
+      if (key.includes("SUPPLIER_PRODUCT#")) return { Item: supplierProduct };
+      if (key.includes("PREFERRED_SUPPLIER#")) return { Item: { supplierId: supplier.id } };
+      return {};
+    }
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  assert.equal(await supply.removeSupplierProduct(tenantId, supplier.id, product.id), true);
+  assert.equal(transaction.filter((item) => item.Delete).length, 3, "association, supplier SKU, and preferred lookup must be removed atomically");
+
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") {
+      const key = command.input.Key.partitionKey;
+      if (key.includes("PO#")) return { Item: storedPo };
+      if (key.includes("SUPPLIER_PRODUCT#")) return {};
+      if (key.includes("SUPPLIER#")) return { Item: supplier };
+      if (key.includes("STORE#")) return { Item: store };
+      if (key.includes("PRODUCT#")) return { Item: product };
+      return {};
+    }
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  const updatedAfterRemoval = await supply.updatePurchaseOrder(tenantId, storedPo.id, {
+    supplierId: supplier.id, storeId: store.id, notes: "Updated after catalog removal",
+    lines: [{ productId: product.id, orderedPurchaseQuantity: 3 }],
+  });
+  assert.equal(updatedAfterRemoval.lines[0].purchaseUnit, "carton", "existing draft PO keeps its packaging snapshot");
+  assert.equal(updatedAfterRemoval.totalAmount, 2880, "existing draft PO keeps its price snapshot");
+
+  dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") return { Item: storedPo };
     if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
     throw new Error(`Unexpected ${command.constructor.name}`);

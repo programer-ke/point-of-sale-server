@@ -551,6 +551,7 @@ export const typeDefs = `#graphql
     createSupplier(code: String!, name: String!, contactName: String = "", phone: String = "", email: String = "", address: String = ""): Supplier!
     updateSupplier(id: ID!, name: String, contactName: String, phone: String, email: String, address: String, status: String): Supplier!
     upsertSupplierProduct(supplierId: ID!, productId: ID!, supplierSku: String = "", purchaseUnit: String!, purchaseQuantity: Float!, purchaseMeasurementUnit: String!, lastPurchasePrice: Float, preferred: Boolean!): SupplierProduct!
+    removeSupplierProduct(supplierId: ID!, productId: ID!): Boolean!
     upsertStorePolicy(storeId: ID!, productId: ID!, reorderPoint: Int!, targetQuantity: Int!): StoreProductPolicy!
     createPurchaseOrder(supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!, requestId: ID!): PurchaseOrder!
     updatePurchaseOrder(id: ID!, supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!): PurchaseOrder!

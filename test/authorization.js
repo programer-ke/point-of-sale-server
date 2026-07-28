@@ -38,7 +38,7 @@ async function main() {
   assert.ok(schemaFields.dashboard.fields.some(({ name }) => name === "averageSale"));
   assert.ok(!schemaFields.stock.fields.some(({ name }) => name === "averageSale"));
   assert.ok(schemaFields.report.fields.some(({ name }) => name === "savings"));
-  for (const mutation of ["updateCategory", "deleteCategory", "createStore", "createSupplier", "createPurchaseOrder", "receivePurchaseOrder"]) {
+  for (const mutation of ["updateCategory", "deleteCategory", "createStore", "createSupplier", "removeSupplierProduct", "createPurchaseOrder", "receivePurchaseOrder"]) {
     assert.ok(schemaFields.mutation.fields.some(({ name }) => name === mutation), `${mutation} must be available`);
   }
 

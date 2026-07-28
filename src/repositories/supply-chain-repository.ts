@@ -404,6 +404,26 @@ export const upsertSupplierProduct = async (tenantId: string, input: Omit<Suppli
   return record;
 };
 
+export const removeSupplierProduct = async (tenantId: string, supplierId: string, productId: string) => {
+  const preferredKey = key(tenantId, "PREFERRED_SUPPLIER", productId);
+  const [current, preferredLookup] = await Promise.all([
+    getSupplierProduct(tenantId, supplierId, productId),
+    dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: preferredKey })).then((value) => value.Item),
+  ]);
+  if (!current) return false;
+  const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [
+    { Delete: { TableName: TABLE_NAME, Key: key(tenantId, "SUPPLIER_PRODUCT", `${supplierId}#${productId}`), ConditionExpression: "attribute_exists(partitionKey)" } },
+  ];
+  if (current.supplierSku) {
+    transaction.push({ Delete: { TableName: TABLE_NAME, Key: key(tenantId, `LOOKUP#SUPPLIER_SKU#${supplierId}`, current.supplierSku) } });
+  }
+  if (preferredLookup?.supplierId === supplierId) {
+    transaction.push({ Delete: { TableName: TABLE_NAME, Key: preferredKey, ConditionExpression: "supplierId = :supplierId", ExpressionAttributeValues: { ":supplierId": supplierId } } });
+  }
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: transaction }));
+  return true;
+};
+
 export const listStorePolicies = (tenantId: string, storeId?: string) => storeId
   ? queryCollection<StoreProductPolicyRecord>(tenantId, `STORE#${storeId}#POLICY`)
   : listStores(tenantId).then((stores) => Promise.all(stores.map((store) => queryCollection<StoreProductPolicyRecord>(tenantId, `STORE#${store.id}#POLICY`))).then((values) => values.flat()));
@@ -455,10 +475,12 @@ const resolvePurchaseOrderLines = async (tenantId: string, supplierId: string, i
     validateCount(input.orderedPurchaseQuantity, "Ordered quantity", false);
     const [product, supplierProduct] = await Promise.all([getCatalogProduct(tenantId, input.productId), getSupplierProduct(tenantId, supplierId, input.productId)]);
     if (!product || product.status !== "active") throw new Error("One or more purchase-order products are unavailable");
-    if (!supplierProduct) throw new Error(`${product.name} is not configured for the selected supplier`);
-    const pricePerPurchaseUnit = input.pricePerPurchaseUnit ?? supplierProduct.lastPurchasePrice;
+    const existingLine = existing?.supplierId === supplierId ? existing.lines.find((line) => line.productId === input.productId) : undefined;
+    if (!supplierProduct && !existingLine) throw new Error(`${product.name} is not configured for the selected supplier`);
+    const source = supplierProduct ?? existingLine!;
+    const pricePerPurchaseUnit = input.pricePerPurchaseUnit ?? existingLine?.pricePerPurchaseUnit ?? supplierProduct?.lastPurchasePrice;
     if (typeof pricePerPurchaseUnit !== "number" || !Number.isFinite(pricePerPurchaseUnit) || pricePerPurchaseUnit < 0) throw new Error(`Enter a purchase price for ${product.name} on this purchase order`);
-    return { id: existing?.lines.find((line) => line.productId === input.productId)?.id ?? randomUUID(), productId: product.id, productName: product.name, baseUnit: product.baseUnit, stockUnit: product.stockUnit, supplierSku: supplierProduct.supplierSku, purchaseUnit: supplierProduct.purchaseUnit, purchaseQuantity: supplierProduct.purchaseQuantity, purchaseMeasurementUnit: supplierProduct.purchaseMeasurementUnit, unitsPerPurchaseUnit: supplierProduct.unitsPerPurchaseUnit, orderedPurchaseQuantity: input.orderedPurchaseQuantity, acceptedBaseQuantity: 0, pricePerPurchaseUnit: pricePerPurchaseUnit! };
+    return { id: existingLine?.id ?? randomUUID(), productId: product.id, productName: product.name, baseUnit: product.baseUnit, stockUnit: product.stockUnit, supplierSku: source.supplierSku, purchaseUnit: source.purchaseUnit, purchaseQuantity: source.purchaseQuantity, purchaseMeasurementUnit: source.purchaseMeasurementUnit, unitsPerPurchaseUnit: source.unitsPerPurchaseUnit, orderedPurchaseQuantity: input.orderedPurchaseQuantity, acceptedBaseQuantity: existingLine?.acceptedBaseQuantity ?? 0, pricePerPurchaseUnit };
   }));
 };
 export const createPurchaseOrder = async (tenantId: string, input: { supplierId: string; storeId: string; expectedDeliveryDate?: string | null; notes: string; lines: PurchaseOrderLineInput[] }, actor: Actor, requestId: string) => {

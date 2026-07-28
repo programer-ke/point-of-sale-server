@@ -209,7 +209,7 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@aws-sdk/core@^3.975.3", "@aws-sdk/core@^3.977.1":
+"@aws-sdk/core@^3.977.1":
   version "3.977.1"
   resolved "https://registry.yarnpkg.com/@aws-sdk/core/-/core-3.977.1.tgz#2831daa053f3a50ad426898e6920f08f807b97ff"
   integrity sha512-KVtQRtc00ES/y+Sc3vYXeP6pCIcNlBJCZOwvqSy8ZpVGmbM5+IG+AfhuTKQ2oXmIVqZJewaGMMpzPkywC6xg0w==
@@ -349,14 +349,14 @@
     mnemonist "0.38.3"
     tslib "^2.6.2"
 
-"@aws-sdk/lib-dynamodb@^3.1089.0":
-  version "3.1090.0"
-  resolved "https://registry.yarnpkg.com/@aws-sdk/lib-dynamodb/-/lib-dynamodb-3.1090.0.tgz#94420681f857a36bb3e9cabb607cdcae004b5e4f"
-  integrity sha512-WAKhaitoS0m6RB5uLtWHnZryOKdT36KUrlGhrJEh5h2Sl9pkp7MqMPEEJUZ3PEmXD7qvNQN5hym/B3L+ajlGTg==
+"@aws-sdk/lib-dynamodb@^3.1096.0":
+  version "3.1096.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/lib-dynamodb/-/lib-dynamodb-3.1096.0.tgz#81568a25d4754ce3669b20f1521894b0adaa6b24"
+  integrity sha512-ylVyjSMNs5+lohlXPBNGLPKC4sSGG7bR3e9XYjVYFkX8UaaQVGwpQ7hjnUeDjgIbKfAdOkdPbmZNZzMOdfPBAg==
   dependencies:
-    "@aws-sdk/core" "^3.975.3"
+    "@aws-sdk/core" "^3.977.1"
     "@aws-sdk/util-dynamodb" "^3.996.7"
-    "@smithy/core" "^3.29.4"
+    "@smithy/core" "^3.29.8"
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
@@ -649,7 +649,7 @@
   resolved "https://registry.yarnpkg.com/@protobufjs/utf8/-/utf8-1.1.2.tgz#78d476333d85d5b1c792e257bca74ba080da49a4"
   integrity sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug==
 
-"@smithy/core@^3.29.4", "@smithy/core@^3.29.8", "@smithy/core@^3.31.0":
+"@smithy/core@^3.29.8", "@smithy/core@^3.31.0":
   version "3.31.0"
   resolved "https://registry.yarnpkg.com/@smithy/core/-/core-3.31.0.tgz#b35b5992ddeaa8044267cbb76e290181b4943160"
   integrity sha512-sylYk2l9d7CmRv8ts8p0SDQUr3VO+HMeS1nrjL6+UtbO8ktJHTOeQ1McX+aAyvGGccp5aZX9eNtdcXrSwzoZaw==
@@ -1076,10 +1076,10 @@ gopd@^1.0.1, gopd@^1.2.0:
   resolved "https://registry.yarnpkg.com/gopd/-/gopd-1.2.0.tgz#89f56b8217bdbc8802bd299df6d7f1081d7e51a1"
   integrity sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==
 
-graphql@^16.11.0:
-  version "16.14.2"
-  resolved "https://registry.yarnpkg.com/graphql/-/graphql-16.14.2.tgz#83faf25869e3df727cc855161db5da85b0e5b2c0"
-  integrity sha512-Chq1s4CY7jmh8gO2qvLIJyfCDIN+EHLFW/9iShnp1z8FjBQMoodWP1kDC36VAMXXIvAjj4ARa7ntfAV2BrjsbA==
+graphql@^17.0.2:
+  version "17.0.2"
+  resolved "https://registry.yarnpkg.com/graphql/-/graphql-17.0.2.tgz#05ff6f18e0801e8d040d46957eba712c1459d5d7"
+  integrity sha512-FRWbddMxfkjiB7z+aQDWIR+E34xo9I8c9mtK2RPv8PmMzKRvrdsreHL/Ui/TmwHJfhHChEtsFPyMHKI+xuarQQ==
 
 has-property-descriptors@^1.0.2:
   version "1.0.2"
@@ -1173,9 +1173,9 @@ math-intrinsics@^1.1.0:
   integrity sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==
 
 media-typer@^1.1.0:
-  version "1.1.0"
-  resolved "https://registry.yarnpkg.com/media-typer/-/media-typer-1.1.0.tgz#6ab74b8f2d3320f2064b2a87a38e7931ff3a5561"
-  integrity sha512-aisnrDP4GNe06UcKFnV5bfMNPBUw4jsLGaWwWfnH3v02GnBuXX2MCVn5RbrWo0j3pczUilYblq7fQ7Nw2t5XKw==
+  version "1.1.1"
+  resolved "https://registry.yarnpkg.com/media-typer/-/media-typer-1.1.1.tgz#6f035400dfe3ab9d5607bc77546ce30cc2f9c6b8"
+  integrity sha512-yz3xRaG20c6/BOzvYoDaGtPmGscs7YivItZEEqe6GbwNfHuxu9YNmvnEkMzKldAGY4/80pRcQRZSEnhquk9XuQ==
 
 mime-db@^1.54.0:
   version "1.54.0"
