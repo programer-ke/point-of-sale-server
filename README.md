@@ -38,6 +38,7 @@ AWS_REGION=us-east-1
 AWS_DYNAMODB_TABLE=pos_system
 COGNITO_USER_POOL_ID=us-east-1_example
 COGNITO_USER_POOL_CLIENT_ID=exampleclientid
+SES_FROM_EMAIL=Tomkondi Orders <orders@tomkondi.shop>
 HOST=127.0.0.1
 PORT=4000
 ```
@@ -57,6 +58,7 @@ integration. Terraform configures the deployed handler as
 - `COGNITO_USER_POOL_CLIENT_ID`
 - `TRUST_API_GATEWAY_JWT_AUTHORIZER=true`
 - `NODE_ENV=production`
+- `SES_FROM_EMAIL=Tomkondi Orders <orders@tomkondi.shop>`
 - AWS-generated region and temporary execution-role credentials
 
 No application secret is currently required. GitHub Actions assumes only the

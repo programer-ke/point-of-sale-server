@@ -4,6 +4,7 @@ import {
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
+  UpdateCommand,
   type TransactWriteCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import { dynamoDB, TABLE_NAME } from "../config/db";
@@ -95,6 +96,11 @@ export interface PurchaseOrderRecord {
   createdBy: string;
   createdByName: string;
   issuedAt?: string | null;
+  emailStatus?: "sent" | "not_configured" | "suppressed" | "failed" | null;
+  emailRecipient?: string | null;
+  emailMessageId?: string | null;
+  emailAttemptedAt?: string | null;
+  emailError?: string | null;
   receiptCount: number;
   createdAt: string;
   updatedAt: string;
@@ -213,6 +219,8 @@ export interface StocktakeSessionRecord { id: string; stocktakeNumber: string; s
 const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 const normalized = (value: string) => value.trim().replace(/\s+/g, " ");
 const normalizedCode = (value: string) => normalized(value).toUpperCase();
+const validOptionalEmail = (value: string) =>
+  !value || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 const PURCHASE_UNITS: Record<string, Set<string>> = {
   each: new Set(["each", "pack", "box", "inner carton", "carton", "case", "master carton", "tray", "crate", "bundle", "pallet"]),
   gram: new Set(["bag", "sack", "bale", "tub", "bucket", "carton", "case", "drum", "bulk", "kilogram", "tonne", "pallet"]),
@@ -335,6 +343,7 @@ export const createSupplier = async (tenantId: string, input: Omit<SupplierRecor
   const id = randomUUID(); const now = new Date().toISOString();
   const supplier: SupplierRecord = { id, code: normalizedCode(input.code), name: normalized(input.name), contactName: normalized(input.contactName), phone: input.phone.trim(), email: input.email.trim().toLowerCase(), address: normalized(input.address), status: "active", createdAt: now, updatedAt: now };
   if (!supplier.code || !supplier.name) throw new Error("Supplier code and name are required");
+  if (!validOptionalEmail(supplier.email)) throw new Error("Enter a valid supplier email");
   if ((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: key(tenantId, "LOOKUP#SUPPLIER", supplier.code) }))).Item) throw new Error("Supplier code is already in use");
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
     { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "SUPPLIER", id), accessPartition: collection(tenantId, "SUPPLIER"), accessSort: `${supplier.name.toLowerCase()}#${id}`, entityType: "supplier", tenantId, ...supplier }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
@@ -347,6 +356,7 @@ export const updateSupplier = async (tenantId: string, id: string, input: Partia
   const current = await getSupplier(tenantId, id); if (!current) throw new Error("Supplier not found");
   if (input.status === "inactive" && current.status === "active" && (await listPurchaseOrders(tenantId)).some((order) => order.supplierId === id && (order.status === "draft" || order.status === "issued" || order.status === "partially_received"))) throw new Error("Close this supplier's open purchase orders before deactivating it");
   const next = { ...current, ...input, name: normalized(input.name ?? current.name), contactName: normalized(input.contactName ?? current.contactName), address: normalized(input.address ?? current.address), email: (input.email ?? current.email).trim().toLowerCase(), phone: (input.phone ?? current.phone).trim(), updatedAt: new Date().toISOString() };
+  if (!validOptionalEmail(next.email)) throw new Error("Enter a valid supplier email");
   await dynamoDB.send(new PutCommand({ TableName: TABLE_NAME, Item: { ...key(tenantId, "SUPPLIER", id), accessPartition: collection(tenantId, "SUPPLIER"), accessSort: `${next.name.toLowerCase()}#${id}`, entityType: "supplier", tenantId, ...next }, ConditionExpression: "attribute_exists(partitionKey)" }));
   return next;
 };
@@ -480,6 +490,30 @@ export const setPurchaseOrderStatus = async (tenantId: string, id: string, actio
   else if (action === "cancel") { if (!(["draft", "issued"] as string[]).includes(current.status) || current.receiptCount > 0) throw new Error("Only purchase orders with no receipts can be cancelled"); next = { ...current, status: "cancelled", closeReason: reason.trim() || "Cancelled", updatedAt: now }; }
   else { if (!(current.status === "partially_received" || current.status === "issued")) throw new Error("Only open purchase orders can be closed"); if (reason.trim().length < 3) throw new Error("A close reason is required"); next = { ...current, status: "closed", closeReason: reason.trim(), updatedAt: now }; }
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [putPurchaseOrder(tenantId, next, current.updatedAt)] })); return next;
+};
+
+export const recordPurchaseOrderEmailResult = async (
+  tenantId: string,
+  id: string,
+  result: Pick<PurchaseOrderRecord, "emailStatus" | "emailRecipient" | "emailMessageId" | "emailAttemptedAt" | "emailError">,
+) => {
+  const response = await dynamoDB.send(new UpdateCommand({
+    TableName: TABLE_NAME,
+    Key: key(tenantId, "PO", id),
+    UpdateExpression: "SET emailStatus = :status, emailRecipient = :recipient, emailMessageId = :messageId, emailAttemptedAt = :attemptedAt, emailError = :emailError",
+    ConditionExpression: "attribute_exists(partitionKey) AND #status <> :draft",
+    ExpressionAttributeNames: { "#status": "status" },
+    ExpressionAttributeValues: {
+      ":status": result.emailStatus,
+      ":recipient": result.emailRecipient,
+      ":messageId": result.emailMessageId,
+      ":attemptedAt": result.emailAttemptedAt,
+      ":emailError": result.emailError,
+      ":draft": "draft",
+    },
+    ReturnValues: "ALL_NEW",
+  }));
+  return stripKeys<PurchaseOrderRecord>(response.Attributes)!;
 };
 
 export const listGoodsReceipts = (tenantId: string, range?: { from?: string; to?: string; limit?: number }) => queryCollection<GoodsReceiptRecord>(tenantId, "GOODS_RECEIPT", { ...range, limit: range?.limit ?? 200, descending: true });

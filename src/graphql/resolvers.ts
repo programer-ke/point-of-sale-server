@@ -51,6 +51,12 @@ import {
   type SaleRecord,
 } from "../repositories/pos-repository";
 import {
+  createNotification,
+  listNotifications,
+  markAllNotificationsRead,
+  markNotificationRead,
+} from "../repositories/notification-repository";
+import {
   createPurchaseOrder,
   createStore,
   createSupplier,
@@ -65,6 +71,7 @@ import {
   countLot,
   dispatchTransfer,
   getPurchaseOrder,
+  getSupplier,
   getGoodsReceipt,
   getTransfer,
   getRequisition,
@@ -82,6 +89,7 @@ import {
   listRequisitions,
   listStocktakes,
   receivePurchaseOrder,
+  recordPurchaseOrderEmailResult,
   receiveTransfer,
   replenishmentSuggestions,
   setPurchaseOrderStatus,
@@ -95,6 +103,7 @@ import {
   writeOffLot,
   type ReceiptLineInput,
 } from "../repositories/supply-chain-repository";
+import { sendPurchaseOrderEmail } from "../services/purchase-order-email";
 const requireStaff = (context: GraphQLContext) => requireRole(context, ["admin", "staff"]);
 const requireAdmin = (context: GraphQLContext) => requireRole(context, ["admin"]);
 const actor = (context: GraphQLContext) => ({ id: context.auth.id, name: context.auth.username });
@@ -137,6 +146,64 @@ const parseRoles = (roles: string[]): UserRole[] => {
     throw new Error("Roles must contain admin, staff, or both");
   }
   return normalized as UserRole[];
+};
+
+const logNotificationFailure = (event: string, error: unknown) => {
+  console.error(JSON.stringify({
+    event: "notification_creation_failed",
+    notificationEvent: event,
+    errorName: error instanceof Error ? error.name : "UnknownError",
+  }));
+};
+
+export const notifyAdminsOfRequisition = async (
+  tenantId: string,
+  requesterId: string,
+  requisition: { id: string; requisitionNumber: string; requestedByName: string; fromStoreName: string; toStoreName: string },
+) => {
+  const memberships = await listTenantMemberships(tenantId);
+  const recipients = memberships.filter(({ userId, roles }) => userId !== requesterId && roles.includes("admin"));
+  const results = await Promise.allSettled(recipients.map(({ userId }) => createNotification(tenantId, userId, {
+    eventKey: `requisition:${requisition.id}:requested`,
+    type: "stock_requisition_created",
+    title: "New stock requisition",
+    message: `${requisition.requestedByName} requested ${requisition.requisitionNumber} from ${requisition.fromStoreName} to ${requisition.toStoreName}.`,
+    actionPath: "/dashboard/supply/stock-movements?view=requests",
+  })));
+  results.forEach((result) => { if (result.status === "rejected") logNotificationFailure("stock_requisition_created", result.reason); });
+};
+
+export const notifyRequesterOfDecision = async (
+  tenantId: string,
+  requisition: { id: string; requisitionNumber: string; requestedBy: string; status: string; decisionReason?: string | null },
+) => {
+  const membership = await getTenantMembership(requisition.requestedBy);
+  const actionPath = membership?.roles.includes("admin")
+    ? "/dashboard/supply/stock-movements?view=requests"
+    : "/staff/supply/requisitions";
+  await createNotification(tenantId, requisition.requestedBy, {
+    eventKey: `requisition:${requisition.id}:${requisition.status}`,
+    type: "stock_requisition_decided",
+    title: `Stock requisition ${requisition.status}`,
+    message: `${requisition.requisitionNumber} was ${requisition.status}${requisition.decisionReason ? `: ${requisition.decisionReason}` : "."}`,
+    actionPath,
+  });
+};
+
+const deliverPurchaseOrder = async (tenantId: string, id: string) => {
+  const [order, business] = await Promise.all([getPurchaseOrder(tenantId, id), getBusinessSettings(tenantId)]);
+  if (!order) throw new Error("Purchase order not found");
+  if (order.status === "draft" || order.status === "cancelled") throw new Error("Only an issued purchase order can be emailed");
+  const supplier = await getSupplier(tenantId, order.supplierId);
+  if (!supplier) throw new Error("Supplier not found");
+  if (order.emailStatus === "sent" && order.emailRecipient === supplier.email.trim().toLowerCase()) return order;
+  const result = await sendPurchaseOrderEmail(order, supplier, business);
+  try {
+    return await recordPurchaseOrderEmailResult(tenantId, order.id, result);
+  } catch (error) {
+    console.error(JSON.stringify({ event: "purchase_order_email_result_persist_failed", orderId: order.id, errorName: error instanceof Error ? error.name : "UnknownError" }));
+    return { ...order, ...result };
+  }
 };
 
 const validateMoney = (value: number, name: string) => {
@@ -347,6 +414,10 @@ export const resolvers = {
     cashShifts: (_: unknown, { limit, from, to, storeId }: { limit: number; from?: string; to?: string; storeId?: string }, context: GraphQLContext) => { requireAdmin(context); return listCashShifts(tenant(context), Math.min(Math.max(limit, 1), 500), { from, to, storeId }); },
     replenishmentSuggestions: (_: unknown, { storeId, supplierId }: { storeId: string; supplierId: string }, context: GraphQLContext) => { requireAdmin(context); return replenishmentSuggestions(tenant(context), storeId, supplierId); },
     supplyChainReport: (_: unknown, args: { from: string; to: string; storeId?: string; supplierId?: string; productId?: string; status?: string; expiryDays?: number }, context: GraphQLContext) => { requireAdmin(context); const range = validateDateRange(args.from, args.to) as { from: string; to: string }; return supplyChainReport(tenant(context), { ...range, storeId: args.storeId, supplierId: args.supplierId, productId: args.productId, status: args.status, expiryDays: args.expiryDays }); },
+    notifications: (_: unknown, { limit }: { limit: number }, context: GraphQLContext) => {
+      const user = requireStaff(context);
+      return listNotifications(tenant(context), user.id, limit);
+    },
   },
 
   Mutation: {
@@ -555,7 +626,26 @@ export const resolvers = {
     upsertStorePolicy: (_: unknown, input: { storeId: string; productId: string; reorderPoint: number; targetQuantity: number }, context: GraphQLContext) => { requireAdmin(context); return upsertStorePolicy(tenant(context), input); },
     createPurchaseOrder: (_: unknown, input: { supplierId: string; storeId: string; expectedDeliveryDate?: string; notes: string; lines: Array<{ productId: string; orderedPurchaseQuantity: number; pricePerPurchaseUnit?: number }>; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createPurchaseOrder(tenant(context), input, actor(context), input.requestId); },
     updatePurchaseOrder: (_: unknown, { id, ...input }: { id: string; supplierId: string; storeId: string; expectedDeliveryDate?: string; notes: string; lines: Array<{ productId: string; orderedPurchaseQuantity: number; pricePerPurchaseUnit?: number }> }, context: GraphQLContext) => { requireAdmin(context); return updatePurchaseOrder(tenant(context), id, input); },
-    issuePurchaseOrder: (_: unknown, { id }: { id: string }, context: GraphQLContext) => { requireAdmin(context); return setPurchaseOrderStatus(tenant(context), id, "issue", ""); },
+    issuePurchaseOrder: async (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      const tenantId = tenant(context);
+      const issued = await setPurchaseOrderStatus(tenantId, id, "issue", "");
+      try {
+        return await deliverPurchaseOrder(tenantId, id);
+      } catch (error) {
+        console.error(JSON.stringify({ event: "purchase_order_email_attempt_failed", orderId: id, errorName: error instanceof Error ? error.name : "UnknownError" }));
+        return {
+          ...issued,
+          emailStatus: "failed",
+          emailAttemptedAt: new Date().toISOString(),
+          emailError: "The purchase order was issued, but email could not be attempted",
+        };
+      }
+    },
+    sendPurchaseOrderEmail: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      return deliverPurchaseOrder(tenant(context), id);
+    },
     closePurchaseOrder: (_: unknown, { id, reason }: { id: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return setPurchaseOrderStatus(tenant(context), id, "close", reason); },
     cancelPurchaseOrder: (_: unknown, { id, reason }: { id: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return setPurchaseOrderStatus(tenant(context), id, "cancel", reason); },
     receivePurchaseOrder: (_: unknown, { purchaseOrderId, deliveryNote, invoiceNumber, lines, requestId }: { purchaseOrderId: string; deliveryNote: string; invoiceNumber: string; lines: ReceiptLineInput[]; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return receivePurchaseOrder(tenant(context), purchaseOrderId, deliveryNote, invoiceNumber, lines, actor(context), requestId); },
@@ -565,8 +655,22 @@ export const resolvers = {
     dispatchStockTransfer: (_: unknown, { id, requestId }: { id: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return dispatchTransfer(tenant(context), id, actor(context), requestId); },
     receiveStockTransfer: (_: unknown, { id, lines, requestId }: { id: string; lines: Array<{ lotId: string; receivedQuantity: number; damagedQuantity: number; missingQuantity: number; reason: string }>; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return receiveTransfer(tenant(context), id, lines, actor(context), requestId); },
     cancelStockTransfer: (_: unknown, { id, reason }: { id: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return cancelTransfer(tenant(context), id, reason); },
-    createStockRequisition: async (_: unknown, { toStoreId, requestId, ...input }: { fromStoreId: string; toStoreId?: string; notes: string; lines: Array<{ productId: string; quantity: number }>; requestId: string }, context: GraphQLContext) => { requireStaff(context); const store = await selectedStore(context, toStoreId); return createRequisition(tenant(context), { ...input, toStoreId: store.id }, actor(context), requestId); },
-    decideStockRequisition: (_: unknown, { id, decision, reason }: { id: string; decision: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); if (!(["approve", "reject", "cancel"] as string[]).includes(decision)) throw new Error("Decision must be approve, reject, or cancel"); return decideRequisition(tenant(context), id, decision as "approve" | "reject" | "cancel", reason, actor(context)); },
+    createStockRequisition: async (_: unknown, { toStoreId, requestId, ...input }: { fromStoreId: string; toStoreId?: string; notes: string; lines: Array<{ productId: string; quantity: number }>; requestId: string }, context: GraphQLContext) => {
+      const user = requireStaff(context);
+      const tenantId = tenant(context);
+      const store = await selectedStore(context, toStoreId);
+      const requisition = await createRequisition(tenantId, { ...input, toStoreId: store.id }, actor(context), requestId);
+      await notifyAdminsOfRequisition(tenantId, user.id, requisition).catch((error) => logNotificationFailure("stock_requisition_created", error));
+      return requisition;
+    },
+    decideStockRequisition: async (_: unknown, { id, decision, reason }: { id: string; decision: string; reason: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      if (!(["approve", "reject", "cancel"] as string[]).includes(decision)) throw new Error("Decision must be approve, reject, or cancel");
+      const tenantId = tenant(context);
+      const requisition = await decideRequisition(tenantId, id, decision as "approve" | "reject" | "cancel", reason, actor(context));
+      await notifyRequesterOfDecision(tenantId, requisition).catch((error) => logNotificationFailure("stock_requisition_decided", error));
+      return requisition;
+    },
     convertStockRequisition: (_: unknown, { id, requestId }: { id: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return convertRequisitionToTransfer(tenant(context), id, actor(context), requestId); },
     createStocktake: (_: unknown, { storeId, name, productId, requestId }: { storeId: string; name: string; productId?: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createStocktake(tenant(context), storeId, name, actor(context), requestId, productId); },
     completeStocktake: (_: unknown, { id, counts, reason, requestId }: { id: string; counts: Array<{ lotId: string; quantity: number }>; reason: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return completeStocktake(tenant(context), id, counts, reason, actor(context), requestId); },
@@ -574,5 +678,13 @@ export const resolvers = {
     openCashShift: async (_: unknown, { storeId, openingFloat, requestId }: { storeId?: string; openingFloat: number; requestId: string }, context: GraphQLContext) => { const user = requireStaff(context); const store = await selectedStore(context, storeId); const cognito = await getCognitoUser(user.username); return openCashShift(tenant(context), store, openingFloat, { id: user.id, name: cognito.name }, requestId); },
     recordCashMovement: (_: unknown, { shiftId, type, amount, reason, requestId }: { shiftId: string; type: "cash_in" | "cash_out"; amount: number; reason: string; requestId: string }, context: GraphQLContext) => { const user = requireStaff(context); if (!(type === "cash_in" || type === "cash_out")) throw new Error("Cash movement type must be cash_in or cash_out"); return recordCashMovement(tenant(context), shiftId, type, amount, reason, { id: user.id, name: user.username }, requestId); },
     closeCashShift: (_: unknown, { id, countedCash, requestId }: { id: string; countedCash: number; requestId: string }, context: GraphQLContext) => { const user = requireStaff(context); return closeCashShift(tenant(context), id, countedCash, { id: user.id, name: user.username }, requestId); },
+    markNotificationRead: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
+      const user = requireStaff(context);
+      return markNotificationRead(tenant(context), user.id, id);
+    },
+    markAllNotificationsRead: (_: unknown, _args: unknown, context: GraphQLContext) => {
+      const user = requireStaff(context);
+      return markAllNotificationsRead(tenant(context), user.id);
+    },
   },
 };

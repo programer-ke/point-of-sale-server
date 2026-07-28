@@ -322,9 +322,24 @@ export const typeDefs = `#graphql
     createdBy: ID!
     createdByName: String!
     issuedAt: String
+    emailStatus: String
+    emailRecipient: String
+    emailMessageId: String
+    emailAttemptedAt: String
+    emailError: String
     receiptCount: Int!
     createdAt: String!
     updatedAt: String!
+  }
+
+  type Notification {
+    id: ID!
+    type: String!
+    title: String!
+    message: String!
+    actionPath: String!
+    readAt: String
+    createdAt: String!
   }
 
   type GoodsReceiptLine {
@@ -509,6 +524,7 @@ export const typeDefs = `#graphql
     cashShifts(limit: Int = 100, from: String, to: String, storeId: ID): [CashShift!]!
     replenishmentSuggestions(storeId: ID!, supplierId: ID!): [ReplenishmentSuggestion!]!
     supplyChainReport(from: String!, to: String!, storeId: ID, supplierId: ID, productId: ID, status: String, expiryDays: Int = 30): SupplyChainReport!
+    notifications(limit: Int = 20): [Notification!]!
   }
 
   type Mutation {
@@ -539,6 +555,7 @@ export const typeDefs = `#graphql
     createPurchaseOrder(supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!, requestId: ID!): PurchaseOrder!
     updatePurchaseOrder(id: ID!, supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!): PurchaseOrder!
     issuePurchaseOrder(id: ID!): PurchaseOrder!
+    sendPurchaseOrderEmail(id: ID!): PurchaseOrder!
     closePurchaseOrder(id: ID!, reason: String!): PurchaseOrder!
     cancelPurchaseOrder(id: ID!, reason: String = "Cancelled"): PurchaseOrder!
     receivePurchaseOrder(purchaseOrderId: ID!, deliveryNote: String = "", invoiceNumber: String = "", lines: [GoodsReceiptLineInput!]!, requestId: ID!): GoodsReceipt!
@@ -557,5 +574,7 @@ export const typeDefs = `#graphql
     openCashShift(storeId: ID, openingFloat: Float!, requestId: ID!): CashShift!
     recordCashMovement(shiftId: ID!, type: String!, amount: Float!, reason: String!, requestId: ID!): CashMovement!
     closeCashShift(id: ID!, countedCash: Float!, requestId: ID!): CashShift!
+    markNotificationRead(id: ID!): Notification!
+    markAllNotificationsRead: Boolean!
   }
 `;

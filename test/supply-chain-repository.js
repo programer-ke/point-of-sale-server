@@ -21,6 +21,9 @@ const assertExpressionBindingsMatch = (operation, label) => {
 };
 
 async function main() {
+  await assert.rejects(() => supply.createSupplier(tenantId, {
+    code: "BAD", name: "Bad Email Supplier", contactName: "", phone: "", email: "invalid", address: "",
+  }), /valid supplier email/);
   assert.equal(measurements.convertMeasurementToBaseUnits(0.5, "kilogram", "gram"), 500, "500 g must be represented exactly beneath a kilogram stock unit");
   assert.equal(measurements.convertMeasurementToBaseUnits(2.5, "kilogram", "gram"), 2500, "fractional kilogram sale quantities must remain exact");
   assert.equal(measurements.convertMeasurementToBaseUnits(2, "tonne", "gram"), 2000000, "supplier tonnes must convert to exact weight inventory");
@@ -58,6 +61,15 @@ async function main() {
   const issued = await supply.setPurchaseOrderStatus(tenantId, po.id, "issue", "");
   assert.equal(issued.status, "issued");
   assert.match(transaction[0].Put.ConditionExpression, /updatedAt/, "PO state changes must reject concurrent stale writes");
+
+  dynamoDB.send = async (command) => {
+    assert.equal(command.constructor.name, "UpdateCommand");
+    return { Attributes: { ...issued, emailStatus: "sent", emailRecipient: "supplier@example.com", emailMessageId: "message-1", emailAttemptedAt: now, emailError: null } };
+  };
+  const emailed = await supply.recordPurchaseOrderEmailResult(tenantId, po.id, {
+    emailStatus: "sent", emailRecipient: "supplier@example.com", emailMessageId: "message-1", emailAttemptedAt: now, emailError: null,
+  });
+  assert.equal(emailed.emailStatus, "sent");
 
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") {
