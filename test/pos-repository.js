@@ -15,6 +15,12 @@ const assertExpressionBindingsMatch = (operation, label) => {
   assert.deepEqual(suppliedNames, referencedNames, `${label} expression names must exactly match its placeholders`);
 };
 
+const assertNoUndefined = (value, path = "transaction") => {
+  assert.notEqual(value, undefined, `${path} must not contain undefined values`);
+  if (Array.isArray(value)) value.forEach((item, index) => assertNoUndefined(item, `${path}[${index}]`));
+  else if (value && typeof value === "object") Object.entries(value).forEach(([key, item]) => assertNoUndefined(item, `${path}.${key}`));
+};
+
 const product = {
   partitionKey: "PRODUCT#product-1",
   sortKey: "PROFILE",
@@ -101,7 +107,10 @@ async function main() {
   assert.equal(sale.storeName, "Main Store", "sales must retain the selling store at checkout time");
   assert.equal(sale.receiptBranding.businessName, "Main Market");
   assert.equal(sale.receiptBranding.storeName, "Main Store");
+  assert.equal("priceBeforeOverride" in sale.items[0], false, "ordinary sale items must omit optional override fields instead of storing undefined values");
+  assert.equal("priceOverrideReason" in sale.items[0], false, "ordinary sale items must be safe to marshal to DynamoDB");
   assert.equal(transaction.length, 5, "lot update, movement, receipt, cash shift, and idempotency must be atomic");
+  assertNoUndefined(transaction);
   assert.match(transaction[0].Update.ConditionExpression, /remainingQuantity.*>=/);
   for (const placeholder of Object.keys(transaction[0].Update.ExpressionAttributeValues)) {
     assert.match(`${transaction[0].Update.UpdateExpression} ${transaction[0].Update.ConditionExpression}`, new RegExp(placeholder.replace(":", "\\:")), `lot decrement must use ${placeholder}`);

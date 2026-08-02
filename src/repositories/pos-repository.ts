@@ -965,7 +965,27 @@ export const completeSale = async (
     const activeVat = vatApplies(globalBranding, now) && isVatClass(product.vatClass);
     const vatClass = activeVat ? product.vatClass! : null;
     const breakdown = activeVat ? inclusiveVatBreakdown(Math.round(total * 100), vatClass!, now) : { taxableMinor: 0, vatMinor: 0, rateBasisPoints: 0 };
-    return { productId: product.id, productName: product.name, sku: variant.sku || product.sku, barcode: variant.barcode || product.barcode, variantId: variant.id, variantName: variant.name, quantityInBaseUnits: variant.quantityInBaseUnits, inventoryQuantity, quantity, price, priceBeforeOverride: overrideRequested ? authoritativePrice : undefined, priceOverrideReason: overrideRequested ? reason : undefined, regularPrice: variant.sellingPrice, promotionApplied: authoritativePrice < variant.sellingPrice, cost, total, vatClass, vatRateBasisPoints: breakdown.rateBasisPoints, taxableAmount: breakdown.taxableMinor / 100, vatAmount: breakdown.vatMinor / 100 };
+    return {
+      productId: product.id,
+      productName: product.name,
+      sku: variant.sku || product.sku,
+      barcode: variant.barcode || product.barcode,
+      variantId: variant.id,
+      variantName: variant.name,
+      quantityInBaseUnits: variant.quantityInBaseUnits,
+      inventoryQuantity,
+      quantity,
+      price,
+      ...(overrideRequested ? { priceBeforeOverride: authoritativePrice, priceOverrideReason: reason } : {}),
+      regularPrice: variant.sellingPrice,
+      promotionApplied: authoritativePrice < variant.sellingPrice,
+      cost,
+      total,
+      vatClass,
+      vatRateBasisPoints: breakdown.rateBasisPoints,
+      taxableAmount: breakdown.taxableMinor / 100,
+      vatAmount: breakdown.vatMinor / 100,
+    };
   });
   const subtotal = roundMoney(saleItems.reduce((sum, item) => sum + Math.max(item.regularPrice ?? item.price, item.priceBeforeOverride ?? item.price, item.price) * item.quantity, 0));
   const totalAmount = roundMoney(saleItems.reduce((sum, item) => sum + item.total, 0));
