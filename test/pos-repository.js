@@ -56,6 +56,7 @@ const lot = {
 
 async function main() {
   let transaction;
+  let checkoutPolicy;
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") {
       if (command.input.Key.partitionKey.includes("IDEMPOTENCY#")) return {};
@@ -63,6 +64,7 @@ async function main() {
       if (command.input.Key.partitionKey.endsWith(`CASH_SHIFT#${cashShift.id}`)) return { Item: cashShift };
       if (command.input.Key.partitionKey.includes("STORE#")) return { Item: store };
       if (command.input.Key.partitionKey.endsWith("SETTINGS#BUSINESS")) return {};
+      if (command.input.Key.partitionKey.endsWith("SETTINGS#CHECKOUT")) return checkoutPolicy ? { Item: checkoutPolicy } : {};
       return { Item: command.input.Key.partitionKey.endsWith("PRODUCT#product-2") ? secondProduct : product };
     }
     if (command.constructor.name === "TransactWriteCommand") {
@@ -105,6 +107,42 @@ async function main() {
     assert.match(`${transaction[0].Update.UpdateExpression} ${transaction[0].Update.ConditionExpression}`, new RegExp(placeholder.replace(":", "\\:")), `lot decrement must use ${placeholder}`);
   }
   assert.equal(transaction[2].Put.Item.orderNumber, sale.orderNumber);
+
+  const adminOverride = await repository.completeSale(
+    tenantId,
+    { storeId: "store-1", paymentMethod: "cash", amountTendered: 300, items: [{ productId: "product-1", quantity: 1, unitPriceOverride: 100, priceOverrideReason: "Customer goodwill" }], requestId: "sale-admin-override" },
+    { id: "cashier-1", name: "Admin", role: "admin" },
+  );
+  assert.equal(adminOverride.items[0].price, 100);
+  assert.equal(adminOverride.items[0].priceBeforeOverride, 125);
+  assert.equal(adminOverride.items[0].priceOverrideReason, "Customer goodwill");
+  assert.ok(transaction.some((item) => item.Put?.Item?.action === "checkout.price_overrides.applied"), "price overrides must add an audit event to the sale transaction");
+
+  await assert.rejects(
+    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "cash", amountTendered: 300, items: [{ productId: "product-1", quantity: 1, unitPriceOverride: 115, priceOverrideReason: "Approved markdown" }], requestId: "sale-disabled-override" }, { id: "cashier-1", name: "Cashier", role: "staff" }),
+    /markdowns are disabled/,
+  );
+  checkoutPolicy = { enabledPaymentMethods: ["cash", "mpesa"], defaultPaymentMethod: "cash", requireCustomerName: true, allowStaffPriceOverrides: true, maxStaffPriceDiscountPercent: 10, updatedAt: new Date().toISOString() };
+  await assert.rejects(
+    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "cash", amountTendered: 300, items: [{ productId: "product-1", quantity: 1 }], requestId: "sale-customer-required" }, { id: "cashier-1", name: "Cashier", role: "staff" }),
+    /Customer name is required/,
+  );
+  await assert.rejects(
+    () => repository.completeSale(tenantId, { storeId: "store-1", customerName: "Customer", paymentMethod: "cash", amountTendered: 300, items: [{ productId: "product-1", quantity: 1, unitPriceOverride: 100, priceOverrideReason: "Too much" }], requestId: "sale-over-cap" }, { id: "cashier-1", name: "Cashier", role: "staff" }),
+    /exceeds the 10% limit/,
+  );
+  const staffOverride = await repository.completeSale(
+    tenantId,
+    { storeId: "store-1", customerName: "Customer", paymentMethod: "cash", amountTendered: 300, items: [{ productId: "product-1", quantity: 1, unitPriceOverride: 115, priceOverrideReason: "Loyalty markdown" }], requestId: "sale-staff-override" },
+    { id: "cashier-1", name: "Cashier", role: "staff" },
+  );
+  assert.equal(staffOverride.totalAmount, 115);
+  checkoutPolicy = { ...checkoutPolicy, enabledPaymentMethods: ["mpesa"], defaultPaymentMethod: "mpesa", requireCustomerName: false };
+  await assert.rejects(
+    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "cash", amountTendered: 300, items: [{ productId: "product-1", quantity: 1 }], requestId: "sale-disabled-payment" }, { id: "cashier-1", name: "Cashier", role: "staff" }),
+    /payment method is disabled/,
+  );
+  checkoutPolicy = undefined;
 
   const belowCostProduct = await repository.updateProduct(
     tenantId,
@@ -240,6 +278,17 @@ async function main() {
   assert.equal(transaction.length, 2, "settings update and its audit event must be atomic");
   assert.ok(transaction[0].Update, "branding must update only its own fields");
   assertExpressionBindingsMatch(transaction[0].Update, "settings update");
+  await repository.updateBusinessReceiptSettings(tenantId, { thankYouMessage: "Karibu tena", returnPolicy: "Returns with receipt" }, { id: "admin", name: "Admin" });
+  assert.match(transaction[0].Update.UpdateExpression, /thankYouMessage/);
+  assert.doesNotMatch(transaction[0].Update.UpdateExpression, /businessName/, "receipt saves must not overwrite business details");
+  const checkoutDefaults = await repository.getBusinessCheckoutSettings(tenantId);
+  assert.deepEqual(checkoutDefaults.enabledPaymentMethods, ["cash", "mpesa"]);
+  assert.equal(checkoutDefaults.allowStaffPriceOverrides, false);
+  const checkoutSettings = await repository.updateBusinessCheckoutSettings(tenantId, { enabledPaymentMethods: ["mpesa"], defaultPaymentMethod: "mpesa", requireCustomerName: true, allowStaffPriceOverrides: true, maxStaffPriceDiscountPercent: 12.5 }, { id: "admin", name: "Admin" });
+  assert.deepEqual(checkoutSettings.enabledPaymentMethods, ["mpesa"]);
+  assert.equal(checkoutSettings.maxStaffPriceDiscountPercent, 12.5);
+  assert.equal(transaction[0].Put.Item.entityType, "checkout_settings");
+  await assert.rejects(() => repository.updateBusinessCheckoutSettings(tenantId, { enabledPaymentMethods: [], defaultPaymentMethod: "cash", requireCustomerName: false, allowStaffPriceOverrides: false, maxStaffPriceDiscountPercent: 10 }, { id: "admin", name: "Admin" }), /at least one/);
 
   const category = {
     partitionKey: "TENANT#tenant-1#CATEGORY#category-1",

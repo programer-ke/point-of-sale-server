@@ -87,7 +87,9 @@ active lots, transfers, chronological sales, and stock movements. Strongly
 consistent alias records make product and sale-variant SKU/barcode values, plus
 category codes, unique without a
 scan. A sale is one DynamoDB transaction containing its immutable receipt,
-conditional FEFO lot decrements, and stock movement events.
+conditional FEFO lot decrements, stock movement events, and any price-override
+audit. Business-wide checkout settings are server-authoritative for payment
+availability, required customer identity, and capped staff markdowns.
 
 Every business record and index partition starts with `TENANT#<tenant-id>#`.
 An identity membership record maps a Cognito `sub` to exactly one business and

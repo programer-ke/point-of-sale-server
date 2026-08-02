@@ -83,6 +83,8 @@ export const typeDefs = `#graphql
     quantityInBaseUnits: Int!
     inventoryQuantity: Int!
     price: Float!
+    priceBeforeOverride: Float
+    priceOverrideReason: String
     regularPrice: Float
     promotionApplied: Boolean
     cost: Float!
@@ -192,6 +194,15 @@ export const typeDefs = `#graphql
     updatedAt: String!
   }
 
+  type BusinessCheckoutSettings {
+    enabledPaymentMethods: [String!]!
+    defaultPaymentMethod: String!
+    requireCustomerName: Boolean!
+    allowStaffPriceOverrides: Boolean!
+    maxStaffPriceDiscountPercent: Float!
+    updatedAt: String!
+  }
+
   type Business {
     id: ID!
     name: String!
@@ -243,6 +254,8 @@ export const typeDefs = `#graphql
     productId: ID!
     variantId: ID
     quantity: Int!
+    unitPriceOverride: Float
+    priceOverrideReason: String
   }
   input SaleVariantInput { id: ID, name: String!, sku: String = "", barcode: String = "", quantityInBaseUnits: Int!, sellingPrice: Float!, status: String = "active" }
   input ProductUnitInput { id: ID, labelCode: String!, name: String!, parentUnitId: ID, multiplier: Int!, quantityInBaseUnits: Int, sellable: Boolean!, purchasable: Boolean!, sellingPrice: Float, sku: String = "", barcode: String = "", status: String = "active" }
@@ -598,6 +611,7 @@ export const typeDefs = `#graphql
     stockAudits(limit: Int = 100): [AuditEvent!]!
     dashboard(days: Int = 1, personal: Boolean = false, compact: Boolean = false): DashboardSummary!
     businessSettings: BusinessSettings!
+    businessCheckoutSettings: BusinessCheckoutSettings!
     businessMeasurementSettings: BusinessMeasurementSettings!
     business: Business!
     businessReport(from: String!, to: String!, storeId: ID): BusinessReport!
@@ -640,6 +654,9 @@ export const typeDefs = `#graphql
     updateMyProfile(phone: String!): StaffProfile!
     updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, storeId: ID!, storeIds: [ID!] = [], phone: String!): StaffProfile!
     updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", thankYouMessage: String!, returnPolicy: String!, vatRegistered: Boolean, kraPin: String, vatEffectiveFrom: String, withholdingVatAgent: Boolean): BusinessSettings!
+    updateBusinessDetails(businessName: String!, address: String!, phone: String = "", email: String = "", vatRegistered: Boolean!, kraPin: String = "", vatEffectiveFrom: String, withholdingVatAgent: Boolean = false): BusinessSettings!
+    updateBusinessReceiptSettings(thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
+    updateBusinessCheckoutSettings(enabledPaymentMethods: [String!]!, defaultPaymentMethod: String!, requireCustomerName: Boolean!, allowStaffPriceOverrides: Boolean!, maxStaffPriceDiscountPercent: Float!): BusinessCheckoutSettings!
     updateBusinessMeasurementSettings(packageLabels: [PackageUnitLabelInput!]!): BusinessMeasurementSettings!
 
     createCategory(code: String!, name: String!, description: String = "", parentId: ID): Category!

@@ -4,6 +4,29 @@ This log records dated migrations, temporary rollout requirements, and
 remediation procedures. The README remains limited to evergreen setup and
 repeatable operations.
 
+## 2026-08-02 — Checkout policy settings and audited markdowns
+
+### What changed
+
+A new additive checkout-settings record controls enabled payment methods, the
+default method, required customer names, and capped staff markdowns. Sale
+creation enforces these policies server-side and snapshots both the effective
+catalog price and any accepted override with its reason. A single audit event
+is committed atomically when a sale contains overrides.
+
+### Deployment and verification
+
+Deploy the server before the compatible client. Existing businesses need no
+migration and inherit Cash and M-Pesa, Cash as the default, optional customer
+names, disabled staff markdowns, and a 10% dormant cap. Verify disabled-method
+rejection, customer validation, staff cap enforcement, administrator overrides,
+VAT recalculation, and retry idempotency.
+
+### Recovery and status
+
+The checkout-settings item can be removed to restore safe defaults; completed
+sale snapshots and audits remain immutable. Status: active.
+
 ## 2026-08-02 — Lightweight accounting and Kenyan VAT
 
 ### What changed

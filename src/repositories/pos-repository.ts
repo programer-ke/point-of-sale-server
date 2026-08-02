@@ -63,6 +63,8 @@ export interface SaleItemRecord {
   quantityInBaseUnits: number;
   inventoryQuantity: number;
   price: number;
+  priceBeforeOverride?: number;
+  priceOverrideReason?: string;
   regularPrice?: number;
   promotionApplied?: boolean;
   cost: number;
@@ -160,6 +162,17 @@ export interface BusinessMeasurementSettingsRecord {
   updatedAt: string;
 }
 
+export type CheckoutPaymentMethod = "cash" | "mpesa";
+
+export interface BusinessCheckoutSettingsRecord {
+  enabledPaymentMethods: CheckoutPaymentMethod[];
+  defaultPaymentMethod: CheckoutPaymentMethod;
+  requireCustomerName: boolean;
+  allowStaffPriceOverrides: boolean;
+  maxStaffPriceDiscountPercent: number;
+  updatedAt: string;
+}
+
 export type BusinessBrandingInput = Pick<BusinessSettingsRecord, "businessName" | "address" | "phone" | "email" | "thankYouMessage" | "returnPolicy"> & Partial<Pick<BusinessSettingsRecord, "vatRegistered" | "kraPin" | "vatEffectiveFrom" | "withholdingVatAgent">>;
 
 export interface ReportProductRecord {
@@ -230,6 +243,7 @@ const cashShiftKey = (tenantId: string, id: string) => ({ partitionKey: tenantKe
 const openCashShiftKey = (tenantId: string, storeId: string, cashierId: string) => ({ partitionKey: tenantKey(tenantId, `CASH_SHIFT_OPEN#${storeId}#${cashierId}`), sortKey: "PROFILE" });
 const businessSettingsKey = (tenantId: string) => ({ partitionKey: tenantKey(tenantId, "SETTINGS#BUSINESS"), sortKey: "PROFILE" });
 const measurementSettingsKey = (tenantId: string) => ({ partitionKey: tenantKey(tenantId, "SETTINGS#MEASUREMENTS"), sortKey: "PROFILE" });
+const checkoutSettingsKey = (tenantId: string) => ({ partitionKey: tenantKey(tenantId, "SETTINGS#CHECKOUT"), sortKey: "PROFILE" });
 const defaultBusinessSettings: BusinessSettingsRecord = {
   businessName: "Tomkondi Supermarket",
   address: "Nairobi, Kenya",
@@ -242,6 +256,15 @@ const defaultBusinessSettings: BusinessSettingsRecord = {
   kraPin: "",
   vatEffectiveFrom: null,
   withholdingVatAgent: false,
+  updatedAt: new Date(0).toISOString(),
+};
+
+const defaultCheckoutSettings: BusinessCheckoutSettingsRecord = {
+  enabledPaymentMethods: ["cash", "mpesa"],
+  defaultPaymentMethod: "cash",
+  requireCustomerName: false,
+  allowStaffPriceOverrides: false,
+  maxStaffPriceDiscountPercent: 10,
   updatedAt: new Date(0).toISOString(),
 };
 
@@ -457,6 +480,47 @@ export const getBusinessMeasurementSettings = async (tenantId: string) => {
   return measurementSettings(stored?.packageLabels?.length ? stored.packageLabels : defaultPackageLabels, stored?.updatedAt);
 };
 
+export const getBusinessCheckoutSettings = async (tenantId: string) => {
+  const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: checkoutSettingsKey(tenantId) }));
+  const stored = stripKeys<Partial<BusinessCheckoutSettingsRecord>>(response.Item);
+  const enabledPaymentMethods = (stored?.enabledPaymentMethods ?? defaultCheckoutSettings.enabledPaymentMethods)
+    .filter((method): method is CheckoutPaymentMethod => method === "cash" || method === "mpesa");
+  const uniqueMethods = [...new Set(enabledPaymentMethods)];
+  const methods = uniqueMethods.length ? uniqueMethods : defaultCheckoutSettings.enabledPaymentMethods;
+  const requestedDefault = stored?.defaultPaymentMethod;
+  return {
+    ...defaultCheckoutSettings,
+    ...stored,
+    enabledPaymentMethods: methods,
+    defaultPaymentMethod: requestedDefault && methods.includes(requestedDefault) ? requestedDefault : methods[0],
+  };
+};
+
+export const updateBusinessCheckoutSettings = async (
+  tenantId: string,
+  input: Omit<BusinessCheckoutSettingsRecord, "updatedAt">,
+  actor: { id: string; name: string },
+) => {
+  const enabledPaymentMethods = [...new Set(input.enabledPaymentMethods)];
+  if (!enabledPaymentMethods.length || enabledPaymentMethods.some((method) => method !== "cash" && method !== "mpesa")) throw new Error("Enable at least one supported payment method");
+  if (!enabledPaymentMethods.includes(input.defaultPaymentMethod)) throw new Error("Default payment method must be enabled");
+  if (!Number.isFinite(input.maxStaffPriceDiscountPercent) || input.maxStaffPriceDiscountPercent < 0 || input.maxStaffPriceDiscountPercent > 100) throw new Error("Maximum staff markdown must be between 0 and 100 percent");
+  const now = new Date().toISOString();
+  const settings: BusinessCheckoutSettingsRecord = {
+    enabledPaymentMethods,
+    defaultPaymentMethod: input.defaultPaymentMethod,
+    requireCustomerName: Boolean(input.requireCustomerName),
+    allowStaffPriceOverrides: Boolean(input.allowStaffPriceOverrides),
+    maxStaffPriceDiscountPercent: Math.round(input.maxStaffPriceDiscountPercent * 100) / 100,
+    updatedAt: now,
+  };
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
+    { Put: { TableName: TABLE_NAME, Item: { ...checkoutSettingsKey(tenantId), entityType: "checkout_settings", tenantId, ...settings } } },
+    auditPut(tenantId, { action: "settings.checkout.updated", entityType: "checkout_settings", entityId: "business", reason: "Payment and checkout policies updated", actorId: actor.id, actorName: actor.name }, now),
+  ] }));
+  return settings;
+};
+
 export const updateBusinessMeasurementSettings = async (
   tenantId: string,
   packageLabels: PackageUnitLabelRecord[],
@@ -509,6 +573,7 @@ export const updateBusinessSettings = async (
   tenantId: string,
   input: BusinessBrandingInput,
   actor: { id: string; name: string },
+  audit = { action: "settings.branding.updated", reason: "Business and receipt settings updated" },
 ) => {
   const now = new Date().toISOString();
   const previousSettings = await getBusinessSettings(tenantId);
@@ -555,9 +620,48 @@ export const updateBusinessSettings = async (
       },
       ConditionExpression: "attribute_exists(partitionKey)",
     } },
-    auditPut(tenantId, { action: "settings.branding.updated", entityType: "business_settings", entityId: "business", reason: "Receipt branding updated", actorId: actor.id, actorName: actor.name }, now),
+    auditPut(tenantId, { action: audit.action, entityType: "business_settings", entityId: "business", reason: audit.reason, actorId: actor.id, actorName: actor.name }, now),
   ] }));
   return branding;
+};
+
+export const updateBusinessDetails = async (
+  tenantId: string,
+  input: Pick<BusinessBrandingInput, "businessName" | "address" | "phone" | "email" | "vatRegistered" | "kraPin" | "vatEffectiveFrom" | "withholdingVatAgent">,
+  actor: { id: string; name: string },
+) => {
+  const current = await getBusinessSettings(tenantId);
+  const vatRegistered = input.vatRegistered ?? current.vatRegistered;
+  const kraPin = (input.kraPin ?? current.kraPin).trim().toUpperCase();
+  const vatEffectiveFrom = input.vatEffectiveFrom === undefined ? current.vatEffectiveFrom : input.vatEffectiveFrom;
+  const withholdingVatAgent = input.withholdingVatAgent ?? current.withholdingVatAgent;
+  if (vatRegistered) {
+    if (!/^[A-Z0-9]{8,16}$/.test(kraPin)) throw new Error("Enter a valid KRA PIN before enabling VAT");
+    if (!vatEffectiveFrom || !/^\d{4}-\d{2}-\d{2}$/.test(vatEffectiveFrom) || Number.isNaN(Date.parse(`${vatEffectiveFrom}T00:00:00Z`))) throw new Error("Enter a valid VAT effective date");
+    if (!current.vatRegistered && (await listProducts(tenantId)).some((product) => product.status === "active" && !isVatClass(product.vatClass))) throw new Error("Classify every active product before enabling VAT");
+  }
+  const now = new Date().toISOString();
+  const details = { businessName: input.businessName.trim(), address: input.address.trim(), phone: input.phone.trim(), email: input.email.trim().toLowerCase(), vatRegistered, kraPin: vatRegistered ? kraPin : "", vatEffectiveFrom: vatRegistered ? vatEffectiveFrom : null, withholdingVatAgent: vatRegistered && withholdingVatAgent, updatedAt: now };
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
+    { Update: { TableName: TABLE_NAME, Key: businessSettingsKey(tenantId), UpdateExpression: "SET businessName = :businessName, address = :address, phone = :phone, email = :email, vatRegistered = :vatRegistered, kraPin = :kraPin, vatEffectiveFrom = :vatEffectiveFrom, withholdingVatAgent = :withholdingVatAgent, updatedAt = :updatedAt", ExpressionAttributeValues: { ":businessName": details.businessName, ":address": details.address, ":phone": details.phone, ":email": details.email, ":vatRegistered": details.vatRegistered, ":kraPin": details.kraPin, ":vatEffectiveFrom": details.vatEffectiveFrom, ":withholdingVatAgent": details.withholdingVatAgent, ":updatedAt": now }, ConditionExpression: "attribute_exists(partitionKey)" } },
+    auditPut(tenantId, { action: "settings.business.updated", entityType: "business_settings", entityId: "business", reason: "Business and tax details updated", actorId: actor.id, actorName: actor.name }, now),
+  ] }));
+  return { ...current, ...details };
+};
+
+export const updateBusinessReceiptSettings = async (
+  tenantId: string,
+  input: Pick<BusinessBrandingInput, "thankYouMessage" | "returnPolicy">,
+  actor: { id: string; name: string },
+) => {
+  const current = await getBusinessSettings(tenantId);
+  const now = new Date().toISOString();
+  const receipt = { thankYouMessage: input.thankYouMessage.trim(), returnPolicy: input.returnPolicy.trim(), updatedAt: now };
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
+    { Update: { TableName: TABLE_NAME, Key: businessSettingsKey(tenantId), UpdateExpression: "SET thankYouMessage = :thankYouMessage, returnPolicy = :returnPolicy, updatedAt = :updatedAt", ExpressionAttributeValues: { ":thankYouMessage": receipt.thankYouMessage, ":returnPolicy": receipt.returnPolicy, ":updatedAt": now }, ConditionExpression: "attribute_exists(partitionKey)" } },
+    auditPut(tenantId, { action: "settings.receipts.updated", entityType: "business_settings", entityId: "business", reason: "Global receipt settings updated", actorId: actor.id, actorName: actor.name }, now),
+  ] }));
+  return { ...current, ...receipt };
 };
 
 export const effectiveProductPrice = (product: ProductRecord, at = new Date()) => {
@@ -813,14 +917,14 @@ export const completeSale = async (
     paymentMethod: "cash" | "mpesa";
     amountTendered?: number | null;
     mpesaReference?: string | null;
-    items: Array<{ productId: string; variantId?: string | null; quantity: number }>;
+    items: Array<{ productId: string; variantId?: string | null; quantity: number; unitPriceOverride?: number | null; priceOverrideReason?: string | null }>;
     requestId: string;
   },
-  actor: { id: string; name: string; employeeCode?: string; storeName?: string },
+  actor: { id: string; name: string; employeeCode?: string; storeName?: string; role?: "admin" | "staff" },
 ) => {
   const previous = await existingIdempotentResult<SaleRecord>(tenantId, "complete_sale", input.requestId, input); if (previous) return previous;
-  const grouped = new Map<string, { productId: string; variantId?: string | null; quantity: number }>();
-  for (const item of input.items) { const key = `${item.productId}#${item.variantId ?? "default"}`; const current = grouped.get(key); grouped.set(key, { ...item, quantity: (current?.quantity ?? 0) + item.quantity }); }
+  const grouped = new Map<string, { productId: string; variantId?: string | null; quantity: number; unitPriceOverride?: number | null; priceOverrideReason?: string | null }>();
+  for (const item of input.items) { const key = `${item.productId}#${item.variantId ?? "default"}`; const current = grouped.get(key); if (current && (current.unitPriceOverride !== item.unitPriceOverride || current.priceOverrideReason !== item.priceOverrideReason)) throw new Error("Duplicate sale lines must use the same price override"); grouped.set(key, { ...item, quantity: (current?.quantity ?? 0) + item.quantity }); }
   if (grouped.size === 0) throw new Error("Add at least one product to the sale");
   if (grouped.size > 40) throw new Error("A sale can contain at most 40 distinct variants");
   if ([...grouped.values()].some(({ quantity }) => !Number.isInteger(quantity) || quantity <= 0)) throw new Error("Sale quantities must be positive whole numbers");
@@ -832,12 +936,27 @@ export const completeSale = async (
   const inventoryByProduct = new Map<string, number>(); for (const item of resolvedItems) inventoryByProduct.set(item.productId, (inventoryByProduct.get(item.productId) ?? 0) + item.inventoryQuantity);
   const now = new Date().toISOString();
   const id = randomUUID();
-  const [allocations, cashShift, store, globalBranding] = await Promise.all([allocateLots(tenantId, input.storeId, [...inventoryByProduct].map(([productId, quantity]) => ({ productId, quantity }))), input.paymentMethod === "cash" ? getOpenCashShift(tenantId, input.storeId, actor.id) : Promise.resolve(null), getStore(tenantId, input.storeId), getBusinessSettings(tenantId)]);
+  const [allocations, cashShift, store, globalBranding, checkoutSettings] = await Promise.all([allocateLots(tenantId, input.storeId, [...inventoryByProduct].map(([productId, quantity]) => ({ productId, quantity }))), input.paymentMethod === "cash" ? getOpenCashShift(tenantId, input.storeId, actor.id) : Promise.resolve(null), getStore(tenantId, input.storeId), getBusinessSettings(tenantId), getBusinessCheckoutSettings(tenantId)]);
   if (!store || store.status !== "active") throw new Error("Selected store is unavailable");
+  if (!checkoutSettings.enabledPaymentMethods.includes(input.paymentMethod)) throw new Error("This payment method is disabled for this business");
+  if (checkoutSettings.requireCustomerName && !input.customerName?.trim()) throw new Error("Customer name is required for checkout");
   if (input.paymentMethod === "cash" && !cashShift) throw new Error("Open a cash shift before accepting cash sales");
   const remainingCostByProduct = new Map([...inventoryByProduct].map(([productId, inventoryQuantity]) => [productId, { quantity: inventoryQuantity, costMinor: (allocations.get(productId) ?? []).reduce((sum, allocation) => sum + allocation.costMinor, 0) }]));
-  const saleItems: SaleItemRecord[] = resolvedItems.map(({ product, variant, quantity, inventoryQuantity }) => {
-    const defaultSale = variantsOf(product)[0]?.id === variant.id; const price = defaultSale ? effectiveProductPrice(product, new Date(now)) : variant.sellingPrice;
+  const saleItems: SaleItemRecord[] = resolvedItems.map(({ product, variant, quantity, inventoryQuantity, unitPriceOverride, priceOverrideReason }) => {
+    const defaultSale = variantsOf(product)[0]?.id === variant.id; const authoritativePrice = defaultSale ? effectiveProductPrice(product, new Date(now)) : variant.sellingPrice;
+    const overrideRequested = unitPriceOverride !== undefined && unitPriceOverride !== null && unitPriceOverride !== authoritativePrice;
+    const reason = priceOverrideReason?.trim() ?? "";
+    if (overrideRequested) {
+      if (!Number.isFinite(unitPriceOverride) || unitPriceOverride! < 0 || Math.round(unitPriceOverride! * 100) / 100 !== unitPriceOverride) throw new Error("Price overrides must be non-negative amounts with at most two decimal places");
+      if (reason.length < 3 || reason.length > 200) throw new Error("Enter a price override reason between 3 and 200 characters");
+      if (actor.role !== "admin") {
+        if (!checkoutSettings.allowStaffPriceOverrides) throw new Error("Staff price markdowns are disabled");
+        if (unitPriceOverride! > authoritativePrice) throw new Error("Staff cannot increase prices at checkout");
+        const minimumPrice = roundMoney(authoritativePrice * (1 - checkoutSettings.maxStaffPriceDiscountPercent / 100));
+        if (unitPriceOverride! < minimumPrice) throw new Error(`Staff markdown exceeds the ${checkoutSettings.maxStaffPriceDiscountPercent}% limit`);
+      }
+    }
+    const price = overrideRequested ? unitPriceOverride! : authoritativePrice;
     const remainingCost = remainingCostByProduct.get(product.id)!;
     const lineCostMinor = inventoryQuantity === remainingCost.quantity ? remainingCost.costMinor : Math.round(remainingCost.costMinor * inventoryQuantity / remainingCost.quantity);
     remainingCost.quantity -= inventoryQuantity; remainingCost.costMinor -= lineCostMinor;
@@ -846,9 +965,9 @@ export const completeSale = async (
     const activeVat = vatApplies(globalBranding, now) && isVatClass(product.vatClass);
     const vatClass = activeVat ? product.vatClass! : null;
     const breakdown = activeVat ? inclusiveVatBreakdown(Math.round(total * 100), vatClass!, now) : { taxableMinor: 0, vatMinor: 0, rateBasisPoints: 0 };
-    return { productId: product.id, productName: product.name, sku: variant.sku || product.sku, barcode: variant.barcode || product.barcode, variantId: variant.id, variantName: variant.name, quantityInBaseUnits: variant.quantityInBaseUnits, inventoryQuantity, quantity, price, regularPrice: variant.sellingPrice, promotionApplied: price < variant.sellingPrice, cost, total, vatClass, vatRateBasisPoints: breakdown.rateBasisPoints, taxableAmount: breakdown.taxableMinor / 100, vatAmount: breakdown.vatMinor / 100 };
+    return { productId: product.id, productName: product.name, sku: variant.sku || product.sku, barcode: variant.barcode || product.barcode, variantId: variant.id, variantName: variant.name, quantityInBaseUnits: variant.quantityInBaseUnits, inventoryQuantity, quantity, price, priceBeforeOverride: overrideRequested ? authoritativePrice : undefined, priceOverrideReason: overrideRequested ? reason : undefined, regularPrice: variant.sellingPrice, promotionApplied: authoritativePrice < variant.sellingPrice, cost, total, vatClass, vatRateBasisPoints: breakdown.rateBasisPoints, taxableAmount: breakdown.taxableMinor / 100, vatAmount: breakdown.vatMinor / 100 };
   });
-  const subtotal = roundMoney(saleItems.reduce((sum, item) => sum + (item.regularPrice ?? item.price) * item.quantity, 0));
+  const subtotal = roundMoney(saleItems.reduce((sum, item) => sum + Math.max(item.regularPrice ?? item.price, item.priceBeforeOverride ?? item.price, item.price) * item.quantity, 0));
   const totalAmount = roundMoney(saleItems.reduce((sum, item) => sum + item.total, 0));
   const discount = roundMoney(subtotal - totalAmount);
   const receiptBranding: BusinessSettingsRecord = { ...globalBranding, businessName: store.receiptBusinessName?.trim() || globalBranding.businessName, address: store.receiptAddress?.trim() || store.address || globalBranding.address, phone: store.receiptPhone?.trim() || globalBranding.phone, email: store.receiptEmail?.trim() || globalBranding.email, thankYouMessage: store.receiptFooter?.trim() || globalBranding.thankYouMessage, returnPolicy: store.receiptReturnPolicy?.trim() || globalBranding.returnPolicy, storeName: store.name, updatedAt: now };
@@ -904,6 +1023,8 @@ export const completeSale = async (
     transaction.push({ Put: { TableName: TABLE_NAME, Item: { ...mpesaPaymentKey(tenantId, paymentReference), entityType: "payment_lookup", tenantId, saleId: id, orderNumber: sale.orderNumber, createdAt: now }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
   }
   if (cashShift) transaction.push({ Update: { TableName: TABLE_NAME, Key: cashShiftKey(tenantId, cashShift.id), UpdateExpression: "SET cashSalesTotal = cashSalesTotal + :amount, updatedAt = :now", ConditionExpression: "#status = :open", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":amount": totalAmount, ":now": now, ":open": "open" } } });
+  const overriddenItems = saleItems.filter((item) => item.priceBeforeOverride !== undefined);
+  if (overriddenItems.length) transaction.push(auditPut(tenantId, { action: "checkout.price_overrides.applied", entityType: "sale", entityId: id, reason: overriddenItems.map((item) => `${item.productName}: ${item.priceBeforeOverride!.toFixed(2)} to ${item.price.toFixed(2)} (${item.priceOverrideReason})`).join("; ").slice(0, 1000), actorId: actor.id, actorName: actor.name }, now));
   if (transaction.length + 1 > 100) throw new Error("Sale uses too many inventory lots to complete atomically; reduce the basket size");
   return commitIdempotent(tenantId, "complete_sale", input.requestId, input, sale, transaction);
 };

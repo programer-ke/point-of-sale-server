@@ -27,6 +27,7 @@ import {
   ensureBusinessSettings,
   findProduct,
   getBusinessMeasurementSettings,
+  getBusinessCheckoutSettings,
   getBusinessSettings,
   deleteStaffProfile,
   getProduct,
@@ -47,6 +48,9 @@ import {
   updateProduct,
   updateCategory,
   updateBusinessSettings,
+  updateBusinessDetails,
+  updateBusinessReceiptSettings,
+  updateBusinessCheckoutSettings,
   updateBusinessMeasurementSettings,
   upsertStaffProfile,
   productUnitsOf,
@@ -396,6 +400,10 @@ export const resolvers = {
       requireStaff(context);
       return getBusinessMeasurementSettings(tenant(context));
     },
+    businessCheckoutSettings: (_: unknown, _args: unknown, context: GraphQLContext) => {
+      requireStaff(context);
+      return getBusinessCheckoutSettings(tenant(context));
+    },
     business: async (_: unknown, _args: unknown, context: GraphQLContext) => {
       const admin = requireAdmin(context);
       const settings = await getBusinessSettings(tenant(context));
@@ -590,6 +598,27 @@ export const resolvers = {
       if (input.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email.trim())) throw new Error("Enter a valid contact email");
       return updateBusinessSettings(tenant(context), input, actor(context));
     },
+    updateBusinessDetails: async (
+      _: unknown,
+      input: { businessName: string; address: string; phone: string; email: string; vatRegistered: boolean; kraPin: string; vatEffectiveFrom?: string | null; withholdingVatAgent: boolean },
+      context: GraphQLContext,
+    ) => {
+      requireAdmin(context);
+      if (input.businessName.trim().length < 2) throw new Error("Business name is required");
+      if (input.address.trim().length < 3) throw new Error("Business address is required");
+      if (input.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email.trim())) throw new Error("Enter a valid contact email");
+      return updateBusinessDetails(tenant(context), input, actor(context));
+    },
+    updateBusinessReceiptSettings: (_: unknown, input: { thankYouMessage: string; returnPolicy: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      if (input.thankYouMessage.trim().length < 3) throw new Error("Thank-you message is required");
+      if (input.returnPolicy.trim().length < 3) throw new Error("Return policy is required");
+      return updateBusinessReceiptSettings(tenant(context), input, actor(context));
+    },
+    updateBusinessCheckoutSettings: (_: unknown, input: { enabledPaymentMethods: Array<"cash" | "mpesa">; defaultPaymentMethod: "cash" | "mpesa"; requireCustomerName: boolean; allowStaffPriceOverrides: boolean; maxStaffPriceDiscountPercent: number }, context: GraphQLContext) => {
+      requireAdmin(context);
+      return updateBusinessCheckoutSettings(tenant(context), input, actor(context));
+    },
     updateBusinessMeasurementSettings: (_: unknown, { packageLabels }: { packageLabels: Array<{ code: string; name: string; pluralName: string; symbol: string; status: "active" | "inactive" }> }, context: GraphQLContext) => {
       requireAdmin(context);
       return updateBusinessMeasurementSettings(tenant(context), packageLabels, actor(context));
@@ -653,7 +682,7 @@ export const resolvers = {
         paymentMethod: "cash" | "mpesa";
         amountTendered?: number | null;
         mpesaReference?: string | null;
-        items: Array<{ productId: string; variantId?: string | null; quantity: number }>;
+        items: Array<{ productId: string; variantId?: string | null; quantity: number; unitPriceOverride?: number | null; priceOverrideReason?: string | null }>;
         requestId: string;
       },
       context: GraphQLContext,
@@ -662,7 +691,7 @@ export const resolvers = {
       if (!(args.paymentMethod === "cash" || args.paymentMethod === "mpesa")) throw new Error("Payment method must be cash or M-Pesa");
       const tenantId = tenant(context);
       const [user, profile, store] = await Promise.all([getCognitoUser(authenticated.username), getStaffProfile(tenantId, authenticated.id), selectedStore(context, args.storeId)]);
-      return completeSale(tenantId, { ...args, storeId: store.id }, { id: authenticated.id, name: user.name, employeeCode: profile?.employeeCode, storeName: store.name });
+      return completeSale(tenantId, { ...args, storeId: store.id }, { id: authenticated.id, name: user.name, employeeCode: profile?.employeeCode, storeName: store.name, role: activeRole(authenticated) });
     },
     createStore: (_: unknown, input: Parameters<typeof createStore>[1], context: GraphQLContext) => { requireAdmin(context); return createStore(tenant(context), input, actor(context)); },
     updateStore: async (_: unknown, { id, ...input }: { id: string } & Parameters<typeof updateStore>[2], context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); if (input.status === "inactive") { const memberships = await listTenantMemberships(tenantId); const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId)); if ([...profiles.values()].some((profile) => profile.storeIds?.includes(id) || profile.storeId === id)) throw new Error("Reassign staff before deactivating this store"); } return updateStore(tenantId, id, input); },
