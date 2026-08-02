@@ -28,6 +28,10 @@ async function main() {
   assert.equal(measurements.convertMeasurementToBaseUnits(2.5, "kilogram", "gram"), 2500, "fractional kilogram sale quantities must remain exact");
   assert.equal(measurements.convertMeasurementToBaseUnits(2, "tonne", "gram"), 2000000, "supplier tonnes must convert to exact weight inventory");
   assert.throws(() => measurements.convertMeasurementToBaseUnits(1, "litre", "gram"), /not compatible/, "measurement dimensions must not be mixed");
+  const eggLot = { remainingQuantity: 30, unitCost: 100 / 30, remainingCostMinor: 10_000 };
+  const firstEggCost = supply.allocatedLotCostMinor(eggLot, 1);
+  const remainingEggLot = { ...eggLot, remainingQuantity: 29, remainingCostMinor: 10_000 - firstEggCost };
+  assert.equal(firstEggCost + supply.allocatedLotCostMinor(remainingEggLot, 29), 10_000, "partial and final depletion must conserve the exact KES 100 lot value");
   let transaction;
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") {

@@ -50,6 +50,7 @@ export const typeDefs = `#graphql
     stockUnit: String!
     tracksExpiry: Boolean!
     saleVariants: [SaleVariant!]!
+    productUnits: [ProductUnit!]!
     promotionPrice: Float
     promotionStartsAt: String
     promotionEndsAt: String
@@ -62,6 +63,7 @@ export const typeDefs = `#graphql
   }
 
   type SaleVariant { id: ID!, name: String!, sku: String!, barcode: String!, quantityInBaseUnits: Int!, sellingPrice: Float!, status: String! }
+  type ProductUnit { id: ID!, labelCode: String!, name: String!, parentUnitId: ID, multiplier: Int!, quantityInBaseUnits: Int!, sellable: Boolean!, purchasable: Boolean!, sellingPrice: Float, unitRate: Float, estimatedCost: Float, marginAmount: Float, marginPercent: Float, belowCost: Boolean!, sku: String!, barcode: String!, status: String! }
 
   type ProductPage {
     items: [Product!]!
@@ -186,6 +188,11 @@ export const typeDefs = `#graphql
     name: String!
   }
 
+  type StandardMeasurementUnit { code: String!, dimension: String!, baseUnit: String!, baseUnits: Int! }
+  type PackageUnitLabel { code: String!, name: String!, pluralName: String!, symbol: String!, status: String! }
+  input PackageUnitLabelInput { code: String!, name: String!, pluralName: String!, symbol: String!, status: String = "active" }
+  type BusinessMeasurementSettings { standardUnits: [StandardMeasurementUnit!]!, packageLabels: [PackageUnitLabel!]!, updatedAt: String! }
+
   type ReportProduct {
     productId: ID!
     productName: String!
@@ -229,6 +236,7 @@ export const typeDefs = `#graphql
     quantity: Int!
   }
   input SaleVariantInput { id: ID, name: String!, sku: String = "", barcode: String = "", quantityInBaseUnits: Int!, sellingPrice: Float!, status: String = "active" }
+  input ProductUnitInput { id: ID, labelCode: String!, name: String!, parentUnitId: ID, multiplier: Int!, quantityInBaseUnits: Int, sellable: Boolean!, purchasable: Boolean!, sellingPrice: Float, sku: String = "", barcode: String = "", status: String = "active" }
 
   type Store {
     id: ID!
@@ -262,6 +270,7 @@ export const typeDefs = `#graphql
   type SupplierProduct {
     supplierId: ID!
     productId: ID!
+    productUnitId: ID
     supplierSku: String!
     purchaseUnit: String!
     purchaseQuantity: Float!
@@ -297,6 +306,7 @@ export const typeDefs = `#graphql
     baseUnit: String!
     stockUnit: String!
     supplierSku: String!
+    productUnitId: ID
     purchaseUnit: String!
     purchaseQuantity: Float!
     purchaseMeasurementUnit: String!
@@ -500,6 +510,7 @@ export const typeDefs = `#graphql
     stockAudits(limit: Int = 100): [AuditEvent!]!
     dashboard(days: Int = 1, personal: Boolean = false, compact: Boolean = false): DashboardSummary!
     businessSettings: BusinessSettings!
+    businessMeasurementSettings: BusinessMeasurementSettings!
     business: Business!
     businessReport(from: String!, to: String!, storeId: ID): BusinessReport!
     stores(activeOnly: Boolean = false): [Store!]!
@@ -538,19 +549,20 @@ export const typeDefs = `#graphql
     updateMyProfile(phone: String!): StaffProfile!
     updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, storeId: ID!, storeIds: [ID!] = [], phone: String!): StaffProfile!
     updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
+    updateBusinessMeasurementSettings(packageLabels: [PackageUnitLabelInput!]!): BusinessMeasurementSettings!
 
     createCategory(code: String!, name: String!, description: String = "", parentId: ID): Category!
     updateCategory(id: ID!, code: String!, name: String!, description: String = "", parentId: ID): Category!
     deleteCategory(id: ID!): Boolean!
-    createProduct(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, stockUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!): Product!
-    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, stockUnit: String, tracksExpiry: Boolean, saleVariants: [SaleVariantInput!], promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
+    createProduct(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, stockUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!, productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false): Product!
+    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, stockUnit: String, tracksExpiry: Boolean, saleVariants: [SaleVariantInput!], productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false, promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
     archiveProduct(id: ID!): Product!
     completeSale(storeId: ID, customerName: String, paymentMethod: String!, amountTendered: Float, mpesaReference: String, items: [SaleItemInput!]!, requestId: ID!): Sale!
     createStore(code: String!, name: String!, address: String = "", receiptBusinessName: String = "", receiptAddress: String = "", receiptPhone: String = "", receiptEmail: String = "", receiptFooter: String = "", receiptReturnPolicy: String = ""): Store!
     updateStore(id: ID!, name: String, address: String, receiptBusinessName: String, receiptAddress: String, receiptPhone: String, receiptEmail: String, receiptFooter: String, receiptReturnPolicy: String, status: String): Store!
     createSupplier(code: String!, name: String!, contactName: String = "", phone: String = "", email: String = "", address: String = ""): Supplier!
     updateSupplier(id: ID!, name: String, contactName: String, phone: String, email: String, address: String, status: String): Supplier!
-    upsertSupplierProduct(supplierId: ID!, productId: ID!, supplierSku: String = "", purchaseUnit: String!, purchaseQuantity: Float!, purchaseMeasurementUnit: String!, lastPurchasePrice: Float, preferred: Boolean!): SupplierProduct!
+    upsertSupplierProduct(supplierId: ID!, productId: ID!, productUnitId: ID, supplierSku: String = "", purchaseUnit: String = "", purchaseQuantity: Float = 1, purchaseMeasurementUnit: String = "each", lastPurchasePrice: Float, preferred: Boolean!): SupplierProduct!
     removeSupplierProduct(supplierId: ID!, productId: ID!): Boolean!
     upsertStorePolicy(storeId: ID!, productId: ID!, reorderPoint: Int!, targetQuantity: Int!): StoreProductPolicy!
     createPurchaseOrder(supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!, requestId: ID!): PurchaseOrder!

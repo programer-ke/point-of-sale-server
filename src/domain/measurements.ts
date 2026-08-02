@@ -7,7 +7,7 @@ export type MeasurementUnitDefinition = {
   baseUnits: number;
 };
 
-const definitions = [
+export const STANDARD_MEASUREMENT_DEFINITIONS = [
   { code: "each", dimension: "count", baseUnit: "each", baseUnits: 1 },
   { code: "gram", dimension: "weight", baseUnit: "gram", baseUnits: 1 },
   { code: "kilogram", dimension: "weight", baseUnit: "gram", baseUnits: 1_000 },
@@ -23,7 +23,7 @@ const definitions = [
   { code: "cubic_metre", dimension: "solid_volume", baseUnit: "cubic_centimetre", baseUnits: 1_000_000 },
 ] satisfies MeasurementUnitDefinition[];
 
-export const MEASUREMENT_UNITS: Record<string, MeasurementUnitDefinition> = Object.fromEntries(definitions.map((unit) => [unit.code, unit]));
+export const MEASUREMENT_UNITS: Record<string, MeasurementUnitDefinition> = Object.fromEntries(STANDARD_MEASUREMENT_DEFINITIONS.map((unit) => [unit.code, unit]));
 
 export const measurementUnit = (code: string) => {
   const unit = MEASUREMENT_UNITS[code.trim().toLowerCase()];

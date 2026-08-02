@@ -26,6 +26,7 @@ import {
   effectiveProductPrice,
   ensureBusinessSettings,
   findProduct,
+  getBusinessMeasurementSettings,
   getBusinessSettings,
   deleteStaffProfile,
   getProduct,
@@ -46,10 +47,13 @@ import {
   updateProduct,
   updateCategory,
   updateBusinessSettings,
+  updateBusinessMeasurementSettings,
   upsertStaffProfile,
+  productUnitsOf,
   type ProductRecord,
   type SaleRecord,
 } from "../repositories/pos-repository";
+import { measurementUnit } from "../domain/measurements";
 import {
   createNotification,
   listNotifications,
@@ -271,6 +275,18 @@ export const resolvers = {
   Product: {
     effectivePrice: (product: ProductRecord) => effectiveProductPrice(product),
     onPromotion: (product: ProductRecord) => effectiveProductPrice(product) < product.sellingPrice,
+    productUnits: (product: ProductRecord & { storeStock?: { quantity: number; inventoryValue: number } | null }) => {
+      const fallbackBaseCost = product.buyingPrice / measurementUnit(product.stockUnit).baseUnits;
+      const baseCost = product.storeStock && product.storeStock.quantity > 0
+        ? product.storeStock.inventoryValue / product.storeStock.quantity
+        : fallbackBaseCost;
+      return productUnitsOf(product).map((unit) => {
+        const estimatedCost = baseCost * unit.quantityInBaseUnits;
+        const sellingPrice = unit.sellingPrice ?? null;
+        const marginAmount = sellingPrice == null ? null : sellingPrice - estimatedCost;
+        return { ...unit, unitRate: sellingPrice == null ? null : sellingPrice / unit.quantityInBaseUnits, estimatedCost, marginAmount, marginPercent: sellingPrice == null || sellingPrice === 0 ? null : marginAmount! / sellingPrice, belowCost: sellingPrice != null && sellingPrice < estimatedCost };
+      });
+    },
   },
   Sale: {
     receiptBranding: (sale: SaleRecord) => sale.receiptBranding,
@@ -316,9 +332,12 @@ export const resolvers = {
       const tenantId = tenant(context); const store = await selectedStore(context, args.storeId); const [page, stock] = await Promise.all([getProductPage(tenantId, args), storeStock(tenantId, store.id)]); const byProduct = new Map(stock.map((item) => [item.productId, item]));
       return { ...page, items: page.items.map((product) => ({ ...product, storeStock: byProduct.get(product.id) ?? { storeId: store.id, productId: product.id, quantity: 0, inventoryValue: 0, reorderPoint: 0, targetQuantity: 0, lowStock: false } })) };
     },
-    product: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
+    product: async (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
       requireStaff(context);
-      return getProduct(tenant(context), id);
+      const tenantId = tenant(context); const product = await getProduct(tenantId, id); if (!product) return null;
+      const stores = await listStores(tenantId); const stock = (await Promise.all(stores.map((store) => storeStock(tenantId, store.id)))).flat().filter((item) => item.productId === id);
+      const quantity = stock.reduce((sum, item) => sum + item.quantity, 0); const inventoryValue = stock.reduce((sum, item) => sum + item.inventoryValue, 0);
+      return { ...product, storeStock: { storeId: "all", productId: id, quantity, inventoryValue, reorderPoint: 0, targetQuantity: 0, lowStock: false } };
     },
     productLookup: async (_: unknown, { term, storeId }: { term: string; storeId?: string }, context: GraphQLContext) => {
       requireStaff(context);
@@ -360,6 +379,10 @@ export const resolvers = {
     businessSettings: (_: unknown, _args: unknown, context: GraphQLContext) => {
       requireStaff(context);
       return getBusinessSettings(tenant(context));
+    },
+    businessMeasurementSettings: (_: unknown, _args: unknown, context: GraphQLContext) => {
+      requireStaff(context);
+      return getBusinessMeasurementSettings(tenant(context));
     },
     business: async (_: unknown, _args: unknown, context: GraphQLContext) => {
       const admin = requireAdmin(context);
@@ -549,6 +572,10 @@ export const resolvers = {
       if (input.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email.trim())) throw new Error("Enter a valid contact email");
       return updateBusinessSettings(tenant(context), input, actor(context));
     },
+    updateBusinessMeasurementSettings: (_: unknown, { packageLabels }: { packageLabels: Array<{ code: string; name: string; pluralName: string; symbol: string; status: "active" | "inactive" }> }, context: GraphQLContext) => {
+      requireAdmin(context);
+      return updateBusinessMeasurementSettings(tenant(context), packageLabels, actor(context));
+    },
     createCategory: (_: unknown, args: { code: string; name: string; description: string; parentId?: string | null }, context: GraphQLContext) => {
       requireAdmin(context);
       return createCategory(tenant(context), { ...validateCategory(args), status: "active" }, actor(context));
@@ -623,7 +650,7 @@ export const resolvers = {
     updateStore: async (_: unknown, { id, ...input }: { id: string } & Parameters<typeof updateStore>[2], context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); if (input.status === "inactive") { const memberships = await listTenantMemberships(tenantId); const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId)); if ([...profiles.values()].some((profile) => profile.storeIds?.includes(id) || profile.storeId === id)) throw new Error("Reassign staff before deactivating this store"); } return updateStore(tenantId, id, input); },
     createSupplier: (_: unknown, input: { code: string; name: string; contactName: string; phone: string; email: string; address: string }, context: GraphQLContext) => { requireAdmin(context); return createSupplier(tenant(context), input); },
     updateSupplier: (_: unknown, { id, ...input }: { id: string; name?: string; contactName?: string; phone?: string; email?: string; address?: string; status?: "active" | "inactive" }, context: GraphQLContext) => { requireAdmin(context); return updateSupplier(tenant(context), id, input); },
-    upsertSupplierProduct: (_: unknown, input: { supplierId: string; productId: string; supplierSku: string; purchaseUnit: string; purchaseQuantity: number; purchaseMeasurementUnit: string; lastPurchasePrice?: number | null; preferred: boolean }, context: GraphQLContext) => { requireAdmin(context); return upsertSupplierProduct(tenant(context), { ...input, lastPurchasePrice: input.lastPurchasePrice ?? null }); },
+    upsertSupplierProduct: (_: unknown, input: { supplierId: string; productId: string; productUnitId?: string | null; supplierSku: string; purchaseUnit: string; purchaseQuantity: number; purchaseMeasurementUnit: string; lastPurchasePrice?: number | null; preferred: boolean }, context: GraphQLContext) => { requireAdmin(context); return upsertSupplierProduct(tenant(context), { ...input, lastPurchasePrice: input.lastPurchasePrice ?? null }); },
     removeSupplierProduct: (_: unknown, input: { supplierId: string; productId: string }, context: GraphQLContext) => { requireAdmin(context); return removeSupplierProduct(tenant(context), input.supplierId, input.productId); },
     upsertStorePolicy: (_: unknown, input: { storeId: string; productId: string; reorderPoint: number; targetQuantity: number }, context: GraphQLContext) => { requireAdmin(context); return upsertStorePolicy(tenant(context), input); },
     createPurchaseOrder: (_: unknown, input: { supplierId: string; storeId: string; expectedDeliveryDate?: string; notes: string; lines: Array<{ productId: string; orderedPurchaseQuantity: number; pricePerPurchaseUnit?: number }>; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createPurchaseOrder(tenant(context), input, actor(context), input.requestId); },

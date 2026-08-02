@@ -9,8 +9,9 @@ import {
   type TransactWriteCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import { dynamoDB, TABLE_NAME } from "../config/db";
-import { measurementUnit } from "../domain/measurements";
-import { allocateLots, commitIdempotent, existingIdempotentResult, getStore, listStores as listInventoryStores, lotDecrement, sellableLots, stockMovementPut, storeStock as getStoreStock } from "./supply-chain-repository";
+import { MEASUREMENT_UNITS, measurementUnit, STANDARD_MEASUREMENT_DEFINITIONS } from "../domain/measurements";
+import { productUnitsToSaleVariants, validateProductUnits, type ProductUnitInput, type ProductUnitRecord } from "../domain/product-units";
+import { allocateLots, commitIdempotent, existingIdempotentResult, getStore, listStores as listInventoryStores, lotDecrement, lotRemainingCostMinor, sellableLots, stockMovementPut, storeStock as getStoreStock } from "./supply-chain-repository";
 
 export interface SaleVariantRecord { id: string; name: string; sku: string; barcode: string; quantityInBaseUnits: number; sellingPrice: number; status: "active" | "inactive" }
 
@@ -40,6 +41,7 @@ export interface ProductRecord {
   stockUnit: string;
   tracksExpiry: boolean;
   saleVariants: SaleVariantRecord[];
+  productUnits?: ProductUnitRecord[];
   promotionPrice?: number | null;
   promotionStartsAt?: string | null;
   promotionEndsAt?: string | null;
@@ -134,6 +136,20 @@ export interface BusinessSettingsRecord {
   updatedAt: string;
 }
 
+export interface PackageUnitLabelRecord {
+  code: string;
+  name: string;
+  pluralName: string;
+  symbol: string;
+  status: "active" | "inactive";
+}
+
+export interface BusinessMeasurementSettingsRecord {
+  standardUnits: Array<{ code: string; dimension: string; baseUnit: string; baseUnits: number }>;
+  packageLabels: PackageUnitLabelRecord[];
+  updatedAt: string;
+}
+
 export type BusinessBrandingInput = Omit<BusinessSettingsRecord, "updatedAt" | "storeName">;
 
 export interface ReportProductRecord {
@@ -203,6 +219,7 @@ const mpesaPaymentKey = (tenantId: string, reference: string) => ({ partitionKey
 const cashShiftKey = (tenantId: string, id: string) => ({ partitionKey: tenantKey(tenantId, `CASH_SHIFT#${id}`), sortKey: "PROFILE" });
 const openCashShiftKey = (tenantId: string, storeId: string, cashierId: string) => ({ partitionKey: tenantKey(tenantId, `CASH_SHIFT_OPEN#${storeId}#${cashierId}`), sortKey: "PROFILE" });
 const businessSettingsKey = (tenantId: string) => ({ partitionKey: tenantKey(tenantId, "SETTINGS#BUSINESS"), sortKey: "PROFILE" });
+const measurementSettingsKey = (tenantId: string) => ({ partitionKey: tenantKey(tenantId, "SETTINGS#MEASUREMENTS"), sortKey: "PROFILE" });
 const defaultBusinessSettings: BusinessSettingsRecord = {
   businessName: "Tomkondi Supermarket",
   address: "Nairobi, Kenya",
@@ -214,8 +231,42 @@ const defaultBusinessSettings: BusinessSettingsRecord = {
   updatedAt: new Date(0).toISOString(),
 };
 
+const defaultPackageLabels: PackageUnitLabelRecord[] = [
+  ["pair", "Pair", "Pairs", "pr"], ["dozen", "Dozen", "Dozens", "doz"], ["pack", "Pack", "Packs", "pack"],
+  ["tray", "Tray", "Trays", "tray"], ["crate", "Crate", "Crates", "crate"], ["carton", "Carton", "Cartons", "ctn"],
+  ["case", "Case", "Cases", "case"], ["pallet", "Pallet", "Pallets", "pallet"],
+].map(([code, name, pluralName, symbol]) => ({ code, name, pluralName, symbol, status: "active" as const }));
+
+const normalizePackageCode = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+const measurementSettings = (packageLabels = defaultPackageLabels, updatedAt = new Date(0).toISOString()): BusinessMeasurementSettingsRecord => ({
+  standardUnits: STANDARD_MEASUREMENT_DEFINITIONS.map(({ code, dimension, baseUnit, baseUnits }) => ({ code, dimension, baseUnit, baseUnits })),
+  packageLabels,
+  updatedAt,
+});
+
 const defaultVariant = (product: Pick<ProductRecord, "id" | "name" | "sku" | "barcode" | "sellingPrice" | "stockUnit">): SaleVariantRecord => ({ id: `${product.id}-default`, name: `1 ${product.stockUnit}`, sku: product.sku, barcode: product.barcode, quantityInBaseUnits: measurementUnit(product.stockUnit).baseUnits, sellingPrice: product.sellingPrice, status: "active" });
 const variantsOf = (product: ProductRecord) => product.saleVariants?.length ? product.saleVariants : [defaultVariant(product)];
+const legacyProductUnits = (product: ProductRecord): ProductUnitRecord[] => variantsOf(product).map((variant) => ({
+  id: variant.id,
+  labelCode: variant.quantityInBaseUnits === measurementUnit(product.stockUnit).baseUnits ? product.stockUnit : "pack",
+  name: variant.name,
+  parentUnitId: null,
+  multiplier: 1,
+  quantityInBaseUnits: variant.quantityInBaseUnits,
+  sellable: true,
+  purchasable: true,
+  sellingPrice: variant.sellingPrice,
+  sku: variant.sku,
+  barcode: variant.barcode,
+  status: variant.status,
+}));
+export const productUnitsOf = (product: ProductRecord) => product.productUnits?.length ? product.productUnits : legacyProductUnits(product);
+const weightedProductBaseCost = async (tenantId: string, productId: string, fallback: number) => {
+  const stores = await listInventoryStores(tenantId);
+  const stock = (await Promise.all(stores.map((store) => getStoreStock(tenantId, store.id)))).flat().filter((item) => item.productId === productId);
+  const quantity = stock.reduce((sum, item) => sum + item.quantity, 0);
+  return quantity > 0 ? stock.reduce((sum, item) => sum + item.inventoryValue, 0) / quantity : fallback;
+};
 const validateVariants = (variants: SaleVariantRecord[]) => {
   if (!variants.length || variants.length > 20) throw new Error("A product must have 1 to 20 sale variants");
   const ids = new Set<string>(); const codes = new Set<string>();
@@ -384,6 +435,42 @@ export const getBusinessSettings = async (tenantId: string) => {
   const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: businessSettingsKey(tenantId) }));
   const settings = stripKeys<BusinessSettingsRecord>(response.Item);
   return { ...defaultBusinessSettings, ...(settings ?? {}) };
+};
+
+export const getBusinessMeasurementSettings = async (tenantId: string) => {
+  const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: measurementSettingsKey(tenantId) }));
+  const stored = stripKeys<{ packageLabels?: PackageUnitLabelRecord[]; updatedAt?: string }>(response.Item);
+  return measurementSettings(stored?.packageLabels?.length ? stored.packageLabels : defaultPackageLabels, stored?.updatedAt);
+};
+
+export const updateBusinessMeasurementSettings = async (
+  tenantId: string,
+  packageLabels: PackageUnitLabelRecord[],
+  actor: { id: string; name: string },
+) => {
+  if (!packageLabels.length || packageLabels.length > 50) throw new Error("Configure 1 to 50 package labels");
+  const codes = new Set<string>();
+  const normalized = packageLabels.map((label) => {
+    const code = normalizePackageCode(label.code);
+    const name = label.name.trim().replace(/\s+/g, " ");
+    const pluralName = label.pluralName.trim().replace(/\s+/g, " ");
+    const symbol = label.symbol.trim();
+    if (!code || !name || !pluralName || !symbol) throw new Error("Every package label requires a code, singular name, plural name, and symbol");
+    if (MEASUREMENT_UNITS[code]) throw new Error(`${code} is reserved for a standard measurement`);
+    if (codes.has(code)) throw new Error("Package label codes must be unique");
+    codes.add(code);
+    return { code, name, pluralName, symbol, status: label.status === "inactive" ? "inactive" as const : "active" as const };
+  });
+  const currentProducts = await listProducts(tenantId);
+  const activeCodes = new Set(normalized.filter(({ status }) => status === "active").map(({ code }) => code));
+  const removedInUse = currentProducts.flatMap(productUnitsOf).find((unit) => !activeCodes.has(unit.labelCode) && !MEASUREMENT_UNITS[unit.labelCode] && unit.status === "active");
+  if (removedInUse) throw new Error(`${removedInUse.name} is still used by an active product unit`);
+  const now = new Date().toISOString();
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
+    { Put: { TableName: TABLE_NAME, Item: { ...measurementSettingsKey(tenantId), entityType: "measurement_settings", tenantId, packageLabels: normalized, updatedAt: now } } },
+    auditPut(tenantId, { action: "settings.measurements.updated", entityType: "measurement_settings", entityId: "business", reason: "Measurement and package labels updated", actorId: actor.id, actorName: actor.name }, now),
+  ] }));
+  return measurementSettings(normalized, now);
 };
 
 export const ensureBusinessSettings = async (tenantId: string, businessName: string, email: string) => {
@@ -579,7 +666,7 @@ export const deleteCategory = async (
 
 export const createProduct = async (
   tenantId: string,
-  input: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry"> & { saleVariants?: SaleVariantRecord[]; promotionPrice?: number | null; promotionStartsAt?: string | null; promotionEndsAt?: string | null },
+  input: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry"> & { saleVariants?: SaleVariantRecord[]; productUnits?: ProductUnitInput[]; acknowledgeBelowCost?: boolean; promotionPrice?: number | null; promotionStartsAt?: string | null; promotionEndsAt?: string | null },
   actor: { id: string; name: string },
 ) => {
   const category = await getCategory(tenantId, input.categoryId);
@@ -587,10 +674,18 @@ export const createProduct = async (
   const id = randomUUID();
   const now = new Date().toISOString();
   const unit = measurementUnit(input.stockUnit);
-  const provisional = { id, ...input, name: input.name.trim(), description: input.description.trim(), baseUnit: unit.baseUnit, stockUnit: unit.code, sku: normalizeLookup(input.sku) || `PRD-${id.slice(0, 8).toUpperCase()}`, barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active" as const, createdAt: now, updatedAt: now };
+  const provisional = { id, name: input.name.trim(), description: input.description.trim(), categoryId: input.categoryId, sellingPrice: input.sellingPrice, buyingPrice: input.buyingPrice, tracksExpiry: input.tracksExpiry, promotionPrice: input.promotionPrice, promotionStartsAt: input.promotionStartsAt, promotionEndsAt: input.promotionEndsAt, baseUnit: unit.baseUnit, stockUnit: unit.code, sku: normalizeLookup(input.sku) || `PRD-${id.slice(0, 8).toUpperCase()}`, barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active" as const, createdAt: now, updatedAt: now };
   if (!provisional.name) throw new Error("Product name is required");
-  const saleVariants = validateVariants(input.saleVariants?.length ? input.saleVariants : [defaultVariant(provisional)]);
-  const product: ProductRecord = { ...provisional, sellingPrice: saleVariants[0].sellingPrice, saleVariants };
+  const settings = input.productUnits?.length ? await getBusinessMeasurementSettings(tenantId) : null;
+  const allowedLabels = new Set([...(settings?.standardUnits.filter(({ baseUnit }) => baseUnit === unit.baseUnit).map(({ code }) => code) ?? []), ...(settings?.packageLabels.filter(({ status }) => status === "active").map(({ code }) => code) ?? [])]);
+  const productUnits = input.productUnits?.length ? validateProductUnits(input.productUnits, allowedLabels) : undefined;
+  const saleVariants = validateVariants(productUnits ? productUnitsToSaleVariants(productUnits) : input.saleVariants?.length ? input.saleVariants : [defaultVariant(provisional)]);
+  if (productUnits) {
+    const baseCost = input.buyingPrice / unit.baseUnits;
+    const belowCost = productUnits.some((productUnit) => productUnit.sellable && (productUnit.sellingPrice ?? 0) < baseCost * productUnit.quantityInBaseUnits);
+    if (belowCost && !input.acknowledgeBelowCost) throw new Error("Acknowledge the below-cost product unit before saving");
+  }
+  const product: ProductRecord = { ...provisional, sellingPrice: saleVariants[0].sellingPrice, saleVariants, productUnits };
   const item = { ...productKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#PRODUCT"), accessSort: `${product.name.toLowerCase()}#${id}`, entityType: "product", tenantId, ...product };
   const lookupItems = [...productAliases(product).values()].map((alias) => ({ ...lookupKey(tenantId, alias.kind, alias.value), entityType: "product_lookup", tenantId, productId: id, variantId: alias.variantId }));
   for (const lookup of lookupItems) if ((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: { partitionKey: lookup.partitionKey, sortKey: lookup.sortKey } }))).Item) throw new Error(`${lookup.partitionKey.includes("#SKU#") ? "SKU" : "Barcode"} is already used by another product or sale variant`);
@@ -605,7 +700,7 @@ export const createProduct = async (
 export const updateProduct = async (
   tenantId: string,
   id: string,
-  updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "saleVariants" | "promotionPrice" | "promotionStartsAt" | "promotionEndsAt" | "status">>,
+  updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "saleVariants" | "promotionPrice" | "promotionStartsAt" | "promotionEndsAt" | "status">> & { productUnits?: ProductUnitInput[]; acknowledgeBelowCost?: boolean },
   actor: { id: string; name: string },
 ) => {
   const current = await getProduct(tenantId, id);
@@ -614,12 +709,22 @@ export const updateProduct = async (
   const category = await getCategory(tenantId, categoryId);
   if (!category) throw new Error("Category not found");
   const now = new Date().toISOString();
-  const saleVariants = validateVariants(updates.saleVariants ?? variantsOf(current));
+  const settings = updates.productUnits?.length ? await getBusinessMeasurementSettings(tenantId) : null;
+  const requestedUnit = measurementUnit(updates.stockUnit ?? current.stockUnit);
+  const allowedLabels = new Set([...(settings?.standardUnits.filter(({ baseUnit }) => baseUnit === requestedUnit.baseUnit).map(({ code }) => code) ?? []), ...(settings?.packageLabels.filter(({ status }) => status === "active").map(({ code }) => code) ?? []), ...productUnitsOf(current).map(({ labelCode }) => labelCode)]);
+  const productUnits = updates.productUnits?.length ? validateProductUnits(updates.productUnits, allowedLabels) : current.productUnits;
+  const saleVariants = validateVariants(productUnits && updates.productUnits ? productUnitsToSaleVariants(productUnits) : updates.saleVariants ?? variantsOf(current));
   const sellingPrice = updates.saleVariants ? saleVariants[0].sellingPrice : updates.sellingPrice ?? current.sellingPrice;
   const buyingPrice = updates.buyingPrice ?? current.buyingPrice;
-  const unit = measurementUnit(updates.stockUnit ?? current.stockUnit);
+  const unit = requestedUnit;
   if (unit.baseUnit !== current.baseUnit) throw new Error("A product's measurement type cannot be changed after creation");
-  const next: ProductRecord = { ...current, ...updates, saleVariants, sellingPrice, buyingPrice, baseUnit: unit.baseUnit, stockUnit: unit.code, tracksExpiry: updates.tracksExpiry ?? current.tracksExpiry, sku: normalizeLookup(updates.sku ?? current.sku), barcode: normalizeLookup(updates.barcode ?? current.barcode), categoryId, categoryName: category.name, updatedAt: now };
+  if (productUnits && updates.productUnits) {
+    const baseCost = await weightedProductBaseCost(tenantId, id, buyingPrice / unit.baseUnits);
+    const belowCost = productUnits.some((productUnit) => productUnit.sellable && (productUnit.sellingPrice ?? 0) < baseCost * productUnit.quantityInBaseUnits);
+    if (belowCost && !updates.acknowledgeBelowCost) throw new Error("Acknowledge the below-cost product unit before saving");
+  }
+  const { acknowledgeBelowCost: _acknowledgeBelowCost, ...storedUpdates } = updates;
+  const next: ProductRecord = { ...current, ...storedUpdates, productUnits, saleVariants, sellingPrice, buyingPrice, baseUnit: unit.baseUnit, stockUnit: unit.code, tracksExpiry: updates.tracksExpiry ?? current.tracksExpiry, sku: normalizeLookup(updates.sku ?? current.sku), barcode: normalizeLookup(updates.barcode ?? current.barcode), categoryId, categoryName: category.name, updatedAt: now };
   const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
   const oldAliases = productAliases(current); const newAliases = productAliases(next);
   for (const [aliasKey, alias] of newAliases) if (!oldAliases.has(aliasKey) && (await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: lookupKey(tenantId, alias.kind, alias.value) }))).Item) throw new Error(`${alias.kind === "SKU" ? "SKU" : "Barcode"} is already used by another product or sale variant`);
@@ -690,8 +795,15 @@ export const completeSale = async (
   const [allocations, cashShift, store, globalBranding] = await Promise.all([allocateLots(tenantId, input.storeId, [...inventoryByProduct].map(([productId, quantity]) => ({ productId, quantity }))), input.paymentMethod === "cash" ? getOpenCashShift(tenantId, input.storeId, actor.id) : Promise.resolve(null), getStore(tenantId, input.storeId), getBusinessSettings(tenantId)]);
   if (!store || store.status !== "active") throw new Error("Selected store is unavailable");
   if (input.paymentMethod === "cash" && !cashShift) throw new Error("Open a cash shift before accepting cash sales");
-  const costPerBaseUnit = new Map([...inventoryByProduct].map(([productId, inventoryQuantity]) => [productId, roundMoney((allocations.get(productId) ?? []).reduce((sum, allocation) => sum + allocation.quantity * allocation.lot.unitCost, 0) / inventoryQuantity)]));
-  const saleItems: SaleItemRecord[] = resolvedItems.map(({ product, variant, quantity, inventoryQuantity }) => { const defaultSale = variantsOf(product)[0]?.id === variant.id; const price = defaultSale ? effectiveProductPrice(product, new Date(now)) : variant.sellingPrice; const cost = roundMoney((costPerBaseUnit.get(product.id) ?? 0) * variant.quantityInBaseUnits); return { productId: product.id, productName: product.name, sku: variant.sku || product.sku, barcode: variant.barcode || product.barcode, variantId: variant.id, variantName: variant.name, quantityInBaseUnits: variant.quantityInBaseUnits, inventoryQuantity, quantity, price, regularPrice: variant.sellingPrice, promotionApplied: price < variant.sellingPrice, cost, total: roundMoney(price * quantity) }; });
+  const remainingCostByProduct = new Map([...inventoryByProduct].map(([productId, inventoryQuantity]) => [productId, { quantity: inventoryQuantity, costMinor: (allocations.get(productId) ?? []).reduce((sum, allocation) => sum + allocation.costMinor, 0) }]));
+  const saleItems: SaleItemRecord[] = resolvedItems.map(({ product, variant, quantity, inventoryQuantity }) => {
+    const defaultSale = variantsOf(product)[0]?.id === variant.id; const price = defaultSale ? effectiveProductPrice(product, new Date(now)) : variant.sellingPrice;
+    const remainingCost = remainingCostByProduct.get(product.id)!;
+    const lineCostMinor = inventoryQuantity === remainingCost.quantity ? remainingCost.costMinor : Math.round(remainingCost.costMinor * inventoryQuantity / remainingCost.quantity);
+    remainingCost.quantity -= inventoryQuantity; remainingCost.costMinor -= lineCostMinor;
+    const cost = lineCostMinor / 100 / quantity;
+    return { productId: product.id, productName: product.name, sku: variant.sku || product.sku, barcode: variant.barcode || product.barcode, variantId: variant.id, variantName: variant.name, quantityInBaseUnits: variant.quantityInBaseUnits, inventoryQuantity, quantity, price, regularPrice: variant.sellingPrice, promotionApplied: price < variant.sellingPrice, cost, total: roundMoney(price * quantity) };
+  });
   const subtotal = roundMoney(saleItems.reduce((sum, item) => sum + (item.regularPrice ?? item.price) * item.quantity, 0));
   const totalAmount = roundMoney(saleItems.reduce((sum, item) => sum + item.total, 0));
   const discount = roundMoney(subtotal - totalAmount);
@@ -818,7 +930,7 @@ export const businessReport = async (tenantId: string, range: { from: string; to
   const filteredSales = range.storeId ? sales.filter((sale) => sale.storeId === range.storeId) : sales;
   const quantityByProduct = new Map<string, number>();
   const valueByProduct = new Map<string, number>();
-  for (const lot of lots) { quantityByProduct.set(lot.productId, (quantityByProduct.get(lot.productId) ?? 0) + lot.remainingQuantity); valueByProduct.set(lot.productId, roundMoney((valueByProduct.get(lot.productId) ?? 0) + lot.remainingQuantity * lot.unitCost)); }
+  for (const lot of lots) { quantityByProduct.set(lot.productId, (quantityByProduct.get(lot.productId) ?? 0) + lot.remainingQuantity); valueByProduct.set(lot.productId, roundMoney((valueByProduct.get(lot.productId) ?? 0) + lotRemainingCostMinor(lot) / 100)); }
   const reorderByProduct = new Map<string, number>();
   for (const position of storePositions) reorderByProduct.set(position.productId, (reorderByProduct.get(position.productId) ?? 0) + position.reorderPoint);
   const products = catalogProducts.map((product) => ({ ...product, quantity: quantityByProduct.get(product.id) ?? 0, reorderPoint: reorderByProduct.get(product.id) }));
