@@ -10,10 +10,21 @@ repository.listSalesByStaff = async (_tenantId, staffId) => sales.filter((sale) 
 repository.getSale = async (_tenantId, id) => sales.find((sale) => sale.id === id) ?? null;
 repository.getStaffProfiles = async () => new Map();
 repository.getStaffProfile = async () => ({ storeId: "store-1", storeName: "Main Store" });
+repository.getBusinessSettings = async () => ({ businessName: "Test Business" });
 const supply = require("../dist/repositories/supply-chain-repository.js");
 supply.listStores = async () => [{ id: "store-1", code: "MAIN", name: "Main Store", status: "active" }];
 supply.getStore = async () => ({ id: "store-1", code: "MAIN", name: "Main Store", status: "active" });
 supply.storeStock = async () => [];
+let purchaseOrderEmailCalls = 0;
+supply.setPurchaseOrderStatus = async (_tenantId, id) => ({ id, status: "issued" });
+supply.getPurchaseOrder = async (_tenantId, id) => ({ id, status: "issued", supplierId: "supplier-1" });
+supply.getSupplier = async () => ({ id: "supplier-1", email: "supplier@example.com" });
+supply.recordPurchaseOrderEmailResult = async (_tenantId, _id, result) => ({ id: "po-1", status: "issued", ...result });
+const purchaseOrderEmail = require("../dist/services/purchase-order-email.js");
+purchaseOrderEmail.sendPurchaseOrderEmail = async () => {
+  purchaseOrderEmailCalls += 1;
+  return { emailStatus: "sent", emailRecipient: "supplier@example.com" };
+};
 const cognito = require("../dist/services/cognito.js");
 cognito.getCognitoUser = async (username) => ({ id: username.startsWith("staff-1") ? "staff-1" : "staff-2", username, name: username });
 const tenants = require("../dist/repositories/tenant-repository.js");
@@ -100,6 +111,23 @@ async function main() {
   const adminContext = {
     auth: { id: "admin-1", username: "admin@example.com", roles: ["admin"], activeRole: "admin", tenantId: "tenant-1" },
   };
+  const issueWithoutEmail = await server.executeOperation(
+    { query: `mutation { issuePurchaseOrder(id: "po-1") { id status } }` },
+    { contextValue: adminContext },
+  );
+  assert.equal(issueWithoutEmail.body.kind, "single");
+  assert.equal(issueWithoutEmail.body.singleResult.errors, undefined);
+  assert.equal(purchaseOrderEmailCalls, 0, "issuing a PO must not email the supplier by default");
+
+  const issueWithEmail = await server.executeOperation(
+    { query: `mutation { issuePurchaseOrder(id: "po-1", sendEmail: true) { id status emailStatus } }` },
+    { contextValue: adminContext },
+  );
+  assert.equal(issueWithEmail.body.kind, "single");
+  assert.equal(issueWithEmail.body.singleResult.errors, undefined);
+  assert.equal(issueWithEmail.body.singleResult.data.issuePurchaseOrder.emailStatus, "sent");
+  assert.equal(purchaseOrderEmailCalls, 1, "emailing an issued PO must require explicit opt-in");
+
   const allAdminSales = await server.executeOperation(
     { query: "query { sales { id } }" },
     { contextValue: adminContext },

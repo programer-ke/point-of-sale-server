@@ -555,7 +555,7 @@ export const typeDefs = `#graphql
     upsertStorePolicy(storeId: ID!, productId: ID!, reorderPoint: Int!, targetQuantity: Int!): StoreProductPolicy!
     createPurchaseOrder(supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!, requestId: ID!): PurchaseOrder!
     updatePurchaseOrder(id: ID!, supplierId: ID!, storeId: ID!, expectedDeliveryDate: String, notes: String = "", lines: [PurchaseOrderLineInput!]!): PurchaseOrder!
-    issuePurchaseOrder(id: ID!): PurchaseOrder!
+    issuePurchaseOrder(id: ID!, sendEmail: Boolean = false): PurchaseOrder!
     sendPurchaseOrderEmail(id: ID!): PurchaseOrder!
     closePurchaseOrder(id: ID!, reason: String!): PurchaseOrder!
     cancelPurchaseOrder(id: ID!, reason: String = "Cancelled"): PurchaseOrder!

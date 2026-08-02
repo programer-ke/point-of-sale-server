@@ -628,10 +628,11 @@ export const resolvers = {
     upsertStorePolicy: (_: unknown, input: { storeId: string; productId: string; reorderPoint: number; targetQuantity: number }, context: GraphQLContext) => { requireAdmin(context); return upsertStorePolicy(tenant(context), input); },
     createPurchaseOrder: (_: unknown, input: { supplierId: string; storeId: string; expectedDeliveryDate?: string; notes: string; lines: Array<{ productId: string; orderedPurchaseQuantity: number; pricePerPurchaseUnit?: number }>; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createPurchaseOrder(tenant(context), input, actor(context), input.requestId); },
     updatePurchaseOrder: (_: unknown, { id, ...input }: { id: string; supplierId: string; storeId: string; expectedDeliveryDate?: string; notes: string; lines: Array<{ productId: string; orderedPurchaseQuantity: number; pricePerPurchaseUnit?: number }> }, context: GraphQLContext) => { requireAdmin(context); return updatePurchaseOrder(tenant(context), id, input); },
-    issuePurchaseOrder: async (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
+    issuePurchaseOrder: async (_: unknown, { id, sendEmail = false }: { id: string; sendEmail?: boolean }, context: GraphQLContext) => {
       requireAdmin(context);
       const tenantId = tenant(context);
       const issued = await setPurchaseOrderStatus(tenantId, id, "issue", "");
+      if (!sendEmail) return issued;
       try {
         return await deliverPurchaseOrder(tenantId, id);
       } catch (error) {
