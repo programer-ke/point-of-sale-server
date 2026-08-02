@@ -89,6 +89,11 @@ import {
   listStores,
   listSupplierProducts,
   listSuppliers,
+  listSupplierInvoices,
+  listUnbilledGoodsReceipts,
+  createSupplierInvoiceForReceipt,
+  recordSupplierPayment,
+  voidSupplierPayment,
   listTransfers,
   listRequisitions,
   listStocktakes,
@@ -108,6 +113,7 @@ import {
   writeOffLot,
   type ReceiptLineInput,
 } from "../repositories/supply-chain-repository";
+import { accountingSummary } from "../repositories/accounting-repository";
 import { sendPurchaseOrderEmail } from "../services/purchase-order-email";
 const requireStaff = (context: GraphQLContext) => requireRole(context, ["admin", "staff"]);
 const requireAdmin = (context: GraphQLContext) => requireRole(context, ["admin"]);
@@ -272,6 +278,12 @@ const resolveCashierNames = async <T extends SaleRecord>(tenantId: string, sales
 };
 
 export const resolvers = {
+  BusinessSettings: {
+    vatRegistered: (settings: { vatRegistered?: boolean }) => settings.vatRegistered ?? false,
+    kraPin: (settings: { kraPin?: string }) => settings.kraPin ?? "",
+    vatEffectiveFrom: (settings: { vatEffectiveFrom?: string }) => settings.vatEffectiveFrom ?? "",
+    withholdingVatAgent: (settings: { withholdingVatAgent?: boolean }) => settings.withholdingVatAgent ?? false,
+  },
   Product: {
     effectivePrice: (product: ProductRecord) => effectiveProductPrice(product),
     onPromotion: (product: ProductRecord) => effectiveProductPrice(product) < product.sellingPrice,
@@ -442,10 +454,14 @@ export const resolvers = {
       const user = requireStaff(context);
       return listNotifications(tenant(context), user.id, limit);
     },
+    supplierInvoices: (_: unknown, args: { from?: string; to?: string; storeId?: string; supplierId?: string; status?: "unpaid" | "partial" | "paid" | "overdue" }, context: GraphQLContext) => { requireAdmin(context); return listSupplierInvoices(tenant(context), args); },
+    unbilledGoodsReceipts: (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return listUnbilledGoodsReceipts(tenant(context)); },
+    accountingSummary: (_: unknown, args: { from: string; to: string; storeId?: string; supplierId?: string }, context: GraphQLContext) => { requireAdmin(context); const range = validateDateRange(args.from, args.to) as { from: string; to: string }; return accountingSummary(tenant(context), { ...range, storeId: args.storeId, supplierId: args.supplierId }); },
   },
 
   Mutation: {
-    createBusiness: async (_: unknown, { name }: { name: string }, context: GraphQLContext) => {
+    createBusiness: async (_: unknown, setup: { name: string; vatRegistered: boolean; kraPin: string; vatEffectiveFrom?: string | null; withholdingVatAgent: boolean }, context: GraphQLContext) => {
+      const { name } = setup;
       const identity = requireIdentity(context);
       if (identity.tenantId) {
         const user = await setCognitoUserRoles(identity.username, identity.roles);
@@ -453,14 +469,16 @@ export const resolvers = {
         if (!(await getStaffProfile(identity.tenantId, identity.id))) {
           await upsertStaffProfile(identity.tenantId, identity.id, { employeeCode: "OWNER", jobTitle: "Owner", storeId: store.id, storeName: store.name, phone: "" });
         }
-        await ensureBusinessSettings(identity.tenantId, identity.tenantName ?? name, user.email);
+        const current = await ensureBusinessSettings(identity.tenantId, identity.tenantName ?? name, user.email);
+        if (setup.vatRegistered) await updateBusinessSettings(identity.tenantId, { ...current, vatRegistered: true, kraPin: setup.kraPin, vatEffectiveFrom: setup.vatEffectiveFrom ?? new Date().toISOString().slice(0, 10), withholdingVatAgent: setup.withholdingVatAgent }, { id: identity.id, name: identity.username });
         return mergeProfile(identity.tenantId, { ...user, roles: identity.roles });
       }
       const { membership } = await createTenant({ name, ownerUserId: identity.id, ownerUsername: identity.username });
       const store = await ensureMainStore(membership.tenantId);
       await upsertStaffProfile(membership.tenantId, identity.id, { employeeCode: "OWNER", jobTitle: "Owner", storeId: store.id, storeName: store.name, phone: "" });
       const user = await getCognitoUser(identity.username);
-      await ensureBusinessSettings(membership.tenantId, name, user.email);
+      const current = await ensureBusinessSettings(membership.tenantId, name, user.email);
+      if (setup.vatRegistered) await updateBusinessSettings(membership.tenantId, { ...current, vatRegistered: true, kraPin: setup.kraPin, vatEffectiveFrom: setup.vatEffectiveFrom ?? new Date().toISOString().slice(0, 10), withholdingVatAgent: setup.withholdingVatAgent }, { id: identity.id, name: identity.username });
       await setCognitoUserRoles(identity.username, membership.roles);
       return mergeProfile(membership.tenantId, { ...user, roles: membership.roles });
     },
@@ -561,7 +579,7 @@ export const resolvers = {
     },
     updateBusinessSettings: async (
       _: unknown,
-      input: { businessName: string; address: string; phone: string; email: string; thankYouMessage: string; returnPolicy: string },
+      input: { businessName: string; address: string; phone: string; email: string; thankYouMessage: string; returnPolicy: string; vatRegistered?: boolean; kraPin?: string; vatEffectiveFrom?: string | null; withholdingVatAgent?: boolean },
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
@@ -591,7 +609,7 @@ export const resolvers = {
     },
     createProduct: (
       _: unknown,
-      args: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "saleVariants">,
+      args: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "vatClass" | "stockUnit" | "tracksExpiry" | "saleVariants">,
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
@@ -648,8 +666,8 @@ export const resolvers = {
     },
     createStore: (_: unknown, input: Parameters<typeof createStore>[1], context: GraphQLContext) => { requireAdmin(context); return createStore(tenant(context), input, actor(context)); },
     updateStore: async (_: unknown, { id, ...input }: { id: string } & Parameters<typeof updateStore>[2], context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); if (input.status === "inactive") { const memberships = await listTenantMemberships(tenantId); const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId)); if ([...profiles.values()].some((profile) => profile.storeIds?.includes(id) || profile.storeId === id)) throw new Error("Reassign staff before deactivating this store"); } return updateStore(tenantId, id, input); },
-    createSupplier: (_: unknown, input: { code: string; name: string; contactName: string; phone: string; email: string; address: string }, context: GraphQLContext) => { requireAdmin(context); return createSupplier(tenant(context), input); },
-    updateSupplier: (_: unknown, { id, ...input }: { id: string; name?: string; contactName?: string; phone?: string; email?: string; address?: string; status?: "active" | "inactive" }, context: GraphQLContext) => { requireAdmin(context); return updateSupplier(tenant(context), id, input); },
+    createSupplier: (_: unknown, input: { code: string; name: string; contactName: string; phone: string; email: string; address: string; vatRegistered: boolean; defaultPaymentTermsDays: number }, context: GraphQLContext) => { requireAdmin(context); return createSupplier(tenant(context), input); },
+    updateSupplier: (_: unknown, { id, ...input }: { id: string; name?: string; contactName?: string; phone?: string; email?: string; address?: string; vatRegistered?: boolean; defaultPaymentTermsDays?: number; status?: "active" | "inactive" }, context: GraphQLContext) => { requireAdmin(context); return updateSupplier(tenant(context), id, input); },
     upsertSupplierProduct: (_: unknown, input: { supplierId: string; productId: string; productUnitId?: string | null; supplierSku: string; purchaseUnit: string; purchaseQuantity: number; purchaseMeasurementUnit: string; lastPurchasePrice?: number | null; preferred: boolean }, context: GraphQLContext) => { requireAdmin(context); return upsertSupplierProduct(tenant(context), { ...input, lastPurchasePrice: input.lastPurchasePrice ?? null }); },
     removeSupplierProduct: (_: unknown, input: { supplierId: string; productId: string }, context: GraphQLContext) => { requireAdmin(context); return removeSupplierProduct(tenant(context), input.supplierId, input.productId); },
     upsertStorePolicy: (_: unknown, input: { storeId: string; productId: string; reorderPoint: number; targetQuantity: number }, context: GraphQLContext) => { requireAdmin(context); return upsertStorePolicy(tenant(context), input); },
@@ -678,7 +696,7 @@ export const resolvers = {
     },
     closePurchaseOrder: (_: unknown, { id, reason }: { id: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return setPurchaseOrderStatus(tenant(context), id, "close", reason); },
     cancelPurchaseOrder: (_: unknown, { id, reason }: { id: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return setPurchaseOrderStatus(tenant(context), id, "cancel", reason); },
-    receivePurchaseOrder: (_: unknown, { purchaseOrderId, deliveryNote, invoiceNumber, lines, requestId }: { purchaseOrderId: string; deliveryNote: string; invoiceNumber: string; lines: ReceiptLineInput[]; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return receivePurchaseOrder(tenant(context), purchaseOrderId, deliveryNote, invoiceNumber, lines, actor(context), requestId); },
+    receivePurchaseOrder: (_: unknown, { purchaseOrderId, deliveryNote, invoiceNumber, invoiceDate, paymentTermsDays, lines, requestId }: { purchaseOrderId: string; deliveryNote: string; invoiceNumber: string; invoiceDate?: string | null; paymentTermsDays?: number | null; lines: ReceiptLineInput[]; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return receivePurchaseOrder(tenant(context), purchaseOrderId, deliveryNote, invoiceNumber, lines, actor(context), requestId, invoiceDate, paymentTermsDays); },
     writeOffLot: (_: unknown, { lotId, quantity, type, reason, requestId }: { lotId: string; quantity: number; type: "damage" | "expiry"; reason: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); if (!(type === "damage" || type === "expiry")) throw new Error("Write-off type must be damage or expiry"); return writeOffLot(tenant(context), lotId, quantity, type, reason, actor(context), requestId); },
     countInventoryLot: (_: unknown, { lotId, physicalQuantity, reason, requestId }: { lotId: string; physicalQuantity: number; reason: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return countLot(tenant(context), lotId, physicalQuantity, reason, actor(context), requestId); },
     createStockTransfer: (_: unknown, input: { fromStoreId: string; toStoreId: string; notes: string; lines: Array<{ productId: string; quantity: number }>; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createTransfer(tenant(context), input, actor(context), input.requestId); },
@@ -716,5 +734,8 @@ export const resolvers = {
       const user = requireStaff(context);
       return markAllNotificationsRead(tenant(context), user.id);
     },
+    createSupplierInvoice: (_: unknown, { receiptId, invoiceNumber, invoiceDate, paymentTermsDays, requestId }: { receiptId: string; invoiceNumber: string; invoiceDate?: string | null; paymentTermsDays?: number | null; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createSupplierInvoiceForReceipt(tenant(context), receiptId, { invoiceNumber, invoiceDate, paymentTermsDays }, actor(context), requestId); },
+    recordSupplierPayment: (_: unknown, { invoiceId, amount, method, reference, paidAt, requestId }: { invoiceId: string; amount: number; method: "cash" | "bank_transfer" | "mobile_money" | "cheque" | "other"; reference?: string; paidAt: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return recordSupplierPayment(tenant(context), invoiceId, { amount, method, reference, paidAt }, actor(context), requestId); },
+    voidSupplierPayment: (_: unknown, { invoiceId, paymentId, reason, requestId }: { invoiceId: string; paymentId: string; reason: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return voidSupplierPayment(tenant(context), invoiceId, paymentId, reason, actor(context), requestId); },
   },
 };

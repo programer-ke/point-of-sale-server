@@ -11,6 +11,7 @@ import {
 import { dynamoDB, TABLE_NAME } from "../config/db";
 import { MEASUREMENT_UNITS, measurementUnit, STANDARD_MEASUREMENT_DEFINITIONS } from "../domain/measurements";
 import { productUnitsToSaleVariants, validateProductUnits, type ProductUnitInput, type ProductUnitRecord } from "../domain/product-units";
+import { inclusiveVatBreakdown, isVatClass, vatApplies, vatRateBasisPoints, type VatClass } from "../domain/vat";
 import { allocateLots, commitIdempotent, existingIdempotentResult, getStore, listStores as listInventoryStores, lotDecrement, lotRemainingCostMinor, sellableLots, stockMovementPut, storeStock as getStoreStock } from "./supply-chain-repository";
 
 export interface SaleVariantRecord { id: string; name: string; sku: string; barcode: string; quantityInBaseUnits: number; sellingPrice: number; status: "active" | "inactive" }
@@ -37,6 +38,7 @@ export interface ProductRecord {
   categoryName: string;
   sellingPrice: number;
   buyingPrice: number;
+  vatClass?: VatClass | null;
   baseUnit: string;
   stockUnit: string;
   tracksExpiry: boolean;
@@ -65,6 +67,10 @@ export interface SaleItemRecord {
   promotionApplied?: boolean;
   cost: number;
   total: number;
+  vatClass?: VatClass | null;
+  vatRateBasisPoints?: number;
+  taxableAmount?: number;
+  vatAmount?: number;
 }
 
 export interface SaleRecord {
@@ -133,6 +139,10 @@ export interface BusinessSettingsRecord {
   thankYouMessage: string;
   returnPolicy: string;
   storeName: string;
+  vatRegistered: boolean;
+  kraPin: string;
+  vatEffectiveFrom?: string | null;
+  withholdingVatAgent: boolean;
   updatedAt: string;
 }
 
@@ -150,7 +160,7 @@ export interface BusinessMeasurementSettingsRecord {
   updatedAt: string;
 }
 
-export type BusinessBrandingInput = Omit<BusinessSettingsRecord, "updatedAt" | "storeName">;
+export type BusinessBrandingInput = Pick<BusinessSettingsRecord, "businessName" | "address" | "phone" | "email" | "thankYouMessage" | "returnPolicy"> & Partial<Pick<BusinessSettingsRecord, "vatRegistered" | "kraPin" | "vatEffectiveFrom" | "withholdingVatAgent">>;
 
 export interface ReportProductRecord {
   productId: string;
@@ -228,6 +238,10 @@ const defaultBusinessSettings: BusinessSettingsRecord = {
   thankYouMessage: "Thank you for shopping with us.",
   returnPolicy: "Goods once sold cannot be returned.",
   storeName: "",
+  vatRegistered: false,
+  kraPin: "",
+  vatEffectiveFrom: null,
+  withholdingVatAgent: false,
   updatedAt: new Date(0).toISOString(),
 };
 
@@ -497,6 +511,16 @@ export const updateBusinessSettings = async (
   actor: { id: string; name: string },
 ) => {
   const now = new Date().toISOString();
+  const previousSettings = await getBusinessSettings(tenantId);
+  const vatRegistered = input.vatRegistered ?? previousSettings.vatRegistered;
+  const kraPin = (input.kraPin ?? previousSettings.kraPin).trim().toUpperCase();
+  const vatEffectiveFrom = input.vatEffectiveFrom === undefined ? previousSettings.vatEffectiveFrom : input.vatEffectiveFrom;
+  const withholdingVatAgent = input.withholdingVatAgent ?? previousSettings.withholdingVatAgent;
+  if (vatRegistered) {
+    if (!/^[A-Z0-9]{8,16}$/.test(kraPin)) throw new Error("Enter a valid KRA PIN before enabling VAT");
+    if (!vatEffectiveFrom || !/^\d{4}-\d{2}-\d{2}$/.test(vatEffectiveFrom) || Number.isNaN(Date.parse(`${vatEffectiveFrom}T00:00:00Z`))) throw new Error("Enter a valid VAT effective date");
+    if (!previousSettings.vatRegistered && (await listProducts(tenantId)).some((product) => product.status === "active" && !isVatClass(product.vatClass))) throw new Error("Classify every active product before enabling VAT");
+  }
   const branding = {
     businessName: input.businessName.trim(),
     address: input.address.trim(),
@@ -505,13 +529,17 @@ export const updateBusinessSettings = async (
     thankYouMessage: input.thankYouMessage.trim(),
     returnPolicy: input.returnPolicy.trim(),
     storeName: "",
+    vatRegistered,
+    kraPin: vatRegistered ? kraPin : "",
+    vatEffectiveFrom: vatRegistered ? vatEffectiveFrom : null,
+    withholdingVatAgent: vatRegistered && withholdingVatAgent,
     updatedAt: now,
   };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
     { Update: {
       TableName: TABLE_NAME,
       Key: businessSettingsKey(tenantId),
-      UpdateExpression: "SET businessName = :businessName, address = :address, phone = :phone, email = :email, thankYouMessage = :thankYouMessage, returnPolicy = :returnPolicy, updatedAt = :updatedAt",
+      UpdateExpression: "SET businessName = :businessName, address = :address, phone = :phone, email = :email, thankYouMessage = :thankYouMessage, returnPolicy = :returnPolicy, vatRegistered = :vatRegistered, kraPin = :kraPin, vatEffectiveFrom = :vatEffectiveFrom, withholdingVatAgent = :withholdingVatAgent, updatedAt = :updatedAt",
       ExpressionAttributeValues: {
         ":businessName": branding.businessName,
         ":address": branding.address,
@@ -519,6 +547,10 @@ export const updateBusinessSettings = async (
         ":email": branding.email,
         ":thankYouMessage": branding.thankYouMessage,
         ":returnPolicy": branding.returnPolicy,
+        ":vatRegistered": branding.vatRegistered,
+        ":kraPin": branding.kraPin,
+        ":vatEffectiveFrom": branding.vatEffectiveFrom,
+        ":withholdingVatAgent": branding.withholdingVatAgent,
         ":updatedAt": branding.updatedAt,
       },
       ConditionExpression: "attribute_exists(partitionKey)",
@@ -666,15 +698,18 @@ export const deleteCategory = async (
 
 export const createProduct = async (
   tenantId: string,
-  input: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry"> & { saleVariants?: SaleVariantRecord[]; productUnits?: ProductUnitInput[]; acknowledgeBelowCost?: boolean; promotionPrice?: number | null; promotionStartsAt?: string | null; promotionEndsAt?: string | null },
+  input: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "vatClass"> & { saleVariants?: SaleVariantRecord[]; productUnits?: ProductUnitInput[]; acknowledgeBelowCost?: boolean; promotionPrice?: number | null; promotionStartsAt?: string | null; promotionEndsAt?: string | null },
   actor: { id: string; name: string },
 ) => {
+  const businessSettings = await getBusinessSettings(tenantId);
+  if (businessSettings.vatRegistered && !isVatClass(input.vatClass)) throw new Error("Select a VAT class for this product");
+  if (input.vatClass != null && !isVatClass(input.vatClass)) throw new Error("Invalid VAT class");
   const category = await getCategory(tenantId, input.categoryId);
   if (!category || category.status !== "active") throw new Error("Select an active category");
   const id = randomUUID();
   const now = new Date().toISOString();
   const unit = measurementUnit(input.stockUnit);
-  const provisional = { id, name: input.name.trim(), description: input.description.trim(), categoryId: input.categoryId, sellingPrice: input.sellingPrice, buyingPrice: input.buyingPrice, tracksExpiry: input.tracksExpiry, promotionPrice: input.promotionPrice, promotionStartsAt: input.promotionStartsAt, promotionEndsAt: input.promotionEndsAt, baseUnit: unit.baseUnit, stockUnit: unit.code, sku: normalizeLookup(input.sku) || `PRD-${id.slice(0, 8).toUpperCase()}`, barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active" as const, createdAt: now, updatedAt: now };
+  const provisional = { id, name: input.name.trim(), description: input.description.trim(), categoryId: input.categoryId, sellingPrice: input.sellingPrice, buyingPrice: input.buyingPrice, vatClass: input.vatClass ?? null, tracksExpiry: input.tracksExpiry, promotionPrice: input.promotionPrice, promotionStartsAt: input.promotionStartsAt, promotionEndsAt: input.promotionEndsAt, baseUnit: unit.baseUnit, stockUnit: unit.code, sku: normalizeLookup(input.sku) || `PRD-${id.slice(0, 8).toUpperCase()}`, barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active" as const, createdAt: now, updatedAt: now };
   if (!provisional.name) throw new Error("Product name is required");
   const settings = input.productUnits?.length ? await getBusinessMeasurementSettings(tenantId) : null;
   const allowedLabels = new Set([...(settings?.standardUnits.filter(({ baseUnit }) => baseUnit === unit.baseUnit).map(({ code }) => code) ?? []), ...(settings?.packageLabels.filter(({ status }) => status === "active").map(({ code }) => code) ?? [])]);
@@ -700,11 +735,15 @@ export const createProduct = async (
 export const updateProduct = async (
   tenantId: string,
   id: string,
-  updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "saleVariants" | "promotionPrice" | "promotionStartsAt" | "promotionEndsAt" | "status">> & { productUnits?: ProductUnitInput[]; acknowledgeBelowCost?: boolean },
+  updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "saleVariants" | "promotionPrice" | "promotionStartsAt" | "promotionEndsAt" | "status" | "vatClass">> & { productUnits?: ProductUnitInput[]; acknowledgeBelowCost?: boolean },
   actor: { id: string; name: string },
 ) => {
   const current = await getProduct(tenantId, id);
   if (!current) throw new Error("Product not found");
+  const businessSettings = await getBusinessSettings(tenantId);
+  const nextVatClass = updates.vatClass === undefined ? current.vatClass : updates.vatClass;
+  if (businessSettings.vatRegistered && !isVatClass(nextVatClass)) throw new Error("Select a VAT class for this product");
+  if (nextVatClass != null && !isVatClass(nextVatClass)) throw new Error("Invalid VAT class");
   const categoryId = updates.categoryId ?? current.categoryId;
   const category = await getCategory(tenantId, categoryId);
   if (!category) throw new Error("Category not found");
@@ -733,12 +772,13 @@ export const updateProduct = async (
   transaction.push(
     { Put: { TableName: TABLE_NAME, Item: { ...productKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#PRODUCT"), accessSort: `${next.name.toLowerCase()}#${id}`, entityType: "product", tenantId, ...next }, ConditionExpression: "attribute_exists(partitionKey)" } },
     auditPut(tenantId, {
-      action: current.sellingPrice !== next.sellingPrice ? "product.price.updated" : "product.updated",
+      action: current.sellingPrice !== next.sellingPrice ? "product.price.updated" : current.vatClass !== next.vatClass ? "product.vat_class.updated" : "product.updated",
       entityType: "product",
       entityId: id,
       productName: next.name,
       reason: current.sellingPrice !== next.sellingPrice
         ? `Selling price changed from ${current.sellingPrice.toFixed(2)} to ${next.sellingPrice.toFixed(2)}`
+        : current.vatClass !== next.vatClass ? `VAT class changed from ${current.vatClass ?? "unclassified"} to ${next.vatClass ?? "unclassified"}`
         : "Product details updated",
       actorId: actor.id,
       actorName: actor.name,
@@ -802,7 +842,11 @@ export const completeSale = async (
     const lineCostMinor = inventoryQuantity === remainingCost.quantity ? remainingCost.costMinor : Math.round(remainingCost.costMinor * inventoryQuantity / remainingCost.quantity);
     remainingCost.quantity -= inventoryQuantity; remainingCost.costMinor -= lineCostMinor;
     const cost = lineCostMinor / 100 / quantity;
-    return { productId: product.id, productName: product.name, sku: variant.sku || product.sku, barcode: variant.barcode || product.barcode, variantId: variant.id, variantName: variant.name, quantityInBaseUnits: variant.quantityInBaseUnits, inventoryQuantity, quantity, price, regularPrice: variant.sellingPrice, promotionApplied: price < variant.sellingPrice, cost, total: roundMoney(price * quantity) };
+    const total = roundMoney(price * quantity);
+    const activeVat = vatApplies(globalBranding, now) && isVatClass(product.vatClass);
+    const vatClass = activeVat ? product.vatClass! : null;
+    const breakdown = activeVat ? inclusiveVatBreakdown(Math.round(total * 100), vatClass!, now) : { taxableMinor: 0, vatMinor: 0, rateBasisPoints: 0 };
+    return { productId: product.id, productName: product.name, sku: variant.sku || product.sku, barcode: variant.barcode || product.barcode, variantId: variant.id, variantName: variant.name, quantityInBaseUnits: variant.quantityInBaseUnits, inventoryQuantity, quantity, price, regularPrice: variant.sellingPrice, promotionApplied: price < variant.sellingPrice, cost, total, vatClass, vatRateBasisPoints: breakdown.rateBasisPoints, taxableAmount: breakdown.taxableMinor / 100, vatAmount: breakdown.vatMinor / 100 };
   });
   const subtotal = roundMoney(saleItems.reduce((sum, item) => sum + (item.regularPrice ?? item.price) * item.quantity, 0));
   const totalAmount = roundMoney(saleItems.reduce((sum, item) => sum + item.total, 0));
@@ -831,7 +875,7 @@ export const completeSale = async (
     customerName: input.customerName?.trim() || "Cash customer",
     items: saleItems,
     subtotal,
-    tax: 0,
+    tax: roundMoney(saleItems.reduce((sum, item) => sum + (item.vatAmount ?? 0), 0)),
     discount,
     totalAmount,
     status: "completed",
@@ -881,7 +925,7 @@ export const dashboardSummary = async (tenantId: string, requestedDays = 1, staf
   const revenue = roundMoney(sales.reduce((sum, sale) => sum + sale.totalAmount, 0));
   const unitsSold = sales.flatMap((sale) => sale.items).reduce((sum, item) => sum + item.quantity, 0);
   const grossProfit = roundMoney(sales.flatMap((sale) => sale.items).reduce(
-    (sum, item) => sum + (item.price - item.cost) * item.quantity,
+    (sum, item) => sum + item.total - (item.vatAmount ?? 0) - item.cost * item.quantity,
     0,
   ));
   const byCashier = new Map<string, { staffId: string; staffName: string; salesCount: number; unitsSold: number; revenue: number; grossProfit: number }>();
@@ -890,7 +934,7 @@ export const dashboardSummary = async (tenantId: string, requestedDays = 1, staf
     current.salesCount += 1;
     current.unitsSold += sale.items.reduce((sum, item) => sum + item.quantity, 0);
     current.revenue = roundMoney(current.revenue + sale.totalAmount);
-    current.grossProfit = roundMoney(current.grossProfit + sale.items.reduce((sum, item) => sum + (item.price - item.cost) * item.quantity, 0));
+    current.grossProfit = roundMoney(current.grossProfit + sale.items.reduce((sum, item) => sum + item.total - (item.vatAmount ?? 0) - item.cost * item.quantity, 0));
     byCashier.set(sale.createdBy, current);
   }
   const lowStock = products
@@ -946,7 +990,7 @@ export const businessReport = async (tenantId: string, range: { from: string; to
       const current = productTotals.get(item.productId) ?? { productId: item.productId, productName: item.productName, baseUnit: product?.baseUnit ?? "each", stockUnit: product?.stockUnit ?? "each", units: 0, revenue: 0, grossProfit: 0, savings: 0 };
       current.units += item.inventoryQuantity / measurementUnit(current.stockUnit).baseUnits;
       current.revenue = roundMoney(current.revenue + item.total);
-      current.grossProfit = roundMoney(current.grossProfit + (item.price - item.cost) * item.quantity);
+      current.grossProfit = roundMoney(current.grossProfit + item.total - (item.vatAmount ?? 0) - item.cost * item.quantity);
       productTotals.set(item.productId, current);
       if (item.promotionApplied) {
         const saving = roundMoney(((item.regularPrice ?? item.price) - item.price) * item.quantity);
@@ -956,7 +1000,7 @@ export const businessReport = async (tenantId: string, range: { from: string; to
         const promotional = promotionTotals.get(item.productId) ?? { productId: item.productId, productName: item.productName, baseUnit: product?.baseUnit ?? "each", stockUnit: product?.stockUnit ?? "each", units: 0, revenue: 0, grossProfit: 0, savings: 0 };
         promotional.units += item.inventoryQuantity / measurementUnit(promotional.stockUnit).baseUnits;
         promotional.revenue = roundMoney(promotional.revenue + item.total);
-        promotional.grossProfit = roundMoney(promotional.grossProfit + (item.price - item.cost) * item.quantity);
+        promotional.grossProfit = roundMoney(promotional.grossProfit + item.total - (item.vatAmount ?? 0) - item.cost * item.quantity);
         promotional.savings = roundMoney(promotional.savings + saving);
         promotionTotals.set(item.productId, promotional);
       }
@@ -965,7 +1009,7 @@ export const businessReport = async (tenantId: string, range: { from: string; to
   const stockAdjustments = audits.filter(({ action }) => action === "stock.adjusted");
   const priceChanges = audits.filter(({ action }) => action === "product.price.updated");
   const revenue = roundMoney(filteredSales.reduce((sum, sale) => sum + sale.totalAmount, 0));
-  const grossProfit = roundMoney(filteredSales.flatMap(({ items }) => items).reduce((sum, item) => sum + (item.price - item.cost) * item.quantity, 0));
+  const grossProfit = roundMoney(filteredSales.flatMap(({ items }) => items).reduce((sum, item) => sum + item.total - (item.vatAmount ?? 0) - item.cost * item.quantity, 0));
   const stockCostValue = roundMoney([...valueByProduct.values()].reduce((sum, value) => sum + value, 0));
   const stockRetailValue = roundMoney(products.reduce((sum, product) => sum + (product.quantity / measurementUnit(product.stockUnit).baseUnits) * product.sellingPrice, 0));
   return {

@@ -144,3 +144,23 @@ authenticated Cognito `sub`. Supply-chain reports support period, store,
 supplier, and expiry-window filters across purchasing, receiving, valuation,
 movements, expiry, losses, and transfers. The browser provides print/PDF and
 CSV output.
+
+## Lightweight accounting and VAT
+
+VAT is opt-in at workspace level. A VAT-enabled workspace requires a KRA PIN
+and effective date; products then use the statutory `standard`, `zero_rated`,
+or `exempt` class. Rates are centralized while every sale and goods-receipt line
+snapshots its applied class, rate, taxable value, and VAT in KES minor units.
+Configured prices remain VAT-inclusive. Supplier-origin lots use net cost only
+when both the workspace and supplier are recorded as VAT registered.
+
+Each new goods receipt has at most one supplier invoice. Invoice payments are
+append-only records embedded in the invoice snapshot; corrections void the
+original payment and recalculate the paid balance under a conditional write.
+For a workspace marked as an appointed WHVAT agent, a settlement deducts 2% of
+its proportional standard-rated taxable value. Output VAT, estimated input VAT,
+and WHVAT are reported separately.
+
+The Money API is operational reporting, not a ledger or tax return. It performs
+no eTIMS transmission or validation and must not label estimated input VAT as a
+verified claim.

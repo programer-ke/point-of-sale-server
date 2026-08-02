@@ -4,6 +4,30 @@ This log records dated migrations, temporary rollout requirements, and
 remediation procedures. The README remains limited to evergreen setup and
 repeatable operations.
 
+## 2026-08-02 — Lightweight accounting and Kenyan VAT
+
+### What changed
+
+New workspaces can declare Kenyan VAT registration, classify products as
+standard-rated, zero-rated, or exempt, snapshot inclusive VAT on sales and
+receipts, and manage supplier invoices with partial payments. Appointed agents
+can also calculate the 2% withholding-VAT deduction on supplier settlements.
+
+### Deployment and verification
+
+This release targets clean installations and deliberately performs no historic
+tax reconstruction. Deploy the server before the client, create a VAT-enabled
+workspace, receive a mixed-rate supplier order, complete a sale, and verify the
+Money summary, printed VAT breakdown, partial-payment balance, and WHVAT split.
+
+VAT and input-VAT values are management estimates. This release does not submit
+to eTIMS, file a VAT return, or record WHVAT remittance.
+
+### Recovery and status
+
+Disable VAT for future transactions if setup is incorrect; transaction tax
+snapshots remain immutable. Status: active.
+
 ## 2026-08-02 — Product-specific units and exact lot costing
 
 ### What changed

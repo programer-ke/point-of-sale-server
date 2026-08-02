@@ -133,6 +133,41 @@ async function main() {
   assert.equal(receipt.lines[0].acceptedBaseQuantity, 10);
   assert.equal(transaction.filter((item) => item.Put?.Item?.entityType === "inventory_lot").length, 1, "accepted stock creates exactly one lot");
   assert.equal(transaction.find((item) => item.Put?.Item?.entityType === "inventory_lot").Put.Item.remainingQuantity, 10);
+  const storedInvoice = transaction.find((item) => item.Put?.Item?.entityType === "supplier_invoice").Put.Item;
+  assert.equal(storedInvoice.grossAmount, 800, "only accepted goods are invoiced");
+  assert.equal(storedInvoice.vatAmount, 0, "non-VAT supplier purchases do not estimate input VAT");
+  assert.equal(transaction.filter((item) => item.Put?.Item?.entityType === "supplier_invoice_lookup").length, 1, "supplier invoice number uniqueness is protected atomically");
+
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") {
+      const key = command.input.Key.partitionKey;
+      if (key.includes("IDEMPOTENCY#") || key.endsWith("SETTINGS#BUSINESS")) return {};
+      if (key.includes("SUPPLIER_INVOICE#")) return { Item: storedInvoice };
+      return {};
+    }
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  await assert.rejects(() => supply.recordSupplierPayment(tenantId, storedInvoice.id, { amount: 801, method: "cash", paidAt: new Date().toISOString().slice(0, 10) }, { id: "admin", name: "Admin" }, "payment-over"), /exceed the invoice balance/);
+  const partiallyPaid = await supply.recordSupplierPayment(tenantId, storedInvoice.id, { amount: 300, method: "bank_transfer", reference: "BANK-1", paidAt: new Date().toISOString().slice(0, 10) }, { id: "admin", name: "Admin" }, "payment-1");
+  assert.equal(partiallyPaid.paidAmount, 300);
+  assert.equal(partiallyPaid.balance, 500);
+  assert.equal(partiallyPaid.status, "partial");
+  assert.match(transaction[0].Put.ConditionExpression, /updatedAt/, "supplier payments reject concurrent stale invoice writes");
+
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") {
+      if (command.input.Key.partitionKey.includes("IDEMPOTENCY#")) return {};
+      if (command.input.Key.partitionKey.includes("SUPPLIER_INVOICE#")) return { Item: partiallyPaid };
+      return {};
+    }
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  const voidedPayment = await supply.voidSupplierPayment(tenantId, storedInvoice.id, partiallyPaid.payments[0].id, "Incorrect bank entry", { id: "admin", name: "Admin" }, "void-payment-1");
+  assert.equal(voidedPayment.paidAmount, 0);
+  assert.equal(voidedPayment.payments[0].status, "voided");
+  assert.equal(voidedPayment.payments[0].voidReason, "Incorrect bank entry");
 
   const activeLot = { id: "lot-early", storeId: store.id, productId: "product-1", productName: "Tea", batchNumber: "B-1", expiryDate: "2026-09-01", receivedQuantity: 10, remainingQuantity: 10, unitCost: 80, origin: "supplier_receipt", status: "active", receivedAt: "2026-07-01T00:00:00.000Z", updatedAt: now };
   const laterLot = { ...activeLot, id: "lot-later", batchNumber: "B-2", expiryDate: "2026-12-01", remainingQuantity: 10, receivedAt: "2026-07-02T00:00:00.000Z" };

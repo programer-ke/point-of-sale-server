@@ -9,6 +9,8 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { dynamoDB, TABLE_NAME } from "../config/db";
 import { convertMeasurementToBaseUnits } from "../domain/measurements";
+import { inclusiveVatBreakdown, isVatClass, vatApplies, withholdingVatMinor, type VatClass } from "../domain/vat";
+import { getBusinessSettings } from "./pos-repository";
 
 export type Actor = { id: string; name: string };
 export type EntityStatus = "active" | "inactive";
@@ -37,6 +39,8 @@ export interface SupplierRecord {
   phone: string;
   email: string;
   address: string;
+  vatRegistered: boolean;
+  defaultPaymentTermsDays: number;
   status: EntityStatus;
   createdAt: string;
   updatedAt: string;
@@ -130,7 +134,9 @@ export interface GoodsReceiptRecord {
   storeName: string;
   deliveryNote: string;
   invoiceNumber: string;
-  lines: Array<ReceiptLineInput & { productId: string; productName: string; baseUnit: string; stockUnit: string; purchaseUnit: string; purchaseQuantity: number; purchaseMeasurementUnit: string; unitsPerPurchaseUnit: number; orderedPricePerPurchaseUnit: number; actualPricePerPurchaseUnit: number; priceVariance: number; unitCost: number; lotId?: string | null }>;
+  lines: Array<ReceiptLineInput & { productId: string; productName: string; baseUnit: string; stockUnit: string; purchaseUnit: string; purchaseQuantity: number; purchaseMeasurementUnit: string; unitsPerPurchaseUnit: number; orderedPricePerPurchaseUnit: number; actualPricePerPurchaseUnit: number; priceVariance: number; unitCost: number; grossUnitCost?: number; vatClass?: VatClass | null; vatRateBasisPoints?: number; taxableAmount?: number; vatAmount?: number; grossAmount?: number; lotId?: string | null }>;
+  accountingTracked?: boolean;
+  supplierInvoiceId?: string | null;
   createdBy: string;
   createdByName: string;
   createdAt: string;
@@ -148,11 +154,58 @@ export interface InventoryLotRecord {
   receivedQuantity: number;
   remainingQuantity: number;
   unitCost: number;
+  grossUnitCost?: number;
   receivedCostMinor?: number;
   remainingCostMinor?: number;
   origin: "supplier_receipt" | "transfer";
   status: "active" | "exhausted";
   receivedAt: string;
+  updatedAt: string;
+}
+
+export type SupplierInvoiceStatus = "unpaid" | "partial" | "paid" | "overdue";
+export interface SupplierPaymentRecord {
+  id: string;
+  invoiceId: string;
+  supplierId: string;
+  amount: number;
+  supplierPaidAmount: number;
+  withholdingVatAmount: number;
+  method: "cash" | "bank_transfer" | "mobile_money" | "cheque" | "other";
+  reference: string;
+  paidAt: string;
+  status: "active" | "voided";
+  voidReason?: string | null;
+  voidedAt?: string | null;
+  voidedBy?: string | null;
+  actorId: string;
+  actorName: string;
+  createdAt: string;
+}
+
+export interface SupplierInvoiceRecord {
+  id: string;
+  invoiceNumber: string;
+  receiptId: string;
+  receiptNumber: string;
+  purchaseOrderId: string;
+  orderNumber: string;
+  supplierId: string;
+  supplierName: string;
+  storeId: string;
+  storeName: string;
+  invoiceDate: string;
+  dueDate: string;
+  paymentTermsDays: number;
+  grossAmount: number;
+  taxableAmount: number;
+  withholdingTaxableAmount: number;
+  vatAmount: number;
+  paidAmount: number;
+  payments: SupplierPaymentRecord[];
+  createdBy: string;
+  createdByName: string;
+  createdAt: string;
   updatedAt: string;
 }
 
@@ -284,7 +337,7 @@ const get = async <T>(tenantId: string, kind: string, id: string, sortKey = "PRO
   return stripKeys<T>(result.Item);
 };
 
-type CatalogProduct = { id: string; name: string; sku: string; baseUnit: string; stockUnit: string; buyingPrice: number; tracksExpiry: boolean; status: EntityStatus; productUnits?: Array<{ id: string; name: string; quantityInBaseUnits: number; purchasable: boolean; status: EntityStatus }>; saleVariants?: Array<{ id: string; name: string; quantityInBaseUnits: number; status: EntityStatus }> };
+type CatalogProduct = { id: string; name: string; sku: string; baseUnit: string; stockUnit: string; buyingPrice: number; vatClass?: VatClass | null; tracksExpiry: boolean; status: EntityStatus; productUnits?: Array<{ id: string; name: string; quantityInBaseUnits: number; purchasable: boolean; status: EntityStatus }>; saleVariants?: Array<{ id: string; name: string; quantityInBaseUnits: number; status: EntityStatus }> };
 const purchasableProductUnits = (product: CatalogProduct) => product.productUnits?.length ? product.productUnits : (product.saleVariants ?? []).map((variant) => ({ ...variant, purchasable: true }));
 const getCatalogProduct = (tenantId: string, id: string) => get<CatalogProduct>(tenantId, "PRODUCT", id);
 const getSupplierProduct = (tenantId: string, supplierId: string, productId: string) => get<SupplierProductRecord>(tenantId, "SUPPLIER_PRODUCT", `${supplierId}#${productId}`);
@@ -351,9 +404,11 @@ export const updateStore = async (tenantId: string, id: string, input: Partial<P
 
 export const listSuppliers = (tenantId: string) => queryCollection<SupplierRecord>(tenantId, "SUPPLIER");
 export const getSupplier = (tenantId: string, id: string) => get<SupplierRecord>(tenantId, "SUPPLIER", id);
-export const createSupplier = async (tenantId: string, input: Omit<SupplierRecord, "id" | "status" | "createdAt" | "updatedAt">) => {
+export const createSupplier = async (tenantId: string, input: Omit<SupplierRecord, "id" | "status" | "createdAt" | "updatedAt" | "vatRegistered" | "defaultPaymentTermsDays"> & Partial<Pick<SupplierRecord, "vatRegistered" | "defaultPaymentTermsDays">>) => {
   const id = randomUUID(); const now = new Date().toISOString();
-  const supplier: SupplierRecord = { id, code: normalizedCode(input.code), name: normalized(input.name), contactName: normalized(input.contactName), phone: input.phone.trim(), email: input.email.trim().toLowerCase(), address: normalized(input.address), status: "active", createdAt: now, updatedAt: now };
+  const paymentTermsDays = input.defaultPaymentTermsDays ?? 0;
+  if (!Number.isInteger(paymentTermsDays) || paymentTermsDays < 0 || paymentTermsDays > 365) throw new Error("Supplier payment terms must be between 0 and 365 days");
+  const supplier: SupplierRecord = { id, code: normalizedCode(input.code), name: normalized(input.name), contactName: normalized(input.contactName), phone: input.phone.trim(), email: input.email.trim().toLowerCase(), address: normalized(input.address), vatRegistered: Boolean(input.vatRegistered), defaultPaymentTermsDays: paymentTermsDays, status: "active", createdAt: now, updatedAt: now };
   if (!supplier.code || !supplier.name) throw new Error("Supplier code and name are required");
   if (!validOptionalEmail(supplier.email)) throw new Error("Enter a valid supplier email");
   if ((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: key(tenantId, "LOOKUP#SUPPLIER", supplier.code) }))).Item) throw new Error("Supplier code is already in use");
@@ -368,6 +423,7 @@ export const updateSupplier = async (tenantId: string, id: string, input: Partia
   const current = await getSupplier(tenantId, id); if (!current) throw new Error("Supplier not found");
   if (input.status === "inactive" && current.status === "active" && (await listPurchaseOrders(tenantId)).some((order) => order.supplierId === id && (order.status === "draft" || order.status === "issued" || order.status === "partially_received"))) throw new Error("Close this supplier's open purchase orders before deactivating it");
   const next = { ...current, ...input, name: normalized(input.name ?? current.name), contactName: normalized(input.contactName ?? current.contactName), address: normalized(input.address ?? current.address), email: (input.email ?? current.email).trim().toLowerCase(), phone: (input.phone ?? current.phone).trim(), updatedAt: new Date().toISOString() };
+  if (!Number.isInteger(next.defaultPaymentTermsDays ?? 0) || (next.defaultPaymentTermsDays ?? 0) < 0 || (next.defaultPaymentTermsDays ?? 0) > 365) throw new Error("Supplier payment terms must be between 0 and 365 days");
   if (!validOptionalEmail(next.email)) throw new Error("Enter a valid supplier email");
   await dynamoDB.send(new PutCommand({ TableName: TABLE_NAME, Item: { ...key(tenantId, "SUPPLIER", id), accessPartition: collection(tenantId, "SUPPLIER"), accessSort: `${next.name.toLowerCase()}#${id}`, entityType: "supplier", tenantId, ...next }, ConditionExpression: "attribute_exists(partitionKey)" }));
   return next;
@@ -556,12 +612,16 @@ export const recordPurchaseOrderEmailResult = async (
 
 export const listGoodsReceipts = (tenantId: string, range?: { from?: string; to?: string; limit?: number }) => queryCollection<GoodsReceiptRecord>(tenantId, "GOODS_RECEIPT", { ...range, limit: range?.limit ?? 200, descending: true });
 export const getGoodsReceipt = (tenantId: string, id: string) => get<GoodsReceiptRecord>(tenantId, "RECEIPT", id);
-export const receivePurchaseOrder = async (tenantId: string, purchaseOrderId: string, deliveryNote: string, invoiceNumber: string, lines: ReceiptLineInput[], actor: Actor, requestId: string) => {
-  const payload = { purchaseOrderId, deliveryNote, invoiceNumber, lines };
+export const receivePurchaseOrder = async (tenantId: string, purchaseOrderId: string, deliveryNote: string, invoiceNumber: string, lines: ReceiptLineInput[], actor: Actor, requestId: string, invoiceDate?: string | null, paymentTermsDays?: number | null) => {
+  const payload = { purchaseOrderId, deliveryNote, invoiceNumber, lines, invoiceDate, paymentTermsDays };
   const previous = await existingIdempotentResult<GoodsReceiptRecord>(tenantId, "receive_po", requestId, payload); if (previous) return previous;
   if (lines.length < 1 || lines.length > 40) throw new Error("A receipt must contain 1 to 40 batch lines");
   if (!deliveryNote.trim() && !invoiceNumber.trim()) throw new Error("A delivery note or supplier invoice number is required");
   const po = await getPurchaseOrder(tenantId, purchaseOrderId); if (!po || !(po.status === "issued" || po.status === "partially_received")) throw new Error("Purchase order is not open for receiving");
+  const [supplierRecord, businessSettings] = await Promise.all([getSupplier(tenantId, po.supplierId), getBusinessSettings(tenantId)]);
+  // The PO already snapshots supplier identity. Legacy/test POs may outlive a
+  // supplier profile; in that case VAT stays conservatively disabled.
+  const supplier = supplierRecord ?? { vatRegistered: false, defaultPaymentTermsDays: 0 };
   const now = new Date().toISOString(); const today = now.slice(0, 10); const id = randomUUID(); const receiptLines: GoodsReceiptRecord["lines"] = []; const acceptedByLine = new Map<string, number>(); const latestPriceByProduct = new Map<string, number>(); const lotWrites: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
   for (const input of lines) {
     [input.deliveredBaseQuantity, input.acceptedBaseQuantity, input.damagedBaseQuantity, input.rejectedBaseQuantity].forEach((value) => validateCount(value, "Receipt quantity"));
@@ -579,19 +639,42 @@ export const receivePurchaseOrder = async (tenantId: string, purchaseOrderId: st
     acceptedByLine.set(poLine.id, nextAccepted);
     const previousActualPrice = latestPriceByProduct.get(poLine.productId); if (previousActualPrice !== undefined && previousActualPrice !== input.actualPricePerPurchaseUnit) throw new Error(`${poLine.productName} must use one actual price per receipt`);
     latestPriceByProduct.set(poLine.productId, input.actualPricePerPurchaseUnit);
-    const unitCost = input.actualPricePerPurchaseUnit / poLine.unitsPerPurchaseUnit;
-    const acceptedCostMinor = Math.round(input.actualPricePerPurchaseUnit * 100 * input.acceptedBaseQuantity / poLine.unitsPerPurchaseUnit); let lotId: string | null = null;
+    const grossCostMinor = Math.round(input.actualPricePerPurchaseUnit * 100 * input.acceptedBaseQuantity / poLine.unitsPerPurchaseUnit);
+    const activeVat = vatApplies(businessSettings, now) && supplier.vatRegistered && isVatClass(product.vatClass);
+    const vatClass = activeVat ? product.vatClass! : null;
+    const tax = activeVat ? inclusiveVatBreakdown(grossCostMinor, vatClass!, now) : { taxableMinor: 0, vatMinor: 0, rateBasisPoints: 0 };
+    const acceptedCostMinor = grossCostMinor - tax.vatMinor;
+    const unitCost = input.acceptedBaseQuantity > 0 ? acceptedCostMinor / 100 / input.acceptedBaseQuantity : input.actualPricePerPurchaseUnit / poLine.unitsPerPurchaseUnit;
+    const grossUnitCost = input.actualPricePerPurchaseUnit / poLine.unitsPerPurchaseUnit; let lotId: string | null = null;
     if (input.acceptedBaseQuantity > 0) {
-      lotId = randomUUID(); const lot: InventoryLotRecord = { id: lotId, storeId: po.storeId, productId: poLine.productId, productName: poLine.productName, supplierId: po.supplierId, receiptId: id, batchNumber: normalized(input.batchNumber ?? "") || `GRN-${id.slice(0, 8).toUpperCase()}`, expiryDate: input.expiryDate ?? null, receivedQuantity: input.acceptedBaseQuantity, remainingQuantity: input.acceptedBaseQuantity, unitCost, receivedCostMinor: acceptedCostMinor, remainingCostMinor: acceptedCostMinor, origin: "supplier_receipt", status: "active", receivedAt: now, updatedAt: now };
+      lotId = randomUUID(); const lot: InventoryLotRecord = { id: lotId, storeId: po.storeId, productId: poLine.productId, productName: poLine.productName, supplierId: po.supplierId, receiptId: id, batchNumber: normalized(input.batchNumber ?? "") || `GRN-${id.slice(0, 8).toUpperCase()}`, expiryDate: input.expiryDate ?? null, receivedQuantity: input.acceptedBaseQuantity, remainingQuantity: input.acceptedBaseQuantity, unitCost, grossUnitCost, receivedCostMinor: acceptedCostMinor, remainingCostMinor: acceptedCostMinor, origin: "supplier_receipt", status: "active", receivedAt: now, updatedAt: now };
       lotWrites.push({ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "LOT", lotId), accessPartition: collection(tenantId, `STORE#${lot.storeId}#INVENTORY#ACTIVE`), accessSort: `${lot.expiryDate ?? "9999-12-31"}#${now}#${lotId}`, entityType: "inventory_lot", tenantId, ...lot }, ConditionExpression: "attribute_not_exists(partitionKey)" } }, stockMovementPut(tenantId, { type: "receipt", storeId: po.storeId, productId: poLine.productId, productName: poLine.productName, lotId, quantity: input.acceptedBaseQuantity, unitCost, reason: `Receipt for ${po.orderNumber}`, referenceId: id, actorId: actor.id, actorName: actor.name }, now));
     }
-    receiptLines.push({ ...input, productId: poLine.productId, productName: poLine.productName, baseUnit: poLine.baseUnit, stockUnit: poLine.stockUnit, purchaseUnit: poLine.purchaseUnit, purchaseQuantity: poLine.purchaseQuantity, purchaseMeasurementUnit: poLine.purchaseMeasurementUnit, unitsPerPurchaseUnit: poLine.unitsPerPurchaseUnit, orderedPricePerPurchaseUnit: poLine.pricePerPurchaseUnit, priceVariance: roundMoney(input.actualPricePerPurchaseUnit - poLine.pricePerPurchaseUnit), unitCost, lotId });
+    receiptLines.push({ ...input, productId: poLine.productId, productName: poLine.productName, baseUnit: poLine.baseUnit, stockUnit: poLine.stockUnit, purchaseUnit: poLine.purchaseUnit, purchaseQuantity: poLine.purchaseQuantity, purchaseMeasurementUnit: poLine.purchaseMeasurementUnit, unitsPerPurchaseUnit: poLine.unitsPerPurchaseUnit, orderedPricePerPurchaseUnit: poLine.pricePerPurchaseUnit, priceVariance: roundMoney(input.actualPricePerPurchaseUnit - poLine.pricePerPurchaseUnit), unitCost, grossUnitCost, vatClass, vatRateBasisPoints: tax.rateBasisPoints, taxableAmount: tax.taxableMinor / 100, vatAmount: tax.vatMinor / 100, grossAmount: grossCostMinor / 100, lotId });
   }
   const nextLines = po.lines.map((line) => ({ ...line, acceptedBaseQuantity: line.acceptedBaseQuantity + (acceptedByLine.get(line.id) ?? 0) }));
   const complete = nextLines.every((line) => line.acceptedBaseQuantity >= line.orderedPurchaseQuantity * line.unitsPerPurchaseUnit);
   const nextPo: PurchaseOrderRecord = { ...po, lines: nextLines, receiptCount: po.receiptCount + 1, status: complete ? "completed" : "partially_received", updatedAt: now };
-  const receipt: GoodsReceiptRecord = { id, receiptNumber: `GRN-${now.slice(0, 10).replaceAll("-", "")}-${id.slice(0, 8).toUpperCase()}`, purchaseOrderId: po.id, orderNumber: po.orderNumber, supplierId: po.supplierId, supplierName: po.supplierName, storeId: po.storeId, storeName: po.storeName, deliveryNote: deliveryNote.trim(), invoiceNumber: invoiceNumber.trim(), lines: receiptLines, createdBy: actor.id, createdByName: actor.name, createdAt: now };
+  const normalizedInvoice = invoiceNumber.trim().toUpperCase();
+  const invoiceId = normalizedInvoice ? randomUUID() : null;
+  const receipt: GoodsReceiptRecord = { id, receiptNumber: `GRN-${now.slice(0, 10).replaceAll("-", "")}-${id.slice(0, 8).toUpperCase()}`, purchaseOrderId: po.id, orderNumber: po.orderNumber, supplierId: po.supplierId, supplierName: po.supplierName, storeId: po.storeId, storeName: po.storeName, deliveryNote: deliveryNote.trim(), invoiceNumber: normalizedInvoice, lines: receiptLines, accountingTracked: true, supplierInvoiceId: invoiceId, createdBy: actor.id, createdByName: actor.name, createdAt: now };
   const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [putPurchaseOrder(tenantId, nextPo, po.updatedAt), { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "RECEIPT", id), accessPartition: collection(tenantId, "GOODS_RECEIPT"), accessSort: `${now}#${id}`, entityType: "goods_receipt", tenantId, ...receipt }, ConditionExpression: "attribute_not_exists(partitionKey)" } }, ...lotWrites];
+  if (invoiceId) {
+    const terms = paymentTermsDays ?? supplier.defaultPaymentTermsDays ?? 0;
+    if (!Number.isInteger(terms) || terms < 0 || terms > 365) throw new Error("Payment terms must be between 0 and 365 days");
+    const dated = invoiceDate?.trim() || today;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dated) || Number.isNaN(Date.parse(`${dated}T00:00:00Z`)) || dated > today) throw new Error("Invoice date must be a valid date that is not in the future");
+    const due = new Date(`${dated}T00:00:00Z`); due.setUTCDate(due.getUTCDate() + terms);
+    const grossAmount = roundMoney(receiptLines.reduce((sum, line) => sum + (line.grossAmount ?? line.acceptedBaseQuantity * line.unitCost), 0));
+    const taxableAmount = roundMoney(receiptLines.reduce((sum, line) => sum + (line.taxableAmount ?? 0), 0));
+    const withholdingTaxableAmount = roundMoney(receiptLines.filter((line) => line.vatClass === "standard").reduce((sum, line) => sum + (line.taxableAmount ?? 0), 0));
+    const vatAmount = roundMoney(receiptLines.reduce((sum, line) => sum + (line.vatAmount ?? 0), 0));
+    const invoice: SupplierInvoiceRecord = { id: invoiceId, invoiceNumber: normalizedInvoice, receiptId: id, receiptNumber: receipt.receiptNumber, purchaseOrderId: po.id, orderNumber: po.orderNumber, supplierId: po.supplierId, supplierName: po.supplierName, storeId: po.storeId, storeName: po.storeName, invoiceDate: dated, dueDate: due.toISOString().slice(0, 10), paymentTermsDays: terms, grossAmount, taxableAmount, withholdingTaxableAmount, vatAmount, paidAmount: 0, payments: [], createdBy: actor.id, createdByName: actor.name, createdAt: now, updatedAt: now };
+    transaction.push(
+      { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "SUPPLIER_INVOICE", invoiceId), accessPartition: collection(tenantId, "SUPPLIER_INVOICE"), accessSort: `${dated}#${invoiceId}`, entityType: "supplier_invoice", tenantId, ...invoice }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+      { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "LOOKUP#SUPPLIER_INVOICE", `${po.supplierId}#${normalizedInvoice}`), entityType: "supplier_invoice_lookup", tenantId, invoiceId }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+    );
+  }
   for (const [productId, actualPrice] of latestPriceByProduct) transaction.push({ Update: { TableName: TABLE_NAME, Key: key(tenantId, "SUPPLIER_PRODUCT", `${po.supplierId}#${productId}`), UpdateExpression: "SET lastPurchasePrice = :price, updatedAt = :now", ConditionExpression: "attribute_exists(partitionKey)", ExpressionAttributeValues: { ":price": actualPrice, ":now": now } } });
   if (transaction.length + 1 > 100) throw new Error("Receipt is too fragmented to commit atomically; split it into smaller receipts");
   return commitIdempotent(tenantId, "receive_po", requestId, payload, receipt, transaction);
@@ -736,4 +819,89 @@ export const supplyChainReport = async (tenantId: string, input: { from: string;
   const replenishment = allPolicies.filter((policy) => !input.storeId || policy.storeId === input.storeId).flatMap((policy) => { if (input.productId && policy.productId !== input.productId) return []; const position = stock.find((item) => item.storeId === policy.storeId && item.productId === policy.productId); const relation = supplierProducts.find((item) => item.productId === policy.productId && item.preferred) ?? supplierProducts.find((item) => item.productId === policy.productId); if (!relation || (input.supplierId && relation.supplierId !== input.supplierId)) return []; const openOrder = currentOrders.filter((order) => order.storeId === policy.storeId && (order.status === "issued" || order.status === "partially_received")).flatMap((order) => order.lines).filter((line) => line.productId === policy.productId).reduce((sum, line) => sum + Math.max(0, line.orderedPurchaseQuantity * line.unitsPerPurchaseUnit - line.acceptedBaseQuantity), 0); const inbound = currentTransfers.filter((transfer) => transfer.toStoreId === policy.storeId && transfer.status === "dispatched").flatMap((transfer) => transfer.lines).filter((line) => line.productId === policy.productId).reduce((sum, line) => sum + line.quantity, 0); const projectedQuantity = (position?.quantity ?? 0) + openOrder + inbound; if (projectedQuantity > policy.reorderPoint) return []; return [{ storeId: policy.storeId, supplierId: relation.supplierId, productId: policy.productId, availableQuantity: position?.quantity ?? 0, projectedQuantity, reorderPoint: policy.reorderPoint, targetQuantity: policy.targetQuantity, openPurchaseOrderQuantity: openOrder, inboundTransferQuantity: inbound, suggestedPurchaseQuantity: Math.max(0, Math.ceil((policy.targetQuantity - projectedQuantity) / relation.unitsPerPurchaseUnit)), supplierProduct: relation }]; });
   const receiptLines = filteredReceipts.flatMap((item) => item.lines);
   return { from: input.from, to: input.to, purchaseOrders: filteredOrders, receipts: filteredReceipts, movements: filteredMovements, transfers: filteredTransfers, stock: input.productId ? stock.filter((item) => item.productId === input.productId) : stock, expiryLots, replenishment, orderedValue: roundMoney(filteredOrders.filter((item) => item.status !== "draft" && item.status !== "cancelled").reduce((sum, item) => sum + item.totalAmount, 0)), purchaseSpend: roundMoney(receiptLines.reduce((sum, line) => sum + line.acceptedBaseQuantity * line.unitCost, 0)), receivedValue: roundMoney(receiptLines.reduce((sum, line) => sum + line.acceptedBaseQuantity * line.unitCost, 0)), priceVariance: roundMoney(receiptLines.reduce((sum, line) => sum + line.priceVariance * (line.acceptedBaseQuantity / (filteredOrders.flatMap((order) => order.lines).find((orderLine) => orderLine.id === line.purchaseOrderLineId)?.unitsPerPurchaseUnit ?? 1)), 0)), damagedValue: roundMoney(filteredMovements.filter((item) => item.type === "damage" || item.type === "expiry" || item.type === "transfer_damage" || item.type === "transfer_shortage").reduce((sum, item) => sum + Math.abs(item.quantity) * item.unitCost, 0)), inventoryValue: roundMoney(activeLots.reduce((sum, lot) => sum + lotRemainingCostMinor(lot) / 100, 0)), inTransitValue: roundMoney(currentTransfers.filter((item) => item.status === "dispatched" && (!input.storeId || item.fromStoreId === input.storeId || item.toStoreId === input.storeId)).flatMap((item) => item.lines).flatMap((line) => line.allocations ?? []).reduce((sum, allocation) => sum + (allocation.costMinor ?? Math.round(allocation.quantity * allocation.unitCost * 100)) / 100, 0)) };
+};
+
+const supplierInvoiceStatus = (invoice: SupplierInvoiceRecord, today = new Date().toISOString().slice(0, 10)): SupplierInvoiceStatus => {
+  if (invoice.paidAmount >= invoice.grossAmount) return "paid";
+  if (invoice.dueDate < today) return "overdue";
+  return invoice.paidAmount > 0 ? "partial" : "unpaid";
+};
+
+export const invoiceWithStatus = (invoice: SupplierInvoiceRecord) => ({
+  ...invoice,
+  balance: roundMoney(Math.max(0, invoice.grossAmount - invoice.paidAmount)),
+  status: supplierInvoiceStatus(invoice),
+});
+
+export const listSupplierInvoices = async (tenantId: string, filters?: { from?: string; to?: string; storeId?: string; supplierId?: string; status?: SupplierInvoiceStatus }) => {
+  const invoices = await queryCollection<SupplierInvoiceRecord>(tenantId, "SUPPLIER_INVOICE", { from: filters?.from, to: filters?.to, descending: true, limit: 1000 });
+  return invoices.map(invoiceWithStatus).filter((invoice) => (!filters?.storeId || invoice.storeId === filters.storeId) && (!filters?.supplierId || invoice.supplierId === filters.supplierId) && (!filters?.status || invoice.status === filters.status));
+};
+
+export const getSupplierInvoice = async (tenantId: string, id: string) => {
+  const invoice = await get<SupplierInvoiceRecord>(tenantId, "SUPPLIER_INVOICE", id);
+  return invoice ? invoiceWithStatus(invoice) : null;
+};
+
+export const listUnbilledGoodsReceipts = async (tenantId: string) => (await listGoodsReceipts(tenantId, { limit: 1000 }))
+  .filter((receipt) => receipt.accountingTracked === true && !receipt.supplierInvoiceId);
+
+const buildSupplierInvoice = (receipt: GoodsReceiptRecord, supplier: SupplierRecord, input: { invoiceNumber: string; invoiceDate?: string | null; paymentTermsDays?: number | null }, actor: Actor, now: string): SupplierInvoiceRecord => {
+  const invoiceNumber = normalizedCode(input.invoiceNumber);
+  if (!invoiceNumber) throw new Error("Supplier invoice number is required");
+  const today = now.slice(0, 10); const invoiceDate = input.invoiceDate?.trim() || today;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(invoiceDate) || Number.isNaN(Date.parse(`${invoiceDate}T00:00:00Z`)) || invoiceDate > today) throw new Error("Invoice date must be a valid date that is not in the future");
+  const paymentTermsDays = input.paymentTermsDays ?? supplier.defaultPaymentTermsDays ?? 0;
+  if (!Number.isInteger(paymentTermsDays) || paymentTermsDays < 0 || paymentTermsDays > 365) throw new Error("Payment terms must be between 0 and 365 days");
+  const due = new Date(`${invoiceDate}T00:00:00Z`); due.setUTCDate(due.getUTCDate() + paymentTermsDays);
+  const grossAmount = roundMoney(receipt.lines.reduce((sum, line) => sum + (line.grossAmount ?? line.acceptedBaseQuantity * (line.grossUnitCost ?? line.unitCost)), 0));
+  const taxableAmount = roundMoney(receipt.lines.reduce((sum, line) => sum + (line.taxableAmount ?? 0), 0));
+  const withholdingTaxableAmount = roundMoney(receipt.lines.filter((line) => line.vatClass === "standard").reduce((sum, line) => sum + (line.taxableAmount ?? 0), 0));
+  const vatAmount = roundMoney(receipt.lines.reduce((sum, line) => sum + (line.vatAmount ?? 0), 0));
+  const id = randomUUID();
+  return { id, invoiceNumber, receiptId: receipt.id, receiptNumber: receipt.receiptNumber, purchaseOrderId: receipt.purchaseOrderId, orderNumber: receipt.orderNumber, supplierId: receipt.supplierId, supplierName: receipt.supplierName, storeId: receipt.storeId, storeName: receipt.storeName, invoiceDate, dueDate: due.toISOString().slice(0, 10), paymentTermsDays, grossAmount, taxableAmount, withholdingTaxableAmount, vatAmount, paidAmount: 0, payments: [], createdBy: actor.id, createdByName: actor.name, createdAt: now, updatedAt: now };
+};
+
+export const createSupplierInvoiceForReceipt = async (tenantId: string, receiptId: string, input: { invoiceNumber: string; invoiceDate?: string | null; paymentTermsDays?: number | null }, actor: Actor, requestId: string) => {
+  const payload = { receiptId, ...input }; const previous = await existingIdempotentResult<SupplierInvoiceRecord>(tenantId, "create_supplier_invoice", requestId, payload); if (previous) return invoiceWithStatus(previous);
+  const receipt = await getGoodsReceipt(tenantId, receiptId); if (!receipt || receipt.accountingTracked !== true) throw new Error("Tracked goods receipt not found");
+  if (receipt.supplierInvoiceId) throw new Error("This receipt already has a supplier invoice");
+  const supplier = await getSupplier(tenantId, receipt.supplierId); if (!supplier) throw new Error("Supplier not found");
+  const now = new Date().toISOString(); const invoice = buildSupplierInvoice(receipt, supplier, input, actor, now);
+  const nextReceipt = { ...receipt, invoiceNumber: invoice.invoiceNumber, supplierInvoiceId: invoice.id };
+  return invoiceWithStatus(await commitIdempotent(tenantId, "create_supplier_invoice", requestId, payload, invoice, [
+    { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "SUPPLIER_INVOICE", invoice.id), accessPartition: collection(tenantId, "SUPPLIER_INVOICE"), accessSort: `${invoice.invoiceDate}#${invoice.id}`, entityType: "supplier_invoice", tenantId, ...invoice }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+    { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "LOOKUP#SUPPLIER_INVOICE", `${invoice.supplierId}#${invoice.invoiceNumber}`), entityType: "supplier_invoice_lookup", tenantId, invoiceId: invoice.id }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+    { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "RECEIPT", receipt.id), accessPartition: collection(tenantId, "GOODS_RECEIPT"), accessSort: `${receipt.createdAt}#${receipt.id}`, entityType: "goods_receipt", tenantId, ...nextReceipt }, ConditionExpression: "attribute_exists(partitionKey) AND attribute_not_exists(supplierInvoiceId)" } },
+  ]));
+};
+
+export const recordSupplierPayment = async (tenantId: string, invoiceId: string, input: { amount: number; method: SupplierPaymentRecord["method"]; reference?: string | null; paidAt: string }, actor: Actor, requestId: string) => {
+  const payload = { invoiceId, ...input }; const previous = await existingIdempotentResult<SupplierInvoiceRecord>(tenantId, "supplier_payment", requestId, payload); if (previous) return invoiceWithStatus(previous);
+  const invoice = await get<SupplierInvoiceRecord>(tenantId, "SUPPLIER_INVOICE", invoiceId); if (!invoice) throw new Error("Supplier invoice not found");
+  const amountMinor = Math.round(input.amount * 100); const balanceMinor = Math.round((invoice.grossAmount - invoice.paidAmount) * 100);
+  if (!Number.isInteger(amountMinor) || amountMinor <= 0) throw new Error("Payment amount must be greater than zero");
+  if (amountMinor > balanceMinor) throw new Error("Payment cannot exceed the invoice balance");
+  if (!/^(cash|bank_transfer|mobile_money|cheque|other)$/.test(input.method)) throw new Error("Invalid supplier payment method");
+  const today = new Date().toISOString().slice(0, 10); if (!/^\d{4}-\d{2}-\d{2}$/.test(input.paidAt) || input.paidAt > today || input.paidAt < invoice.invoiceDate) throw new Error("Payment date must be between the invoice date and today");
+  const settings = await getBusinessSettings(tenantId);
+  const grossMinor = Math.max(1, Math.round(invoice.grossAmount * 100)); const withholdingTaxableMinor = Math.round(invoice.withholdingTaxableAmount * 100);
+  const withheldMinor = withholdingVatMinor(amountMinor, withholdingTaxableMinor, grossMinor, settings.vatRegistered && settings.withholdingVatAgent);
+  const now = new Date().toISOString(); const payment: SupplierPaymentRecord = { id: randomUUID(), invoiceId, supplierId: invoice.supplierId, amount: amountMinor / 100, supplierPaidAmount: (amountMinor - withheldMinor) / 100, withholdingVatAmount: withheldMinor / 100, method: input.method, reference: input.reference?.trim() ?? "", paidAt: input.paidAt, status: "active", voidReason: null, voidedAt: null, voidedBy: null, actorId: actor.id, actorName: actor.name, createdAt: now };
+  const next: SupplierInvoiceRecord = { ...invoice, paidAmount: roundMoney(invoice.paidAmount + payment.amount), payments: [...invoice.payments, payment], updatedAt: now };
+  return invoiceWithStatus(await commitIdempotent(tenantId, "supplier_payment", requestId, payload, next, [
+    { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "SUPPLIER_INVOICE", invoice.id), accessPartition: collection(tenantId, "SUPPLIER_INVOICE"), accessSort: `${invoice.invoiceDate}#${invoice.id}`, entityType: "supplier_invoice", tenantId, ...next }, ConditionExpression: "updatedAt = :expected", ExpressionAttributeValues: { ":expected": invoice.updatedAt } } },
+  ]));
+};
+
+export const voidSupplierPayment = async (tenantId: string, invoiceId: string, paymentId: string, reason: string, actor: Actor, requestId: string) => {
+  const payload = { invoiceId, paymentId, reason }; const previous = await existingIdempotentResult<SupplierInvoiceRecord>(tenantId, "void_supplier_payment", requestId, payload); if (previous) return invoiceWithStatus(previous);
+  if (reason.trim().length < 3) throw new Error("A void reason is required");
+  const invoice = await get<SupplierInvoiceRecord>(tenantId, "SUPPLIER_INVOICE", invoiceId); if (!invoice) throw new Error("Supplier invoice not found");
+  const current = invoice.payments.find((payment) => payment.id === paymentId); if (!current) throw new Error("Supplier payment not found"); if (current.status === "voided") throw new Error("Supplier payment is already voided");
+  const now = new Date().toISOString(); const payments = invoice.payments.map((payment) => payment.id === paymentId ? { ...payment, status: "voided" as const, voidReason: reason.trim(), voidedAt: now, voidedBy: actor.name } : payment);
+  const paidAmount = roundMoney(payments.filter((payment) => payment.status === "active").reduce((sum, payment) => sum + payment.amount, 0)); const next: SupplierInvoiceRecord = { ...invoice, payments, paidAmount, updatedAt: now };
+  return invoiceWithStatus(await commitIdempotent(tenantId, "void_supplier_payment", requestId, payload, next, [
+    { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "SUPPLIER_INVOICE", invoice.id), accessPartition: collection(tenantId, "SUPPLIER_INVOICE"), accessSort: `${invoice.invoiceDate}#${invoice.id}`, entityType: "supplier_invoice", tenantId, ...next }, ConditionExpression: "updatedAt = :expected", ExpressionAttributeValues: { ":expected": invoice.updatedAt } } },
+  ]));
 };

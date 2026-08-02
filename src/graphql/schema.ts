@@ -46,6 +46,7 @@ export const typeDefs = `#graphql
     categoryName: String!
     sellingPrice: Float!
     buyingPrice: Float!
+    vatClass: String
     baseUnit: String!
     stockUnit: String!
     tracksExpiry: Boolean!
@@ -86,6 +87,10 @@ export const typeDefs = `#graphql
     promotionApplied: Boolean
     cost: Float!
     total: Float!
+    vatClass: String
+    vatRateBasisPoints: Int
+    taxableAmount: Float
+    vatAmount: Float
   }
 
   type Sale {
@@ -180,6 +185,10 @@ export const typeDefs = `#graphql
     thankYouMessage: String!
     returnPolicy: String!
     storeName: String!
+    vatRegistered: Boolean!
+    kraPin: String!
+    vatEffectiveFrom: String
+    withholdingVatAgent: Boolean!
     updatedAt: String!
   }
 
@@ -262,6 +271,8 @@ export const typeDefs = `#graphql
     phone: String!
     email: String!
     address: String!
+    vatRegistered: Boolean
+    defaultPaymentTermsDays: Int
     status: String!
     createdAt: String!
     updatedAt: String!
@@ -372,6 +383,12 @@ export const typeDefs = `#graphql
     actualPricePerPurchaseUnit: Float!
     priceVariance: Float!
     unitCost: Float!
+    grossUnitCost: Float
+    vatClass: String
+    vatRateBasisPoints: Int
+    taxableAmount: Float
+    vatAmount: Float
+    grossAmount: Float
     lotId: ID
   }
 
@@ -386,6 +403,8 @@ export const typeDefs = `#graphql
     storeName: String!
     deliveryNote: String!
     invoiceNumber: String!
+    accountingTracked: Boolean
+    supplierInvoiceId: ID
     lines: [GoodsReceiptLine!]!
     createdBy: ID!
     createdByName: String!
@@ -490,6 +509,75 @@ export const typeDefs = `#graphql
     replenishment: [ReplenishmentSuggestion!]!
   }
 
+  type SupplierPayment {
+    id: ID!
+    invoiceId: ID!
+    supplierId: ID!
+    amount: Float!
+    supplierPaidAmount: Float!
+    withholdingVatAmount: Float!
+    method: String!
+    reference: String!
+    paidAt: String!
+    status: String!
+    voidReason: String
+    voidedAt: String
+    voidedBy: String
+    actorName: String!
+    createdAt: String!
+  }
+
+  type SupplierInvoice {
+    id: ID!
+    invoiceNumber: String!
+    receiptId: ID!
+    receiptNumber: String!
+    purchaseOrderId: ID!
+    orderNumber: String!
+    supplierId: ID!
+    supplierName: String!
+    storeId: ID!
+    storeName: String!
+    invoiceDate: String!
+    dueDate: String!
+    paymentTermsDays: Int!
+    grossAmount: Float!
+    taxableAmount: Float!
+    withholdingTaxableAmount: Float!
+    vatAmount: Float!
+    paidAmount: Float!
+    balance: Float!
+    status: String!
+    payments: [SupplierPayment!]!
+    createdByName: String!
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type AccountingSummary {
+    from: String!
+    to: String!
+    vatRegistered: Boolean!
+    grossSales: Float!
+    netRevenue: Float!
+    outputVat: Float!
+    costOfGoodsSold: Float!
+    grossMargin: Float!
+    stockLoss: Float!
+    tradingResult: Float!
+    supplierPayments: Float!
+    supplierCashPaid: Float!
+    withholdingVat: Float!
+    estimatedInputVat: Float!
+    estimatedVatPosition: Float!
+    inventoryCostValue: Float!
+    inventoryRetailValue: Float!
+    potentialMargin: Float!
+    outstandingPayables: Float!
+    overduePayables: Float!
+    invoiceCount: Int!
+  }
+
   input PurchaseOrderLineInput { productId: ID!, orderedPurchaseQuantity: Int!, pricePerPurchaseUnit: Float }
   input GoodsReceiptLineInput { purchaseOrderLineId: ID!, batchNumber: String, expiryDate: String, deliveredBaseQuantity: Int!, acceptedBaseQuantity: Int!, damagedBaseQuantity: Int!, rejectedBaseQuantity: Int!, actualPricePerPurchaseUnit: Float! }
   input StockTransferLineInput { productId: ID!, quantity: Int! }
@@ -536,10 +624,13 @@ export const typeDefs = `#graphql
     replenishmentSuggestions(storeId: ID!, supplierId: ID!): [ReplenishmentSuggestion!]!
     supplyChainReport(from: String!, to: String!, storeId: ID, supplierId: ID, productId: ID, status: String, expiryDays: Int = 30): SupplyChainReport!
     notifications(limit: Int = 20): [Notification!]!
+    supplierInvoices(from: String, to: String, storeId: ID, supplierId: ID, status: String): [SupplierInvoice!]!
+    unbilledGoodsReceipts: [GoodsReceipt!]!
+    accountingSummary(from: String!, to: String!, storeId: ID, supplierId: ID): AccountingSummary!
   }
 
   type Mutation {
-    createBusiness(name: String!): User!
+    createBusiness(name: String!, vatRegistered: Boolean = false, kraPin: String = "", vatEffectiveFrom: String, withholdingVatAgent: Boolean = false): User!
     inviteUser(email: String!, firstName: String!, lastName: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", storeId: ID!, storeIds: [ID!] = [], phone: String = ""): User!
     resendUserInvitation(username: String!): User!
     updateUserRoles(username: String!, roles: [String!]!): User!
@@ -548,20 +639,20 @@ export const typeDefs = `#graphql
     deleteStaffUser(username: String!): Boolean!
     updateMyProfile(phone: String!): StaffProfile!
     updateStaffProfile(userId: ID!, employeeCode: String!, jobTitle: String!, storeId: ID!, storeIds: [ID!] = [], phone: String!): StaffProfile!
-    updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
+    updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", thankYouMessage: String!, returnPolicy: String!, vatRegistered: Boolean, kraPin: String, vatEffectiveFrom: String, withholdingVatAgent: Boolean): BusinessSettings!
     updateBusinessMeasurementSettings(packageLabels: [PackageUnitLabelInput!]!): BusinessMeasurementSettings!
 
     createCategory(code: String!, name: String!, description: String = "", parentId: ID): Category!
     updateCategory(id: ID!, code: String!, name: String!, description: String = "", parentId: ID): Category!
     deleteCategory(id: ID!): Boolean!
-    createProduct(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, stockUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!, productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false): Product!
-    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, stockUnit: String, tracksExpiry: Boolean, saleVariants: [SaleVariantInput!], productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false, promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
+    createProduct(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, vatClass: String, stockUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!, productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false): Product!
+    updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, vatClass: String, stockUnit: String, tracksExpiry: Boolean, saleVariants: [SaleVariantInput!], productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false, promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
     archiveProduct(id: ID!): Product!
     completeSale(storeId: ID, customerName: String, paymentMethod: String!, amountTendered: Float, mpesaReference: String, items: [SaleItemInput!]!, requestId: ID!): Sale!
     createStore(code: String!, name: String!, address: String = "", receiptBusinessName: String = "", receiptAddress: String = "", receiptPhone: String = "", receiptEmail: String = "", receiptFooter: String = "", receiptReturnPolicy: String = ""): Store!
     updateStore(id: ID!, name: String, address: String, receiptBusinessName: String, receiptAddress: String, receiptPhone: String, receiptEmail: String, receiptFooter: String, receiptReturnPolicy: String, status: String): Store!
-    createSupplier(code: String!, name: String!, contactName: String = "", phone: String = "", email: String = "", address: String = ""): Supplier!
-    updateSupplier(id: ID!, name: String, contactName: String, phone: String, email: String, address: String, status: String): Supplier!
+    createSupplier(code: String!, name: String!, contactName: String = "", phone: String = "", email: String = "", address: String = "", vatRegistered: Boolean = false, defaultPaymentTermsDays: Int = 0): Supplier!
+    updateSupplier(id: ID!, name: String, contactName: String, phone: String, email: String, address: String, vatRegistered: Boolean, defaultPaymentTermsDays: Int, status: String): Supplier!
     upsertSupplierProduct(supplierId: ID!, productId: ID!, productUnitId: ID, supplierSku: String = "", purchaseUnit: String = "", purchaseQuantity: Float = 1, purchaseMeasurementUnit: String = "each", lastPurchasePrice: Float, preferred: Boolean!): SupplierProduct!
     removeSupplierProduct(supplierId: ID!, productId: ID!): Boolean!
     upsertStorePolicy(storeId: ID!, productId: ID!, reorderPoint: Int!, targetQuantity: Int!): StoreProductPolicy!
@@ -571,7 +662,7 @@ export const typeDefs = `#graphql
     sendPurchaseOrderEmail(id: ID!): PurchaseOrder!
     closePurchaseOrder(id: ID!, reason: String!): PurchaseOrder!
     cancelPurchaseOrder(id: ID!, reason: String = "Cancelled"): PurchaseOrder!
-    receivePurchaseOrder(purchaseOrderId: ID!, deliveryNote: String = "", invoiceNumber: String = "", lines: [GoodsReceiptLineInput!]!, requestId: ID!): GoodsReceipt!
+    receivePurchaseOrder(purchaseOrderId: ID!, deliveryNote: String = "", invoiceNumber: String = "", invoiceDate: String, paymentTermsDays: Int, lines: [GoodsReceiptLineInput!]!, requestId: ID!): GoodsReceipt!
     writeOffLot(lotId: ID!, quantity: Int!, type: String!, reason: String!, requestId: ID!): StockMovement!
     countInventoryLot(lotId: ID!, physicalQuantity: Int!, reason: String!, requestId: ID!): StockMovement!
     createStockTransfer(fromStoreId: ID!, toStoreId: ID!, notes: String = "", lines: [StockTransferLineInput!]!, requestId: ID!): StockTransfer!
@@ -589,5 +680,8 @@ export const typeDefs = `#graphql
     closeCashShift(id: ID!, countedCash: Float!, requestId: ID!): CashShift!
     markNotificationRead(id: ID!): Notification!
     markAllNotificationsRead: Boolean!
+    createSupplierInvoice(receiptId: ID!, invoiceNumber: String!, invoiceDate: String, paymentTermsDays: Int, requestId: ID!): SupplierInvoice!
+    recordSupplierPayment(invoiceId: ID!, amount: Float!, method: String!, reference: String = "", paidAt: String!, requestId: ID!): SupplierInvoice!
+    voidSupplierPayment(invoiceId: ID!, paymentId: ID!, reason: String!, requestId: ID!): SupplierInvoice!
   }
 `;
