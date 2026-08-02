@@ -187,20 +187,5 @@ design; run the seed only for a chosen demo or test workspace.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for tenant boundaries, identity
 ownership, DynamoDB access patterns, invitations, soft deletion, and deployment
-decisions.
-
-## Product-unit migration
-
-Package names are configured once per business, while exact conversions are
-stored on each product. Existing sale variants and supplier-package records can
-be migrated safely for one workspace after deploying the compatible backend:
-
-```sh
-yarn migrate:product-units '<workspace-id>'
-```
-
-The migration is idempotent. It adds product units and supplier references but
-does not rewrite historical sales, purchase orders, receipts, lots, or stock
-movements. Deploy the backend before the updated client, run the migration for
-each workspace, and verify product and supplier setup before retiring legacy
-conversion inputs.
+decisions. Dated migrations, rollout notes, and remediation history are kept in
+[docs/CHANGELOG.md](docs/CHANGELOG.md).
