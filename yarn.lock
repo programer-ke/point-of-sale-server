@@ -164,19 +164,19 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@aws-sdk/client-dynamodb@^3.1096.0":
-  version "3.1096.0"
-  resolved "https://registry.yarnpkg.com/@aws-sdk/client-dynamodb/-/client-dynamodb-3.1096.0.tgz#f90866ee41760b1b6271800036a20e0e9fcc9cfe"
-  integrity sha512-MECHramebCF5ThSH+hNFKeZBwrT2k1w3Vhn7tVGG1UYEgZZSDeP1okNN2rIzCXaGuACHDa+EyqksAfJAqLj7Xw==
+"@aws-sdk/client-dynamodb@^3.1098.0":
+  version "3.1098.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/client-dynamodb/-/client-dynamodb-3.1098.0.tgz#2e10be4b14568518457411369c4616d0a1c021fb"
+  integrity sha512-7o/3jD4/F8fo5BE9uMgsbIoaArlcnCNv6Bu11zUeF4Bgm6hYskQIGTK4UMTJ+qawez+FZ0Sg1E69woGd6gDabA==
   dependencies:
-    "@aws-sdk/core" "^3.977.1"
-    "@aws-sdk/credential-provider-node" "^3.972.73"
-    "@aws-sdk/dynamodb-codec" "^3.973.36"
-    "@aws-sdk/middleware-endpoint-discovery" "^3.972.26"
+    "@aws-sdk/core" "^3.977.3"
+    "@aws-sdk/credential-provider-node" "^3.972.75"
+    "@aws-sdk/dynamodb-codec" "^3.973.38"
+    "@aws-sdk/middleware-endpoint-discovery" "^3.972.27"
     "@aws-sdk/types" "^3.974.2"
-    "@smithy/core" "^3.29.8"
-    "@smithy/fetch-http-handler" "^5.6.10"
-    "@smithy/node-http-handler" "^4.9.10"
+    "@smithy/core" "^3.31.1"
+    "@smithy/fetch-http-handler" "^5.6.13"
+    "@smithy/node-http-handler" "^4.9.13"
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
@@ -278,7 +278,7 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@aws-sdk/credential-provider-node@^3.972.73", "@aws-sdk/credential-provider-node@^3.972.74", "@aws-sdk/credential-provider-node@^3.972.75":
+"@aws-sdk/credential-provider-node@^3.972.74", "@aws-sdk/credential-provider-node@^3.972.75":
   version "3.972.76"
   resolved "https://registry.yarnpkg.com/@aws-sdk/credential-provider-node/-/credential-provider-node-3.972.76.tgz#5c9e9c563be9d23ede6901fd59ebbef3dd2f8b46"
   integrity sha512-1yzLmRiYSgGC25v7ZZEwJn/auhHHTIHgFOmzL2f36hf1+7jSLcX+1QrAz4760WEzPiiQl8xmlpFhHfl2OoyVzA==
@@ -331,13 +331,13 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@aws-sdk/dynamodb-codec@^3.973.36":
-  version "3.973.36"
-  resolved "https://registry.yarnpkg.com/@aws-sdk/dynamodb-codec/-/dynamodb-codec-3.973.36.tgz#87c2c0ac7e9c656f9bd688c269824ab7650318f2"
-  integrity sha512-CzSjdIF8ZqSad5wUaqJbHZ8sF7tOKRHZJYoOG95J54n+OpE/ByrWm7mUP8wvNdnu99eZkSCA2cPFIci834SJBg==
+"@aws-sdk/dynamodb-codec@^3.973.38":
+  version "3.973.39"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/dynamodb-codec/-/dynamodb-codec-3.973.39.tgz#e7589c5071dbba043fe843c3291e0afc4c930a9d"
+  integrity sha512-6n1ER8qEvfruOfVFHVYrAtfSOk0ELudJDWyUMMb+M+tiP4rWSU44zd9ilQcM2/ESlRPyzxc2h7dU3R+UT+sVEg==
   dependencies:
-    "@aws-sdk/core" "^3.977.1"
-    "@smithy/core" "^3.29.8"
+    "@aws-sdk/core" "^3.977.4"
+    "@smithy/core" "^3.31.1"
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
@@ -360,14 +360,14 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@aws-sdk/middleware-endpoint-discovery@^3.972.26":
-  version "3.972.26"
-  resolved "https://registry.yarnpkg.com/@aws-sdk/middleware-endpoint-discovery/-/middleware-endpoint-discovery-3.972.26.tgz#1e251344676389c8a716852d31740a6ee79f06db"
-  integrity sha512-suOMAYAM43aSyC3cLBvvJIuNyg96nUsPvYQUrq4G+8Prt2qTpFETgaiXX7JP1gIcK5FF0Z2IdyEsPXseZATOPw==
+"@aws-sdk/middleware-endpoint-discovery@^3.972.27":
+  version "3.972.27"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/middleware-endpoint-discovery/-/middleware-endpoint-discovery-3.972.27.tgz#aab4ab90f081ca62313b8501358851e3c8b489f2"
+  integrity sha512-5AJlxrsg27IGGiQauWOdVyqK55EN0EMIwXndkVHhBiPT4CtdSaz89/sAENSw+GP4KF+BOWcgycZFNjkOLmfo1A==
   dependencies:
     "@aws-sdk/endpoint-cache" "^3.972.9"
     "@aws-sdk/types" "^3.974.2"
-    "@smithy/core" "^3.29.8"
+    "@smithy/core" "^3.31.1"
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
