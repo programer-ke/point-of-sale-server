@@ -40,7 +40,7 @@ async function startServer() {
         port: Number(PORT),
       },
       context: async ({ req }) => {
-        const requestedRole = req.headers["x-tomkondi-role"];
+        const requestedRole = req.headers["x-biasharakit-role"];
         return contextFromAuthorization(
           req.headers.authorization,
           Array.isArray(requestedRole) ? requestedRole[0] : requestedRole,

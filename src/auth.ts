@@ -117,7 +117,8 @@ export const contextFromApiGatewayEvent = async (
     };
   };
   const claims = request.requestContext?.authorizer?.jwt?.claims;
-  const requestedRole = request.headers?.["x-tomkondi-role"] ?? request.headers?.["X-Tomkondi-Role"];
+  const requestedRole = request.headers?.["x-biasharakit-role"]
+    ?? request.headers?.["X-BiasharaKit-Role"];
   if (process.env.TRUST_API_GATEWAY_JWT_AUTHORIZER === "true" && claims) {
     return { auth: await attachTenantMembership(authenticatedUserFromClaims(claims, requestedRole)) };
   }

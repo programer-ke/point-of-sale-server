@@ -109,7 +109,7 @@ export const sendPurchaseOrderEmail = async (
   const content = renderPurchaseOrderEmail(order, supplier, business);
   try {
     const response = await client.send(new SendEmailCommand({
-      FromEmailAddress: process.env.SES_FROM_EMAIL || "Tomkondi Orders <orders@tomkondi.shop>",
+      FromEmailAddress: process.env.SES_FROM_EMAIL || "BiasharaKit Orders <orders@biasharakit.com>",
       Destination: { ToAddresses: [recipient] },
       Content: { Simple: {
         Subject: { Data: content.subject, Charset: "UTF-8" },

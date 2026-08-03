@@ -332,7 +332,7 @@ const sendPaymentReviewEmail = async (tenantId: string, approved: boolean, reaso
   const owner = await getCognitoUser(account.ownerUsername);
   await sendBillingEmail({
     to: owner.email,
-    subject: approved ? "Tomkondi payment confirmed" : "Tomkondi payment needs attention",
+    subject: approved ? "BiasharaKit payment confirmed" : "BiasharaKit payment needs attention",
     heading: approved ? "Payment confirmed" : "Payment was not confirmed",
     message: approved ? "Your subscription payment has been confirmed and the workspace billing period has been updated." : `The submitted payment could not be confirmed. ${reason}`,
   });

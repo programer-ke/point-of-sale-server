@@ -246,7 +246,7 @@ const businessSettingsKey = (tenantId: string) => ({ partitionKey: tenantKey(ten
 const measurementSettingsKey = (tenantId: string) => ({ partitionKey: tenantKey(tenantId, "SETTINGS#MEASUREMENTS"), sortKey: "PROFILE" });
 const checkoutSettingsKey = (tenantId: string) => ({ partitionKey: tenantKey(tenantId, "SETTINGS#CHECKOUT"), sortKey: "PROFILE" });
 const defaultBusinessSettings: BusinessSettingsRecord = {
-  businessName: "Tomkondi Supermarket",
+  businessName: "My Business",
   address: "Nairobi, Kenya",
   phone: "",
   email: "",

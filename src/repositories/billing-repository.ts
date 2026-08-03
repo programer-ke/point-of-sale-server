@@ -105,7 +105,7 @@ export const getBillingAccount = async (tenantId: string) => {
 
 export const requireBillingAccount = async (tenantId: string) => {
   const account = await getBillingAccount(tenantId);
-  if (!account) throw new Error("Billing is not configured for this workspace. Contact Tomkondi support.");
+  if (!account) throw new Error("Billing is not configured for this workspace. Contact BiasharaKit support.");
   return account;
 };
 

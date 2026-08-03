@@ -47,7 +47,7 @@ async function main() {
     /permission/,
   );
   const staffMode = await contextFromApiGatewayEvent({
-    headers: { "x-tomkondi-role": "staff" },
+    headers: { "x-biasharakit-role": "staff" },
     requestContext: { authorizer: { jwt: { claims: {
       sub: "user-1",
       username: "user@example.com",
@@ -58,7 +58,7 @@ async function main() {
   assert.throws(() => requireRole(staffMode, ["admin"]), /permission/);
   await assert.rejects(
     () => contextFromApiGatewayEvent({
-      headers: { "x-tomkondi-role": "admin" },
+      headers: { "x-biasharakit-role": "admin" },
       requestContext: { authorizer: { jwt: { claims: {
         sub: "staff-only",
         username: "staff@example.com",
@@ -112,7 +112,7 @@ async function main() {
   assert.throws(() => requireRole(membershipScoped, ["admin"]), /permission/);
   await assert.rejects(
     () => contextFromApiGatewayEvent({
-      headers: { "x-tomkondi-role": "owner" },
+      headers: { "x-biasharakit-role": "owner" },
       requestContext: { authorizer: { jwt: { claims: {
         sub: "user-1",
         username: "user@example.com",

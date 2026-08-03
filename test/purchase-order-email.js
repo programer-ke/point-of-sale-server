@@ -26,7 +26,7 @@ const supplier = {
   createdAt: order.createdAt, updatedAt: order.createdAt,
 };
 const business = {
-  businessName: "Tomkondi <Shop>", address: "Nairobi", phone: "123", email: "sales@example.com",
+  businessName: "Example <Shop>", address: "Nairobi", phone: "123", email: "sales@example.com",
   thankYouMessage: "", returnPolicy: "", storeName: "Main", updatedAt: order.updatedAt,
 };
 

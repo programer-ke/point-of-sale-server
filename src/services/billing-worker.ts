@@ -9,9 +9,9 @@ import { sendBillingEmail } from "./billing-email";
 
 const reminderFor = (endOn: string, today: string, status: string) => {
   const days = (Date.parse(`${endOn}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000;
-  if ([7, 3, 1].includes(days)) return { key: `before-${days}`, subject: `Tomkondi payment due in ${days} day${days === 1 ? "" : "s"}`, message: `Your subscription is paid through ${endOn}. Renew before the grace period ends to keep staff access active.` };
-  if (days === 0) return { key: "due", subject: "Tomkondi payment is due", message: `Your subscription is due today, ${endOn}. A one-day grace period is now available.` };
-  if ((status === "restricted" || status === "cancelled") && today === addBillingDays(endOn, 2)) return { key: "restricted", subject: "Tomkondi staff access is restricted", message: "The payment grace period has ended. Business administrators can still sign in to review billing, reports, and exports." };
+  if ([7, 3, 1].includes(days)) return { key: `before-${days}`, subject: `BiasharaKit payment due in ${days} day${days === 1 ? "" : "s"}`, message: `Your subscription is paid through ${endOn}. Renew before the grace period ends to keep staff access active.` };
+  if (days === 0) return { key: "due", subject: "BiasharaKit payment is due", message: `Your subscription is due today, ${endOn}. A one-day grace period is now available.` };
+  if ((status === "restricted" || status === "cancelled") && today === addBillingDays(endOn, 2)) return { key: "restricted", subject: "BiasharaKit staff access is restricted", message: "The payment grace period has ended. Business administrators can still sign in to review billing, reports, and exports." };
   return null;
 };
 

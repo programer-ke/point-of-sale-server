@@ -1,4 +1,4 @@
-# Point of sale server
+# BiasharaKit server
 
 Apollo GraphQL server with separate entry points for local development and the
 AWS Lambda Node.js 24 runtime.
@@ -38,7 +38,7 @@ AWS_REGION=us-east-1
 AWS_DYNAMODB_TABLE=pos_system
 COGNITO_USER_POOL_ID=us-east-1_example
 COGNITO_USER_POOL_CLIENT_ID=exampleclientid
-SES_FROM_EMAIL=Tomkondi Orders <orders@tomkondi.shop>
+SES_FROM_EMAIL=BiasharaKit Orders <orders@biasharakit.com>
 HOST=127.0.0.1
 PORT=4000
 BILLING_ENFORCEMENT_ENABLED=false
@@ -59,7 +59,7 @@ integration. Terraform configures the deployed handler as
 - `COGNITO_USER_POOL_CLIENT_ID`
 - `TRUST_API_GATEWAY_JWT_AUTHORIZER=true`
 - `NODE_ENV=production`
-- `SES_FROM_EMAIL=Tomkondi Orders <orders@tomkondi.shop>`
+- `SES_FROM_EMAIL=BiasharaKit Orders <orders@biasharakit.com>`
 - AWS-generated region and temporary execution-role credentials
 
 No application secret is currently required. GitHub Actions assumes only the

@@ -145,3 +145,7 @@ orders. Existing PO snapshots remain authoritative.
 ### Status
 
 Active until every existing workspace has been migrated and verified.
+# 2026-08-03 — BiasharaKit rebrand
+
+- Rebranded customer-facing API errors, billing reminders, and email defaults from Tomkondi to BiasharaKit.
+- Replaced the former active-role request header with `x-biasharakit-role`; the Tomkondi header is no longer accepted.

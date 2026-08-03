@@ -1,4 +1,4 @@
-# Point-of-sale architecture
+# BiasharaKit architecture
 
 ## System boundary
 

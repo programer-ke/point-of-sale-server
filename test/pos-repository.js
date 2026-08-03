@@ -277,7 +277,7 @@ async function main() {
     throw new Error(`Unexpected command ${command.constructor.name}`);
   };
   const defaults = await repository.getBusinessSettings(tenantId);
-  assert.equal(defaults.businessName, "Tomkondi Supermarket");
+  assert.equal(defaults.businessName, "My Business");
   const settings = await repository.updateBusinessSettings(
     tenantId,
     { businessName: "Test Market", address: "Nairobi", phone: "+254700000000", email: "hello@example.com", thankYouMessage: "Asante sana", returnPolicy: "Goods once sold cannot be returned." },
