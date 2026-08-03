@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { DeleteCommand, GetCommand, PutCommand, QueryCommand, ScanCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { dynamoDB, TABLE_NAME } from "../config/db";
 import type { UserRole } from "../auth";
 
@@ -42,6 +42,29 @@ export const getTenantMembership = async (userId: string) => {
 export const getTenantRecord = async (tenantId: string) => {
   const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: tenantKey(tenantId) }));
   return clean<TenantRecord>(response.Item);
+};
+
+/**
+ * Platform administration needs a complete tenant registry, including tenants whose
+ * billing account was never created. Tenant profiles predate the platform index, so
+ * this deliberately uses a paginated, metadata-only scan until they are backfilled.
+ */
+export const listTenantRecords = async () => {
+  const tenants: TenantRecord[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const response = await dynamoDB.send(new ScanCommand({
+      TableName: TABLE_NAME,
+      FilterExpression: "entityType = :type",
+      ProjectionExpression: "partitionKey, sortKey, entityType, id, #name, ownerUserId, #status, createdAt, updatedAt",
+      ExpressionAttributeNames: { "#name": "name", "#status": "status" },
+      ExpressionAttributeValues: { ":type": "tenant" },
+      ExclusiveStartKey: exclusiveStartKey,
+    }));
+    tenants.push(...(response.Items ?? []).map((item) => clean<TenantRecord>(item)!));
+    exclusiveStartKey = response.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+  return tenants;
 };
 
 export const listTenantMemberships = async (tenantId: string) => {

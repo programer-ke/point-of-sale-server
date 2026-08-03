@@ -142,6 +142,75 @@ export const createBillingAccount = async (input: {
   return account;
 };
 
+export const assignPlatformBillingPlan = async (input: {
+  tenantId: string;
+  tenantName: string;
+  ownerUserId: string;
+  ownerUsername: string;
+  planCode: PlanCode;
+  termsVersion: string;
+  privacyVersion: string;
+  actorId: string;
+  reason: string;
+}) => {
+  const reason = input.reason.trim();
+  if (reason.length < 3) throw new Error("Provide a reason for the plan assignment");
+  const current = await getBillingAccount(input.tenantId);
+  const now = new Date().toISOString();
+  const trialStartedOn = kenyaDate();
+  const next: BillingAccount = current ? {
+    ...current,
+    tenantName: input.tenantName,
+    ownerUserId: input.ownerUserId,
+    ownerUsername: input.ownerUsername,
+    planCode: input.planCode,
+    pendingPlanCode: null,
+    override: null,
+    updatedAt: now,
+  } : {
+    tenantId: input.tenantId,
+    tenantName: input.tenantName,
+    ownerUserId: input.ownerUserId,
+    ownerUsername: input.ownerUsername,
+    planCode: input.planCode,
+    trialStartedOn,
+    trialEndsOn: addBillingDays(trialStartedOn, 13),
+    paidThrough: null,
+    cancelledAt: null,
+    pendingPlanCode: null,
+    termsVersion: input.termsVersion,
+    privacyVersion: input.privacyVersion,
+    acceptedBy: input.actorId,
+    acceptedAt: now,
+    override: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const audit: BillingAudit = {
+    id: randomUUID(),
+    tenantId: input.tenantId,
+    action: current ? "billing_plan_assigned" : "billing_account_initialized",
+    actorId: input.actorId,
+    reason,
+    before: current ? JSON.stringify({ planCode: current.planCode, pendingPlanCode: current.pendingPlanCode, override: current.override }) : "null",
+    after: JSON.stringify({ planCode: next.planCode, pendingPlanCode: null, override: null }),
+    createdAt: now,
+  };
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
+    { Put: {
+      TableName: TABLE_NAME,
+      Item: { ...accountKey(input.tenantId), accessPartition: "PLATFORM#BILLING", accessSort: input.tenantId, entityType: "billing_account", ...next },
+      ConditionExpression: current ? "attribute_exists(partitionKey)" : "attribute_not_exists(partitionKey)",
+    } },
+    { Put: {
+      TableName: TABLE_NAME,
+      Item: { partitionKey: `TENANT#${input.tenantId}`, sortKey: `BILLING#AUDIT#${now}#${audit.id}`, entityType: "billing_audit", ...audit },
+      ConditionExpression: "attribute_not_exists(partitionKey)",
+    } },
+  ] }));
+  return next;
+};
+
 const listByPrefix = async <T>(tenantId: string, prefix: string) => {
   const response = await dynamoDB.send(new QueryCommand({
     TableName: TABLE_NAME,
@@ -296,13 +365,20 @@ export const scheduleBillingPlan = async (tenantId: string, planCode: PlanCode) 
 };
 
 export const listPlatformBillingAccounts = async () => {
-  const response = await dynamoDB.send(new QueryCommand({
-    TableName: TABLE_NAME,
-    IndexName: "AccessIndex",
-    KeyConditionExpression: "accessPartition = :partition",
-    ExpressionAttributeValues: { ":partition": "PLATFORM#BILLING" },
-  }));
-  return (response.Items ?? []).map((item) => clean<BillingAccount>(item)!);
+  const accounts: BillingAccount[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const response = await dynamoDB.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      IndexName: "AccessIndex",
+      KeyConditionExpression: "accessPartition = :partition",
+      ExpressionAttributeValues: { ":partition": "PLATFORM#BILLING" },
+      ExclusiveStartKey: exclusiveStartKey,
+    }));
+    accounts.push(...(response.Items ?? []).map((item) => clean<BillingAccount>(item)!));
+    exclusiveStartKey = response.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+  return accounts;
 };
 
 export const setBillingOverride = async (tenantId: string, override: BillingOverride, actorId: string) => {

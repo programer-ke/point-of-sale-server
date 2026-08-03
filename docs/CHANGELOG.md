@@ -149,3 +149,9 @@ Active until every existing workspace has been migrated and verified.
 
 - Rebranded customer-facing API errors, billing reminders, and email defaults from Tomkondi to BiasharaKit.
 - Replaced the former active-role request header with `x-biasharakit-role`; the Tomkondi header is no longer accepted.
+# Platform billing operations console
+
+- Platform admins now see the complete tenant registry, including businesses whose billing account is missing, without exposing sales or other customer operational data.
+- Added an audited standard-plan assignment action. It can initialize missing billing with a 14-day trial or reset an existing account to Biashara/Biashara Plus while preserving payment and cancellation dates.
+- Standard-plan assignment clears custom overrides and validates Biashara downgrade limits before applying the change.
+- Exposed the deployed billing enforcement, legal entity, KRA, support, Till, address, and payment-instruction configuration through the platform-admin GraphQL API.

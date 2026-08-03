@@ -26,10 +26,10 @@ export const MUTATION_POLICY: Record<string, MutationClass> = {
   openCashShift: "operational", recordCashMovement: "operational", closeCashShift: "operational", markNotificationRead: "operational",
   markAllNotificationsRead: "operational", createSupplierInvoice: "operational", recordSupplierPayment: "operational", voidSupplierPayment: "operational",
   submitBillingPayment: "billing", scheduleBillingPlan: "billing", cancelBillingSubscription: "billing",
-  confirmBillingPayment: "platform", rejectBillingPayment: "platform", updateBillingOverride: "platform", attachBillingEtimsReference: "platform",
+  confirmBillingPayment: "platform", rejectBillingPayment: "platform", assignPlatformBillingPlan: "platform", updateBillingOverride: "platform", attachBillingEtimsReference: "platform",
 };
 
-const platformQueries = new Set(["platformBillingAccounts", "platformBillingAccount"]);
+const platformQueries = new Set(["platformBillingAccounts", "platformBillingAccount", "platformBillingConfiguration"]);
 const accessQueries = new Set(["subscriptionAccess"]);
 const billingQueries = new Set(["billingOverview"]);
 const accountingQueries = new Set(["accountingSummary", "supplierInvoices", "unbilledGoodsReceipts"]);

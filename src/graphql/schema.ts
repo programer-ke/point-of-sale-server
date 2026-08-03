@@ -227,9 +227,9 @@ export const typeDefs = `#graphql
     trialStartedOn: String!, trialEndsOn: String!, paidThrough: String, graceEndsOn: String!, cancelledAt: String, pendingPlanCode: String,
     termsVersion: String!, privacyVersion: String!, acceptedAt: String!, createdAt: String!, updatedAt: String!
   }
-  type BillingConfiguration { vendorLegalName: String!, vendorKraPin: String!, billingAddress: String!, supportEmail: String!, supportPhone: String!, tillNumber: String!, paymentInstructions: String! }
+  type BillingConfiguration { enforcementEnabled: Boolean!, vendorLegalName: String!, vendorKraPin: String!, billingAddress: String!, supportEmail: String!, supportPhone: String!, tillNumber: String!, paymentInstructions: String! }
   type BillingOverview { account: BillingAccount!, usage: BillingUsage!, payments: [BillingPayment!]!, documents: [BillingDocument!]!, audits: [BillingAudit!]!, configuration: BillingConfiguration! }
-  type PlatformBillingSummary { account: BillingAccount!, usage: BillingUsage!, pendingPayments: Int! }
+  type PlatformBillingSummary { tenantId: ID!, tenantName: String!, billingConfigured: Boolean!, account: BillingAccount, usage: BillingUsage!, pendingPayments: Int! }
   type SubscriptionAccess { status: String!, planCode: String!, planName: String!, trialEndsOn: String, paidThrough: String, graceEndsOn: String, staffAccessAllowed: Boolean! }
 
   type StandardMeasurementUnit { code: String!, dimension: String!, baseUnit: String!, baseUnits: Int! }
@@ -667,6 +667,7 @@ export const typeDefs = `#graphql
     accountingSummary(from: String!, to: String!, storeId: ID, supplierId: ID): AccountingSummary!
     billingOverview: BillingOverview!
     platformBillingAccounts: [PlatformBillingSummary!]!
+    platformBillingConfiguration: BillingConfiguration!
     platformBillingAccount(tenantId: ID!): BillingOverview!
     subscriptionAccess: SubscriptionAccess!
   }
@@ -733,6 +734,7 @@ export const typeDefs = `#graphql
     cancelBillingSubscription: BillingAccount!
     confirmBillingPayment(tenantId: ID!, paymentId: ID!): BillingPayment!
     rejectBillingPayment(tenantId: ID!, paymentId: ID!, reason: String!): BillingPayment!
+    assignPlatformBillingPlan(tenantId: ID!, planCode: String!, reason: String!): BillingAccount!
     updateBillingOverride(tenantId: ID!, monthlyPriceKes: Int, activeUserLimit: Int, unlimitedUsers: Boolean = false, activeStoreLimit: Int, unlimitedStores: Boolean = false, vatAccounting: Boolean, multiStore: Boolean, exempt: Boolean = false, expiresOn: String, reason: String!): BillingAccount!
     attachBillingEtimsReference(tenantId: ID!, documentId: ID!, reference: String!): BillingDocument!
   }

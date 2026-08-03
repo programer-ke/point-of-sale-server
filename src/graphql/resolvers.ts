@@ -12,6 +12,8 @@ import {
   createTenant,
   deleteTenantMembership,
   getTenantMembership,
+  getTenantRecord,
+  listTenantRecords,
   listTenantMemberships,
   putTenantMembership,
   updateTenantMembershipRoles,
@@ -125,7 +127,9 @@ import { applyBillingPolicies, validateBiasharaDowngrade } from "../domain/billi
 import { PRIVACY_VERSION, TERMS_VERSION, validatePlanCode, type BillingOverride } from "../domain/billing";
 import {
   attachEtimsReference,
+  assignPlatformBillingPlan,
   billingAccountView,
+  billingEnforcementEnabled,
   cancelBillingSubscription,
   confirmBillingPayment,
   createBillingAccount,
@@ -305,6 +309,7 @@ const resolveCashierNames = async <T extends SaleRecord>(tenantId: string, sales
 };
 
 const billingConfiguration = () => ({
+  enforcementEnabled: billingEnforcementEnabled(),
   vendorLegalName: process.env.BILLING_VENDOR_LEGAL_NAME ?? "",
   vendorKraPin: process.env.BILLING_VENDOR_KRA_PIN ?? "",
   billingAddress: process.env.BILLING_VENDOR_ADDRESS ?? "",
@@ -523,12 +528,19 @@ const baseResolvers = {
     unbilledGoodsReceipts: (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return listUnbilledGoodsReceipts(tenant(context)); },
     accountingSummary: (_: unknown, args: { from: string; to: string; storeId?: string; supplierId?: string }, context: GraphQLContext) => { requireAdmin(context); const range = validateDateRange(args.from, args.to) as { from: string; to: string }; return accountingSummary(tenant(context), { ...range, storeId: args.storeId, supplierId: args.supplierId }); },
     billingOverview: (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return billingOverview(tenant(context)); },
+    platformBillingConfiguration: (_: unknown, _args: unknown, context: GraphQLContext) => { requirePlatformAdmin(context); return billingConfiguration(); },
     platformBillingAccounts: async (_: unknown, _args: unknown, context: GraphQLContext) => {
       requirePlatformAdmin(context);
-      const accounts = await listPlatformBillingAccounts();
-      return Promise.all(accounts.map(async (account) => {
-        const [usage, payments] = await Promise.all([billingUsage(account.tenantId), listBillingPayments(account.tenantId)]);
-        return { account: billingAccountView(account), usage, pendingPayments: payments.filter((payment) => payment.status === "submitted").length };
+      const [tenants, accounts] = await Promise.all([listTenantRecords(), listPlatformBillingAccounts()]);
+      const accountsByTenant = new Map(accounts.map((account) => [account.tenantId, account]));
+      const businesses = [...tenants];
+      for (const account of accounts) {
+        if (!businesses.some((business) => business.id === account.tenantId)) businesses.push({ id: account.tenantId, name: account.tenantName, ownerUserId: account.ownerUserId, status: "active", createdAt: account.createdAt, updatedAt: account.updatedAt });
+      }
+      return Promise.all(businesses.map(async (business) => {
+        const account = accountsByTenant.get(business.id) ?? null;
+        const [usage, payments] = await Promise.all([billingUsage(business.id), account ? listBillingPayments(business.id) : Promise.resolve([])]);
+        return { tenantId: business.id, tenantName: business.name, billingConfigured: Boolean(account), account: account ? billingAccountView(account) : null, usage, pendingPayments: payments.filter((payment) => payment.status === "submitted").length };
       }));
     },
     platformBillingAccount: (_: unknown, { tenantId }: { tenantId: string }, context: GraphQLContext) => { requirePlatformAdmin(context); return billingOverview(tenantId); },
@@ -860,6 +872,26 @@ const baseResolvers = {
     cancelBillingSubscription: async (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return billingAccountView(await cancelBillingSubscription(tenant(context))); },
     confirmBillingPayment: async (_: unknown, { tenantId, paymentId }: { tenantId: string; paymentId: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const submitted = await getBillingPayment(tenantId, paymentId); if (submitted?.planCode === "biashara") await validateBiasharaDowngrade(tenantId); const payment = await confirmBillingPayment(tenantId, paymentId, admin.id); await sendPaymentReviewEmail(tenantId, true).catch((error) => console.error(JSON.stringify({ event: "billing_confirmation_email_failed", tenantId, errorName: error instanceof Error ? error.name : "UnknownError" }))); return payment; },
     rejectBillingPayment: async (_: unknown, { tenantId, paymentId, reason }: { tenantId: string; paymentId: string; reason: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const payment = await rejectBillingPayment(tenantId, paymentId, admin.id, reason); await sendPaymentReviewEmail(tenantId, false, reason).catch((error) => console.error(JSON.stringify({ event: "billing_rejection_email_failed", tenantId, errorName: error instanceof Error ? error.name : "UnknownError" }))); return payment; },
+    assignPlatformBillingPlan: async (_: unknown, { tenantId, planCode: value, reason }: { tenantId: string; planCode: string; reason: string }, context: GraphQLContext) => {
+      const admin = requirePlatformAdmin(context);
+      const planCode = validatePlanCode(value);
+      const business = await getTenantRecord(tenantId);
+      if (!business) throw new Error("Business was not found");
+      if (planCode === "biashara") await validateBiasharaDowngrade(tenantId);
+      const owner = await getTenantMembership(business.ownerUserId);
+      if (!owner || owner.tenantId !== tenantId) throw new Error("The business owner membership is missing; restore it before configuring billing");
+      return billingAccountView(await assignPlatformBillingPlan({
+        tenantId,
+        tenantName: business.name,
+        ownerUserId: business.ownerUserId,
+        ownerUsername: owner.username,
+        planCode,
+        termsVersion: `legacy-pending-${TERMS_VERSION}`,
+        privacyVersion: `legacy-pending-${PRIVACY_VERSION}`,
+        actorId: admin.id,
+        reason,
+      }));
+    },
     updateBillingOverride: async (_: unknown, input: { tenantId: string; monthlyPriceKes?: number | null; activeUserLimit?: number | null; unlimitedUsers: boolean; activeStoreLimit?: number | null; unlimitedStores: boolean; vatAccounting?: boolean | null; multiStore?: boolean | null; exempt: boolean; expiresOn?: string | null; reason: string }, context: GraphQLContext) => {
       const admin = requirePlatformAdmin(context);
       if (input.monthlyPriceKes != null && (!Number.isSafeInteger(input.monthlyPriceKes) || input.monthlyPriceKes < 0)) throw new Error("Monthly price must be a non-negative whole KES amount");
