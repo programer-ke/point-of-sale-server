@@ -164,14 +164,14 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@aws-sdk/client-dynamodb@^3.1098.0":
-  version "3.1098.0"
-  resolved "https://registry.yarnpkg.com/@aws-sdk/client-dynamodb/-/client-dynamodb-3.1098.0.tgz#2e10be4b14568518457411369c4616d0a1c021fb"
-  integrity sha512-7o/3jD4/F8fo5BE9uMgsbIoaArlcnCNv6Bu11zUeF4Bgm6hYskQIGTK4UMTJ+qawez+FZ0Sg1E69woGd6gDabA==
+"@aws-sdk/client-dynamodb@^3.1100.0":
+  version "3.1100.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/client-dynamodb/-/client-dynamodb-3.1100.0.tgz#524ab17748dae89505d640c00c8c79b474924779"
+  integrity sha512-8iFWC37VHFSiWKFDM/CLowRH7fDWXo1IiQ3tZ7hAz4VYN8aEefeC/l9TM+Jupe4TSxZakJGj0lLsZ47zSJFi3g==
   dependencies:
-    "@aws-sdk/core" "^3.977.3"
-    "@aws-sdk/credential-provider-node" "^3.972.75"
-    "@aws-sdk/dynamodb-codec" "^3.973.38"
+    "@aws-sdk/core" "^3.977.4"
+    "@aws-sdk/credential-provider-node" "^3.972.76"
+    "@aws-sdk/dynamodb-codec" "^3.973.39"
     "@aws-sdk/middleware-endpoint-discovery" "^3.972.27"
     "@aws-sdk/types" "^3.974.2"
     "@smithy/core" "^3.31.1"
@@ -278,7 +278,7 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@aws-sdk/credential-provider-node@^3.972.74", "@aws-sdk/credential-provider-node@^3.972.75":
+"@aws-sdk/credential-provider-node@^3.972.74", "@aws-sdk/credential-provider-node@^3.972.75", "@aws-sdk/credential-provider-node@^3.972.76":
   version "3.972.76"
   resolved "https://registry.yarnpkg.com/@aws-sdk/credential-provider-node/-/credential-provider-node-3.972.76.tgz#5c9e9c563be9d23ede6901fd59ebbef3dd2f8b46"
   integrity sha512-1yzLmRiYSgGC25v7ZZEwJn/auhHHTIHgFOmzL2f36hf1+7jSLcX+1QrAz4760WEzPiiQl8xmlpFhHfl2OoyVzA==
@@ -331,7 +331,7 @@
     "@smithy/types" "^4.16.1"
     tslib "^2.6.2"
 
-"@aws-sdk/dynamodb-codec@^3.973.38":
+"@aws-sdk/dynamodb-codec@^3.973.39":
   version "3.973.39"
   resolved "https://registry.yarnpkg.com/@aws-sdk/dynamodb-codec/-/dynamodb-codec-3.973.39.tgz#e7589c5071dbba043fe843c3291e0afc4c930a9d"
   integrity sha512-6n1ER8qEvfruOfVFHVYrAtfSOk0ELudJDWyUMMb+M+tiP4rWSU44zd9ilQcM2/ESlRPyzxc2h7dU3R+UT+sVEg==
