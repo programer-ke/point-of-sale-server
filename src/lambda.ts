@@ -5,6 +5,8 @@ import {
 import { createApolloServer } from "./app";
 import { TABLE_NAME, verifyAwsConnection } from "./config/db";
 import { contextFromApiGatewayEvent } from "./auth";
+import { processBillingReminders } from "./services/billing-worker";
+import { validateBillingEnvironment } from "./repositories/billing-repository";
 
 let databaseReady: Promise<void> | undefined;
 const ensureDatabaseReady = () => {
@@ -35,4 +37,10 @@ export const handler = async (...args: Parameters<typeof apolloHandler>) => {
   }
   await ensureDatabaseReady();
   return apolloHandler(...args);
+};
+
+export const billingHandler = async () => {
+  validateBillingEnvironment();
+  await ensureDatabaseReady();
+  return processBillingReminders();
 };

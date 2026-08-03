@@ -104,12 +104,24 @@ jobs:
             exit 1
           fi
           echo "LAMBDA_FUNCTION_NAME=$lambda_function_name" >> "$GITHUB_ENV"
+          billing_worker_function_name=$(aws ssm get-parameter \
+            --name "/${PROJECT_ENV}/server/billing-worker-function-name" \
+            --query 'Parameter.Value' \
+            --output text)
+          if [ -z "$billing_worker_function_name" ] || [ "$billing_worker_function_name" = "None" ]; then
+            echo "::error::Billing worker function name parameter is empty"
+            exit 1
+          fi
+          echo "BILLING_WORKER_FUNCTION_NAME=$billing_worker_function_name" >> "$GITHUB_ENV"
 
-      - name: Publish Lambda
-        run: aws lambda update-function-code --function-name "${LAMBDA_FUNCTION_NAME}" --zip-file fileb://function.zip
+      - name: Publish Lambdas
+        run: |
+          aws lambda update-function-code --function-name "${LAMBDA_FUNCTION_NAME}" --zip-file fileb://function.zip
+          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME}"
+          aws lambda update-function-code --function-name "${BILLING_WORKER_FUNCTION_NAME}" --zip-file fileb://function.zip
 
       - name: Wait for Lambda update
-        run: aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME}"
+        run: aws lambda wait function-updated --function-name "${BILLING_WORKER_FUNCTION_NAME}"
 
       - name: Verify Lambda update
         run: |

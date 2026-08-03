@@ -4,6 +4,35 @@ This log records dated migrations, temporary rollout requirements, and
 remediation procedures. The README remains limited to evergreen setup and
 repeatable operations.
 
+## 2026-08-03 — Tenant billing rollout
+
+### What changed
+
+Tenant workspaces now carry a Biashara or Biashara Plus subscription, a
+14-day trial, manual M-Pesa payment submissions, immutable billing documents,
+server-side plan enforcement, superadmin review APIs, and daily reminders.
+
+### Required rollout
+
+Apply infrastructure with billing enforcement disabled, deploy this server,
+and run `yarn migrate:billing --rollout-date=YYYY-MM-DD` once with operator AWS
+credentials. The migration is idempotent and assigns Plus to existing VAT,
+multi-store, or six-plus-user workspaces. Provision a verified Cognito user in
+the `superadmin` group, deploy the compatible client, verify every tenant is
+listed in Platform Billing, then enable enforcement in Terraform. Existing
+tenants are marked `legacy-pending-*` for legal-acceptance history; this must
+not be represented as affirmative acceptance of the new policies.
+
+### Verification, recovery, and status
+
+Confirm trial dates, plan selection, limits, restricted staff access, admin
+read/export access, payment approval, receipt generation, and one manual worker
+invocation. To recover, disable `billing_enforcement_enabled`; this also
+disables the schedule without deleting billing records. Do not delete payment,
+document, reference, or audit items. Legal and tax review plus real vendor and
+Till configuration are required before enforcement. Status: implementation
+complete; production activation pending configuration, migration, and review.
+
 ## 2026-08-03 — Human-readable generated master-data codes
 
 ### What changed

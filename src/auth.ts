@@ -2,7 +2,7 @@ import { GraphQLError } from "graphql";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { getTenantMembership } from "./repositories/tenant-repository";
 
-export type UserRole = "admin" | "staff";
+export type UserRole = "admin" | "staff" | "superadmin";
 
 export interface AuthenticatedUser {
   id: string;
@@ -44,7 +44,7 @@ const parseRoles = (groups: unknown): UserRole[] => {
       ? groups.replace(/^\[|\]$/g, "").split(/[ ,]+/)
       : [];
 
-  return [...new Set(values.filter((value): value is UserRole => value === "admin" || value === "staff"))];
+  return [...new Set(values.filter((value): value is UserRole => value === "admin" || value === "staff" || value === "superadmin"))];
 };
 
 const authenticatedUserFromClaims = (
@@ -58,13 +58,13 @@ const authenticatedUserFromClaims = (
   if (typeof id !== "string" || typeof username !== "string") {
     throw unauthenticatedError();
   }
-  if (requestedRole !== undefined && requestedRole !== "admin" && requestedRole !== "staff") {
+  if (requestedRole !== undefined && requestedRole !== "admin" && requestedRole !== "staff" && requestedRole !== "superadmin") {
     throw forbiddenError();
   }
 
-  const activeRole = requestedRole === "admin" || requestedRole === "staff"
+  const activeRole = requestedRole === "admin" || requestedRole === "staff" || requestedRole === "superadmin"
     ? requestedRole
-    : roles.includes("admin") ? "admin" : "staff";
+    : roles.includes("superadmin") ? "superadmin" : roles.includes("admin") ? "admin" : "staff";
   if (roles.length > 0 && !roles.includes(activeRole)) throw forbiddenError();
 
   return { id, username, roles, activeRole };
@@ -129,12 +129,17 @@ export const contextFromApiGatewayEvent = async (
 
 export const requireRole = (
   context: GraphQLContext,
-  allowedRoles: UserRole[],
+  allowedRoles: Array<"admin" | "staff">,
 ) => {
   const activeRole = context.auth.activeRole ?? (context.auth.roles.includes("admin") ? "admin" : "staff");
-  if (!context.auth.tenantId || !allowedRoles.includes(activeRole)) {
+  if (!context.auth.tenantId || activeRole === "superadmin" || !allowedRoles.includes(activeRole)) {
     throw forbiddenError();
   }
+  return context.auth;
+};
+
+export const requirePlatformAdmin = (context: GraphQLContext) => {
+  if (!context.auth.roles.includes("superadmin") || context.auth.tenantId) throw forbiddenError();
   return context.auth;
 };
 

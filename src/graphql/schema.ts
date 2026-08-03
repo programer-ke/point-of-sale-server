@@ -208,6 +208,30 @@ export const typeDefs = `#graphql
     name: String!
   }
 
+  type BillingPlan {
+    code: String!
+    name: String!
+    monthlyPriceKes: Int!
+    activeUserLimit: Int
+    activeStoreLimit: Int
+    vatAccounting: Boolean!
+    multiStore: Boolean!
+  }
+
+  type BillingUsage { activeUsers: Int!, activeStores: Int! }
+  type BillingPayment { id: ID!, tenantId: ID!, tenantName: String!, planCode: String!, amountKes: Int!, mpesaReference: String!, paidOn: String!, status: String!, submittedBy: String!, submittedAt: String!, reviewedBy: String, reviewedAt: String, rejectionReason: String }
+  type BillingDocument { id: ID!, number: String!, tenantId: ID!, kind: String!, planCode: String!, planName: String!, amountKes: Int!, issuedOn: String!, paymentId: ID!, externalEtimsReference: String, notice: String!, createdAt: String! }
+  type BillingAudit { id: ID!, tenantId: ID!, action: String!, actorId: String!, reason: String!, before: String!, after: String!, createdAt: String! }
+  type BillingAccount {
+    tenantId: ID!, tenantName: String!, ownerUserId: ID!, ownerUsername: String!, planCode: String!, status: String!, plan: BillingPlan!,
+    trialStartedOn: String!, trialEndsOn: String!, paidThrough: String, graceEndsOn: String!, cancelledAt: String, pendingPlanCode: String,
+    termsVersion: String!, privacyVersion: String!, acceptedAt: String!, createdAt: String!, updatedAt: String!
+  }
+  type BillingConfiguration { vendorLegalName: String!, vendorKraPin: String!, billingAddress: String!, supportEmail: String!, supportPhone: String!, tillNumber: String!, paymentInstructions: String! }
+  type BillingOverview { account: BillingAccount!, usage: BillingUsage!, payments: [BillingPayment!]!, documents: [BillingDocument!]!, audits: [BillingAudit!]!, configuration: BillingConfiguration! }
+  type PlatformBillingSummary { account: BillingAccount!, usage: BillingUsage!, pendingPayments: Int! }
+  type SubscriptionAccess { status: String!, planCode: String!, planName: String!, trialEndsOn: String, paidThrough: String, graceEndsOn: String, staffAccessAllowed: Boolean! }
+
   type StandardMeasurementUnit { code: String!, dimension: String!, baseUnit: String!, baseUnits: Int! }
   type PackageUnitLabel { code: String!, name: String!, pluralName: String!, symbol: String!, status: String! }
   input PackageUnitLabelInput { code: String!, name: String!, pluralName: String!, symbol: String!, status: String = "active" }
@@ -641,10 +665,14 @@ export const typeDefs = `#graphql
     supplierInvoices(from: String, to: String, storeId: ID, supplierId: ID, status: String): [SupplierInvoice!]!
     unbilledGoodsReceipts: [GoodsReceipt!]!
     accountingSummary(from: String!, to: String!, storeId: ID, supplierId: ID): AccountingSummary!
+    billingOverview: BillingOverview!
+    platformBillingAccounts: [PlatformBillingSummary!]!
+    platformBillingAccount(tenantId: ID!): BillingOverview!
+    subscriptionAccess: SubscriptionAccess!
   }
 
   type Mutation {
-    createBusiness(name: String!, vatRegistered: Boolean = false, kraPin: String = "", vatEffectiveFrom: String, withholdingVatAgent: Boolean = false): User!
+    createBusiness(name: String!, planCode: String!, termsVersion: String!, privacyVersion: String!, vatRegistered: Boolean = false, kraPin: String = "", vatEffectiveFrom: String, withholdingVatAgent: Boolean = false): User!
     inviteUser(email: String!, firstName: String!, lastName: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", storeId: ID!, storeIds: [ID!] = [], phone: String = ""): User!
     resendUserInvitation(username: String!): User!
     updateUserRoles(username: String!, roles: [String!]!): User!
@@ -700,5 +728,12 @@ export const typeDefs = `#graphql
     createSupplierInvoice(receiptId: ID!, invoiceNumber: String!, invoiceDate: String, paymentTermsDays: Int, requestId: ID!): SupplierInvoice!
     recordSupplierPayment(invoiceId: ID!, amount: Float!, method: String!, reference: String = "", paidAt: String!, requestId: ID!): SupplierInvoice!
     voidSupplierPayment(invoiceId: ID!, paymentId: ID!, reason: String!, requestId: ID!): SupplierInvoice!
+    submitBillingPayment(planCode: String!, amountKes: Int!, mpesaReference: String!, paidOn: String!): BillingPayment!
+    scheduleBillingPlan(planCode: String!): BillingAccount!
+    cancelBillingSubscription: BillingAccount!
+    confirmBillingPayment(tenantId: ID!, paymentId: ID!): BillingPayment!
+    rejectBillingPayment(tenantId: ID!, paymentId: ID!, reason: String!): BillingPayment!
+    updateBillingOverride(tenantId: ID!, monthlyPriceKes: Int, activeUserLimit: Int, unlimitedUsers: Boolean = false, activeStoreLimit: Int, unlimitedStores: Boolean = false, vatAccounting: Boolean, multiStore: Boolean, exempt: Boolean = false, expiresOn: String, reason: String!): BillingAccount!
+    attachBillingEtimsReference(tenantId: ID!, documentId: ID!, reference: String!): BillingDocument!
   }
 `;

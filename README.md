@@ -41,6 +41,7 @@ COGNITO_USER_POOL_CLIENT_ID=exampleclientid
 SES_FROM_EMAIL=Tomkondi Orders <orders@tomkondi.shop>
 HOST=127.0.0.1
 PORT=4000
+BILLING_ENFORCEMENT_ENABLED=false
 ```
 
 Do not commit access keys. If environment credentials are necessary locally,
@@ -77,6 +78,22 @@ cross-business API access.
 
 See Apollo's [AWS Lambda deployment
 guide](https://www.apollographql.com/docs/apollo-server/deployment/lambda).
+
+## Subscription billing
+
+Billing belongs to the tenant workspace. Biashara provides one active store
+and five active users; Biashara Plus removes plan-level store/user caps and
+enables VAT/accounting and multi-store workflows. The API computes trial,
+grace, paid, restricted, cancellation, and exemption status on each request,
+so the scheduled reminder worker is not an authorization dependency.
+
+Customers submit an M-Pesa reference and a platform `superadmin` confirms or
+rejects it. Internal invoices and receipts are explicitly non-tax documents;
+an external eTIMS reference may be attached after compliant issuance. Runtime
+vendor identity, contact, Till, payment instructions, and enforcement settings
+come from Terraform environment variables. See `docs/CHANGELOG.md` for the
+one-time rollout migration rather than enabling billing against missing tenant
+records.
 
 ## Data model
 

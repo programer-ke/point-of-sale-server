@@ -19,6 +19,7 @@ dynamoDB.send = async () => ({ Item: membershipItem });
 const {
   contextFromApiGatewayEvent,
   requireIdentity,
+  requirePlatformAdmin,
   requireRole,
 } = require("../dist/auth.js");
 
@@ -76,6 +77,15 @@ async function main() {
   assert.equal(requireIdentity(onboarding).id, "new-owner");
   assert.equal(onboarding.auth.tenantId, undefined);
   assert.throws(() => requireRole(onboarding, ["staff"]), /permission/);
+
+  const platform = await contextFromApiGatewayEvent({
+    requestContext: { authorizer: { jwt: { claims: {
+      sub: "platform-admin", username: "platform@example.com", "cognito:groups": "[superadmin]",
+    } } } },
+  });
+  assert.equal(platform.auth.activeRole, "superadmin");
+  assert.equal(requirePlatformAdmin(platform).id, "platform-admin");
+  assert.throws(() => requireRole(platform, ["admin"]), /permission/);
 
   membershipItem = {
     partitionKey: "IDENTITY#user-1",

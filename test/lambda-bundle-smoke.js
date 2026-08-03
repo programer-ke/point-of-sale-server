@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 process.env.NODE_ENV = "test";
 process.env.AWS_DYNAMODB_TABLE = "test-table";
 
-const { handler } = require("../lambda-package/dist/lambda.js");
+const { handler, billingHandler } = require("../lambda-package/dist/lambda.js");
 
 const preflightEvent = {
   version: "2.0",
@@ -19,6 +19,7 @@ const preflightEvent = {
 
 async function main() {
   assert.equal(typeof handler, "function", "bundle must export the configured Lambda handler");
+  assert.equal(typeof billingHandler, "function", "bundle must export the configured billing worker handler");
   const response = await handler(preflightEvent, {}, () => {});
   assert.equal(response.statusCode, 204);
 }

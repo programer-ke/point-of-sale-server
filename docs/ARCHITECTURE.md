@@ -19,6 +19,12 @@ businesses later requires changing the membership key to include tenant ID and
 adding an explicit workspace selector; it must not be implemented by trusting
 a tenant ID supplied by the browser.
 
+Platform `superadmin` identities are intentionally membership-free and may
+access only platform billing metadata and actions. They cannot enter tenant
+operational resolvers. Tenant billing records, payments, documents, reminders,
+and audits share the existing table; global sparse-index partitions support
+platform review without scanning sales or other customer entities.
+
 ## Authentication and tenant authorization
 
 Self-signup creates a verified Cognito identity with no application groups.

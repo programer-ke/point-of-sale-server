@@ -4,7 +4,7 @@ import { dynamoDB, TABLE_NAME } from "../config/db";
 
 export interface NotificationRecord {
   id: string;
-  type: "stock_requisition_created" | "stock_requisition_decided";
+  type: "stock_requisition_created" | "stock_requisition_decided" | "billing";
   title: string;
   message: string;
   actionPath: string;

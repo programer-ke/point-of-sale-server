@@ -1,4 +1,4 @@
-import { forbiddenError, requireIdentity, requireRole, type GraphQLContext, type UserRole } from "../auth";
+import { forbiddenError, requireIdentity, requirePlatformAdmin, requireRole, type GraphQLContext, type UserRole } from "../auth";
 import {
   getCognitoUser,
   deleteCognitoUser,
@@ -120,6 +120,27 @@ import {
 } from "../repositories/supply-chain-repository";
 import { accountingSummary } from "../repositories/accounting-repository";
 import { sendPurchaseOrderEmail } from "../services/purchase-order-email";
+import { sendBillingEmail } from "../services/billing-email";
+import { applyBillingPolicies, validateBiasharaDowngrade } from "../domain/billing-policy";
+import { PRIVACY_VERSION, TERMS_VERSION, validatePlanCode, type BillingOverride } from "../domain/billing";
+import {
+  attachEtimsReference,
+  billingAccountView,
+  cancelBillingSubscription,
+  confirmBillingPayment,
+  createBillingAccount,
+  getBillingAccount,
+  getBillingPayment,
+  listBillingAudits,
+  listBillingDocuments,
+  listBillingPayments,
+  listPlatformBillingAccounts,
+  rejectBillingPayment,
+  requireBillingAccount,
+  scheduleBillingPlan,
+  setBillingOverride,
+  submitBillingPayment,
+} from "../repositories/billing-repository";
 const requireStaff = (context: GraphQLContext) => requireRole(context, ["admin", "staff"]);
 const requireAdmin = (context: GraphQLContext) => requireRole(context, ["admin"]);
 const actor = (context: GraphQLContext) => ({ id: context.auth.id, name: context.auth.username });
@@ -154,7 +175,7 @@ const ensureMainStore = async (tenantId: string) => {
   return createStore(tenantId, { code: "MAIN", name: "Main Store", address: "" }, { id: "system", name: "Business onboarding" });
 };
 const activeRole = (user: GraphQLContext["auth"]) =>
-  user.activeRole ?? (user.roles.includes("admin") ? "admin" : "staff");
+  (user.activeRole === "admin" ? "admin" : "staff") as "admin" | "staff";
 
 const parseRoles = (roles: string[]): UserRole[] => {
   const normalized = [...new Set(roles)];
@@ -283,7 +304,41 @@ const resolveCashierNames = async <T extends SaleRecord>(tenantId: string, sales
   }));
 };
 
-export const resolvers = {
+const billingConfiguration = () => ({
+  vendorLegalName: process.env.BILLING_VENDOR_LEGAL_NAME ?? "",
+  vendorKraPin: process.env.BILLING_VENDOR_KRA_PIN ?? "",
+  billingAddress: process.env.BILLING_VENDOR_ADDRESS ?? "",
+  supportEmail: process.env.BILLING_SUPPORT_EMAIL ?? "",
+  supportPhone: process.env.BILLING_SUPPORT_PHONE ?? "",
+  tillNumber: process.env.BILLING_TILL_NUMBER ?? "",
+  paymentInstructions: process.env.BILLING_PAYMENT_INSTRUCTIONS ?? "Pay the exact amount to the Till number, then submit the M-Pesa transaction code for confirmation.",
+});
+
+const billingUsage = async (tenantId: string) => {
+  const [memberships, stores] = await Promise.all([listTenantMemberships(tenantId), listStores(tenantId)]);
+  const users = await Promise.all(memberships.map(({ username }) => getCognitoUser(username)));
+  return { activeUsers: users.filter((user) => user.status !== "DISABLED").length, activeStores: stores.filter((store) => store.status === "active").length };
+};
+
+const billingOverview = async (tenantId: string) => {
+  const [account, usage, payments, documents, audits] = await Promise.all([
+    requireBillingAccount(tenantId), billingUsage(tenantId), listBillingPayments(tenantId), listBillingDocuments(tenantId), listBillingAudits(tenantId),
+  ]);
+  return { account: billingAccountView(account), usage, payments, documents, audits, configuration: billingConfiguration() };
+};
+
+const sendPaymentReviewEmail = async (tenantId: string, approved: boolean, reason = "") => {
+  const account = await requireBillingAccount(tenantId);
+  const owner = await getCognitoUser(account.ownerUsername);
+  await sendBillingEmail({
+    to: owner.email,
+    subject: approved ? "Tomkondi payment confirmed" : "Tomkondi payment needs attention",
+    heading: approved ? "Payment confirmed" : "Payment was not confirmed",
+    message: approved ? "Your subscription payment has been confirmed and the workspace billing period has been updated." : `The submitted payment could not be confirmed. ${reason}`,
+  });
+};
+
+const baseResolvers = {
   BusinessSettings: {
     vatRegistered: (settings: { vatRegistered?: boolean }) => settings.vatRegistered ?? false,
     kraPin: (settings: { kraPin?: string }) => settings.kraPin ?? "",
@@ -467,12 +522,32 @@ export const resolvers = {
     supplierInvoices: (_: unknown, args: { from?: string; to?: string; storeId?: string; supplierId?: string; status?: "unpaid" | "partial" | "paid" | "overdue" }, context: GraphQLContext) => { requireAdmin(context); return listSupplierInvoices(tenant(context), args); },
     unbilledGoodsReceipts: (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return listUnbilledGoodsReceipts(tenant(context)); },
     accountingSummary: (_: unknown, args: { from: string; to: string; storeId?: string; supplierId?: string }, context: GraphQLContext) => { requireAdmin(context); const range = validateDateRange(args.from, args.to) as { from: string; to: string }; return accountingSummary(tenant(context), { ...range, storeId: args.storeId, supplierId: args.supplierId }); },
+    billingOverview: (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return billingOverview(tenant(context)); },
+    platformBillingAccounts: async (_: unknown, _args: unknown, context: GraphQLContext) => {
+      requirePlatformAdmin(context);
+      const accounts = await listPlatformBillingAccounts();
+      return Promise.all(accounts.map(async (account) => {
+        const [usage, payments] = await Promise.all([billingUsage(account.tenantId), listBillingPayments(account.tenantId)]);
+        return { account: billingAccountView(account), usage, pendingPayments: payments.filter((payment) => payment.status === "submitted").length };
+      }));
+    },
+    platformBillingAccount: (_: unknown, { tenantId }: { tenantId: string }, context: GraphQLContext) => { requirePlatformAdmin(context); return billingOverview(tenantId); },
+    subscriptionAccess: async (_: unknown, _args: unknown, context: GraphQLContext) => {
+      requireStaff(context);
+      const account = await getBillingAccount(tenant(context));
+      if (!account) return { status: "exempt", planCode: "biashara_plus", planName: "Biashara Plus", trialEndsOn: null, paidThrough: null, graceEndsOn: null, staffAccessAllowed: true };
+      const view = billingAccountView(account);
+      return { status: view.status, planCode: account.planCode, planName: view.plan.name, trialEndsOn: account.trialEndsOn, paidThrough: account.paidThrough, graceEndsOn: view.graceEndsOn, staffAccessAllowed: view.status !== "restricted" && view.status !== "cancelled" };
+    },
   },
 
   Mutation: {
-    createBusiness: async (_: unknown, setup: { name: string; vatRegistered: boolean; kraPin: string; vatEffectiveFrom?: string | null; withholdingVatAgent: boolean }, context: GraphQLContext) => {
+    createBusiness: async (_: unknown, setup: { name: string; planCode: string; termsVersion: string; privacyVersion: string; vatRegistered: boolean; kraPin: string; vatEffectiveFrom?: string | null; withholdingVatAgent: boolean }, context: GraphQLContext) => {
       const { name } = setup;
       const identity = requireIdentity(context);
+      const planCode = validatePlanCode(setup.planCode);
+      if (setup.termsVersion !== TERMS_VERSION || setup.privacyVersion !== PRIVACY_VERSION) throw new Error("Review and accept the current Terms and Privacy Policy");
+      if (setup.vatRegistered && planCode !== "biashara_plus") throw new Error("VAT and accounting require Biashara Plus");
       if (identity.tenantId) {
         const user = await setCognitoUserRoles(identity.username, identity.roles);
         const store = await ensureMainStore(identity.tenantId);
@@ -480,10 +555,12 @@ export const resolvers = {
           await upsertStaffProfile(identity.tenantId, identity.id, { employeeCode: "OWNER", jobTitle: "Owner", storeId: store.id, storeName: store.name, phone: "" });
         }
         const current = await ensureBusinessSettings(identity.tenantId, identity.tenantName ?? name, user.email);
+        if (!(await getBillingAccount(identity.tenantId))) await createBillingAccount({ tenantId: identity.tenantId, tenantName: identity.tenantName ?? name, ownerUserId: identity.id, ownerUsername: identity.username, planCode, termsVersion: setup.termsVersion, privacyVersion: setup.privacyVersion, acceptedBy: identity.id });
         if (setup.vatRegistered) await updateBusinessSettings(identity.tenantId, { ...current, vatRegistered: true, kraPin: setup.kraPin, vatEffectiveFrom: setup.vatEffectiveFrom ?? new Date().toISOString().slice(0, 10), withholdingVatAgent: setup.withholdingVatAgent }, { id: identity.id, name: identity.username });
         return mergeProfile(identity.tenantId, { ...user, roles: identity.roles });
       }
       const { membership } = await createTenant({ name, ownerUserId: identity.id, ownerUsername: identity.username });
+      await createBillingAccount({ tenantId: membership.tenantId, tenantName: name, ownerUserId: identity.id, ownerUsername: identity.username, planCode, termsVersion: setup.termsVersion, privacyVersion: setup.privacyVersion, acceptedBy: identity.id });
       const store = await ensureMainStore(membership.tenantId);
       await upsertStaffProfile(membership.tenantId, identity.id, { employeeCode: "OWNER", jobTitle: "Owner", storeId: store.id, storeName: store.name, phone: "" });
       const user = await getCognitoUser(identity.username);
@@ -769,5 +846,29 @@ export const resolvers = {
     createSupplierInvoice: (_: unknown, { receiptId, invoiceNumber, invoiceDate, paymentTermsDays, requestId }: { receiptId: string; invoiceNumber: string; invoiceDate?: string | null; paymentTermsDays?: number | null; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createSupplierInvoiceForReceipt(tenant(context), receiptId, { invoiceNumber, invoiceDate, paymentTermsDays }, actor(context), requestId); },
     recordSupplierPayment: (_: unknown, { invoiceId, amount, method, reference, paidAt, requestId }: { invoiceId: string; amount: number; method: "cash" | "bank_transfer" | "mobile_money" | "cheque" | "other"; reference?: string; paidAt: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return recordSupplierPayment(tenant(context), invoiceId, { amount, method, reference, paidAt }, actor(context), requestId); },
     voidSupplierPayment: (_: unknown, { invoiceId, paymentId, reason, requestId }: { invoiceId: string; paymentId: string; reason: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return voidSupplierPayment(tenant(context), invoiceId, paymentId, reason, actor(context), requestId); },
+    submitBillingPayment: async (_: unknown, input: { planCode: string; amountKes: number; mpesaReference: string; paidOn: string }, context: GraphQLContext) => {
+      const admin = requireAdmin(context); const account = await requireBillingAccount(tenant(context));
+      const payment = await submitBillingPayment(account, { ...input, planCode: validatePlanCode(input.planCode), submittedBy: admin.id });
+      const supportEmail = process.env.BILLING_SUPPORT_EMAIL;
+      if (supportEmail) await sendBillingEmail({ to: supportEmail, subject: `Payment review: ${account.tenantName}`, heading: "New M-Pesa payment submission", message: `${account.tenantName} submitted ${payment.mpesaReference} for KES ${payment.amountKes.toLocaleString("en-KE")}. Review it in Platform Billing.` }).catch((error) => console.error(JSON.stringify({ event: "billing_review_email_failed", tenantId: account.tenantId, errorName: error instanceof Error ? error.name : "UnknownError" })));
+      return payment;
+    },
+    scheduleBillingPlan: async (_: unknown, { planCode: value }: { planCode: string }, context: GraphQLContext) => {
+      requireAdmin(context); const planCode = validatePlanCode(value); if (planCode === "biashara") await validateBiasharaDowngrade(tenant(context));
+      return billingAccountView(await scheduleBillingPlan(tenant(context), planCode));
+    },
+    cancelBillingSubscription: async (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return billingAccountView(await cancelBillingSubscription(tenant(context))); },
+    confirmBillingPayment: async (_: unknown, { tenantId, paymentId }: { tenantId: string; paymentId: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const submitted = await getBillingPayment(tenantId, paymentId); if (submitted?.planCode === "biashara") await validateBiasharaDowngrade(tenantId); const payment = await confirmBillingPayment(tenantId, paymentId, admin.id); await sendPaymentReviewEmail(tenantId, true).catch((error) => console.error(JSON.stringify({ event: "billing_confirmation_email_failed", tenantId, errorName: error instanceof Error ? error.name : "UnknownError" }))); return payment; },
+    rejectBillingPayment: async (_: unknown, { tenantId, paymentId, reason }: { tenantId: string; paymentId: string; reason: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const payment = await rejectBillingPayment(tenantId, paymentId, admin.id, reason); await sendPaymentReviewEmail(tenantId, false, reason).catch((error) => console.error(JSON.stringify({ event: "billing_rejection_email_failed", tenantId, errorName: error instanceof Error ? error.name : "UnknownError" }))); return payment; },
+    updateBillingOverride: async (_: unknown, input: { tenantId: string; monthlyPriceKes?: number | null; activeUserLimit?: number | null; unlimitedUsers: boolean; activeStoreLimit?: number | null; unlimitedStores: boolean; vatAccounting?: boolean | null; multiStore?: boolean | null; exempt: boolean; expiresOn?: string | null; reason: string }, context: GraphQLContext) => {
+      const admin = requirePlatformAdmin(context);
+      if (input.monthlyPriceKes != null && (!Number.isSafeInteger(input.monthlyPriceKes) || input.monthlyPriceKes < 0)) throw new Error("Monthly price must be a non-negative whole KES amount");
+      const override: BillingOverride = { monthlyPriceKes: input.monthlyPriceKes, activeUserLimit: input.unlimitedUsers ? null : input.activeUserLimit, activeStoreLimit: input.unlimitedStores ? null : input.activeStoreLimit, vatAccounting: input.vatAccounting, multiStore: input.multiStore, exempt: input.exempt, expiresOn: input.expiresOn, reason: input.reason.trim(), updatedAt: new Date().toISOString(), updatedBy: admin.id };
+      if (override.reason.length < 3) throw new Error("Provide an override reason");
+      return billingAccountView(await setBillingOverride(input.tenantId, override, admin.id));
+    },
+    attachBillingEtimsReference: (_: unknown, { tenantId, documentId, reference }: { tenantId: string; documentId: string; reference: string }, context: GraphQLContext) => { requirePlatformAdmin(context); return attachEtimsReference(tenantId, documentId, reference); },
   },
 };
+
+export const resolvers = applyBillingPolicies(baseResolvers);
