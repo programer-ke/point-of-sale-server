@@ -4,6 +4,22 @@ This log records dated migrations, temporary rollout requirements, and
 remediation procedures. The README remains limited to evergreen setup and
 repeatable operations.
 
+## 2026-08-03 — Human-readable generated master-data codes
+
+### What changed
+
+Blank category, supplier, store, employee, product, and product-unit codes now
+receive short tenant-scoped identifiers. Atomic counters produce codes such as
+`CAT-000001` and `SUP-000001`; explicitly supplied codes remain unchanged.
+
+### Deployment and verification
+
+Deploy the server before the matching client. No existing records are rewritten
+and counter gaps after a failed create are harmless. Create each supported
+record with a blank code and verify the returned prefix and numeric sequence.
+Rollback restores mandatory manual entry but should not remove sequence items or
+alter codes already assigned. Status: active.
+
 ## 2026-08-02 — Checkout policy settings and audited markdowns
 
 ### What changed

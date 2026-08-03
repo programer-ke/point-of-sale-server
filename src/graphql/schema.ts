@@ -659,16 +659,16 @@ export const typeDefs = `#graphql
     updateBusinessCheckoutSettings(enabledPaymentMethods: [String!]!, defaultPaymentMethod: String!, requireCustomerName: Boolean!, allowStaffPriceOverrides: Boolean!, maxStaffPriceDiscountPercent: Float!): BusinessCheckoutSettings!
     updateBusinessMeasurementSettings(packageLabels: [PackageUnitLabelInput!]!): BusinessMeasurementSettings!
 
-    createCategory(code: String!, name: String!, description: String = "", parentId: ID): Category!
+    createCategory(code: String = "", name: String!, description: String = "", parentId: ID): Category!
     updateCategory(id: ID!, code: String!, name: String!, description: String = "", parentId: ID): Category!
     deleteCategory(id: ID!): Boolean!
     createProduct(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, vatClass: String, stockUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!, productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false): Product!
     updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, vatClass: String, stockUnit: String, tracksExpiry: Boolean, saleVariants: [SaleVariantInput!], productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false, promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
     archiveProduct(id: ID!): Product!
     completeSale(storeId: ID, customerName: String, paymentMethod: String!, amountTendered: Float, mpesaReference: String, items: [SaleItemInput!]!, requestId: ID!): Sale!
-    createStore(code: String!, name: String!, address: String = "", receiptBusinessName: String = "", receiptAddress: String = "", receiptPhone: String = "", receiptEmail: String = "", receiptFooter: String = "", receiptReturnPolicy: String = ""): Store!
+    createStore(code: String = "", name: String!, address: String = "", receiptBusinessName: String = "", receiptAddress: String = "", receiptPhone: String = "", receiptEmail: String = "", receiptFooter: String = "", receiptReturnPolicy: String = ""): Store!
     updateStore(id: ID!, name: String, address: String, receiptBusinessName: String, receiptAddress: String, receiptPhone: String, receiptEmail: String, receiptFooter: String, receiptReturnPolicy: String, status: String): Store!
-    createSupplier(code: String!, name: String!, contactName: String = "", phone: String = "", email: String = "", address: String = "", vatRegistered: Boolean = false, defaultPaymentTermsDays: Int = 0): Supplier!
+    createSupplier(code: String = "", name: String!, contactName: String = "", phone: String = "", email: String = "", address: String = "", vatRegistered: Boolean = false, defaultPaymentTermsDays: Int = 0): Supplier!
     updateSupplier(id: ID!, name: String, contactName: String, phone: String, email: String, address: String, vatRegistered: Boolean, defaultPaymentTermsDays: Int, status: String): Supplier!
     upsertSupplierProduct(supplierId: ID!, productId: ID!, productUnitId: ID, supplierSku: String = "", purchaseUnit: String = "", purchaseQuantity: Float = 1, purchaseMeasurementUnit: String = "each", lastPurchasePrice: Float, preferred: Boolean!): SupplierProduct!
     removeSupplierProduct(supplierId: ID!, productId: ID!): Boolean!

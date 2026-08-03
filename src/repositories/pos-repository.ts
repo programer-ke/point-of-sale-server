@@ -13,6 +13,7 @@ import { MEASUREMENT_UNITS, measurementUnit, STANDARD_MEASUREMENT_DEFINITIONS } 
 import { productUnitsToSaleVariants, validateProductUnits, type ProductUnitInput, type ProductUnitRecord } from "../domain/product-units";
 import { inclusiveVatBreakdown, isVatClass, vatApplies, vatRateBasisPoints, type VatClass } from "../domain/vat";
 import { allocateLots, commitIdempotent, existingIdempotentResult, getStore, listStores as listInventoryStores, lotDecrement, lotRemainingCostMinor, sellableLots, stockMovementPut, storeStock as getStoreStock } from "./supply-chain-repository";
+import { nextTenantCode } from "./code-generator";
 
 export interface SaleVariantRecord { id: string; name: string; sku: string; barcode: string; quantityInBaseUnits: number; sellingPrice: number; status: "active" | "inactive" }
 
@@ -696,7 +697,7 @@ export const createCategory = async (
   const now = new Date().toISOString();
   const parent = input.parentId ? await getCategory(tenantId, input.parentId) : null;
   if (input.parentId && (!parent || parent.status !== "active")) throw new Error("Select an active parent category");
-  const category = { ...input, parentId: parent?.id ?? null, parentName: parent?.name ?? null, code: normalizeLookup(input.code) };
+  const category = { ...input, parentId: parent?.id ?? null, parentName: parent?.name ?? null, code: normalizeLookup(input.code) || await nextTenantCode(tenantId, "CATEGORY") };
   if ((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: lookupKey(tenantId, "CATEGORY", category.code) }))).Item) throw new Error("Category code is already in use");
   const item = { ...categoryKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#CATEGORY"), accessSort: `${category.name.toLowerCase()}#${id}`, entityType: "category", tenantId, id, ...category, createdAt: now, updatedAt: now };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
@@ -813,11 +814,23 @@ export const createProduct = async (
   const id = randomUUID();
   const now = new Date().toISOString();
   const unit = measurementUnit(input.stockUnit);
-  const provisional = { id, name: input.name.trim(), description: input.description.trim(), categoryId: input.categoryId, sellingPrice: input.sellingPrice, buyingPrice: input.buyingPrice, vatClass: input.vatClass ?? null, tracksExpiry: input.tracksExpiry, promotionPrice: input.promotionPrice, promotionStartsAt: input.promotionStartsAt, promotionEndsAt: input.promotionEndsAt, baseUnit: unit.baseUnit, stockUnit: unit.code, sku: normalizeLookup(input.sku) || `PRD-${id.slice(0, 8).toUpperCase()}`, barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active" as const, createdAt: now, updatedAt: now };
+  const sku = normalizeLookup(input.sku) || await nextTenantCode(tenantId, "PRODUCT");
+  const provisional = { id, name: input.name.trim(), description: input.description.trim(), categoryId: input.categoryId, sellingPrice: input.sellingPrice, buyingPrice: input.buyingPrice, vatClass: input.vatClass ?? null, tracksExpiry: input.tracksExpiry, promotionPrice: input.promotionPrice, promotionStartsAt: input.promotionStartsAt, promotionEndsAt: input.promotionEndsAt, baseUnit: unit.baseUnit, stockUnit: unit.code, sku, barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active" as const, createdAt: now, updatedAt: now };
   if (!provisional.name) throw new Error("Product name is required");
   const settings = input.productUnits?.length ? await getBusinessMeasurementSettings(tenantId) : null;
   const allowedLabels = new Set([...(settings?.standardUnits.filter(({ baseUnit }) => baseUnit === unit.baseUnit).map(({ code }) => code) ?? []), ...(settings?.packageLabels.filter(({ status }) => status === "active").map(({ code }) => code) ?? [])]);
-  const productUnits = input.productUnits?.length ? validateProductUnits(input.productUnits, allowedLabels) : undefined;
+  const validatedProductUnits = input.productUnits?.length ? validateProductUnits(input.productUnits, allowedLabels) : undefined;
+  const usedUnitSkus = new Set([sku, ...(validatedProductUnits ?? []).map(({ sku: unitSku }) => unitSku).filter(Boolean)]);
+  let generatedUnitSequence = 1;
+  const productUnits = validatedProductUnits?.map((productUnit) => {
+    if (productUnit.sku) return productUnit;
+    let unitSku: string;
+    do {
+      unitSku = `${sku}-${String(generatedUnitSequence++).padStart(2, "0")}`;
+    } while (usedUnitSkus.has(unitSku));
+    usedUnitSkus.add(unitSku);
+    return { ...productUnit, sku: unitSku };
+  });
   const saleVariants = validateVariants(productUnits ? productUnitsToSaleVariants(productUnits) : input.saleVariants?.length ? input.saleVariants : [defaultVariant(provisional)]);
   if (productUnits) {
     const baseCost = input.buyingPrice / unit.baseUnits;

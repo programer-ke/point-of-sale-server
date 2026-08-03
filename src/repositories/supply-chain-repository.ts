@@ -11,6 +11,7 @@ import { dynamoDB, TABLE_NAME } from "../config/db";
 import { convertMeasurementToBaseUnits } from "../domain/measurements";
 import { inclusiveVatBreakdown, isVatClass, vatApplies, withholdingVatMinor, type VatClass } from "../domain/vat";
 import { getBusinessSettings } from "./pos-repository";
+import { nextTenantCode } from "./code-generator";
 
 export type Actor = { id: string; name: string };
 export type EntityStatus = "active" | "inactive";
@@ -379,8 +380,8 @@ export const listStores = (tenantId: string) => queryCollection<StoreRecord>(ten
 export const getStore = (tenantId: string, id: string) => get<StoreRecord>(tenantId, "STORE", id);
 export const createStore = async (tenantId: string, input: Pick<StoreRecord, "code" | "name" | "address"> & Partial<Pick<StoreRecord, "receiptBusinessName" | "receiptAddress" | "receiptPhone" | "receiptEmail" | "receiptFooter" | "receiptReturnPolicy">>, actor: Actor) => {
   const id = randomUUID(); const now = new Date().toISOString();
-  const store: StoreRecord = { id, code: normalizedCode(input.code), name: normalized(input.name), address: normalized(input.address), receiptBusinessName: normalized(input.receiptBusinessName ?? ""), receiptAddress: normalized(input.receiptAddress ?? ""), receiptPhone: input.receiptPhone?.trim() ?? "", receiptEmail: input.receiptEmail?.trim().toLowerCase() ?? "", receiptFooter: normalized(input.receiptFooter ?? ""), receiptReturnPolicy: normalized(input.receiptReturnPolicy ?? ""), status: "active", createdAt: now, updatedAt: now };
-  if (!store.code || !store.name) throw new Error("Store code and name are required");
+  const store: StoreRecord = { id, code: normalizedCode(input.code) || await nextTenantCode(tenantId, "STORE"), name: normalized(input.name), address: normalized(input.address), receiptBusinessName: normalized(input.receiptBusinessName ?? ""), receiptAddress: normalized(input.receiptAddress ?? ""), receiptPhone: input.receiptPhone?.trim() ?? "", receiptEmail: input.receiptEmail?.trim().toLowerCase() ?? "", receiptFooter: normalized(input.receiptFooter ?? ""), receiptReturnPolicy: normalized(input.receiptReturnPolicy ?? ""), status: "active", createdAt: now, updatedAt: now };
+  if (!store.name) throw new Error("Store name is required");
   if ((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: key(tenantId, "LOOKUP#STORE", store.code) }))).Item) throw new Error("Store code is already in use");
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
     { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "STORE", id), accessPartition: collection(tenantId, "STORE"), accessSort: `${store.name.toLowerCase()}#${id}`, entityType: "store", tenantId, ...store }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
@@ -408,8 +409,8 @@ export const createSupplier = async (tenantId: string, input: Omit<SupplierRecor
   const id = randomUUID(); const now = new Date().toISOString();
   const paymentTermsDays = input.defaultPaymentTermsDays ?? 0;
   if (!Number.isInteger(paymentTermsDays) || paymentTermsDays < 0 || paymentTermsDays > 365) throw new Error("Supplier payment terms must be between 0 and 365 days");
-  const supplier: SupplierRecord = { id, code: normalizedCode(input.code), name: normalized(input.name), contactName: normalized(input.contactName), phone: input.phone.trim(), email: input.email.trim().toLowerCase(), address: normalized(input.address), vatRegistered: Boolean(input.vatRegistered), defaultPaymentTermsDays: paymentTermsDays, status: "active", createdAt: now, updatedAt: now };
-  if (!supplier.code || !supplier.name) throw new Error("Supplier code and name are required");
+  const supplier: SupplierRecord = { id, code: normalizedCode(input.code) || await nextTenantCode(tenantId, "SUPPLIER"), name: normalized(input.name), contactName: normalized(input.contactName), phone: input.phone.trim(), email: input.email.trim().toLowerCase(), address: normalized(input.address), vatRegistered: Boolean(input.vatRegistered), defaultPaymentTermsDays: paymentTermsDays, status: "active", createdAt: now, updatedAt: now };
+  if (!supplier.name) throw new Error("Supplier name is required");
   if (!validOptionalEmail(supplier.email)) throw new Error("Enter a valid supplier email");
   if ((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: key(tenantId, "LOOKUP#SUPPLIER", supplier.code) }))).Item) throw new Error("Supplier code is already in use");
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [

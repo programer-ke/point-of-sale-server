@@ -57,6 +57,7 @@ import {
   type ProductRecord,
   type SaleRecord,
 } from "../repositories/pos-repository";
+import { nextTenantCode } from "../repositories/code-generator";
 import { measurementUnit } from "../domain/measurements";
 import {
   createNotification,
@@ -226,9 +227,10 @@ const validateMoney = (value: number, name: string) => {
 };
 
 
-const validateCategory = (input: { code: string; name: string; description: string; parentId?: string | null }) => {
+const validateCategory = (input: { code: string; name: string; description: string; parentId?: string | null }, requireCode = true) => {
   const category = { code: input.code.trim().toUpperCase(), name: input.name.trim(), description: input.description.trim(), parentId: input.parentId?.trim() || null };
-  if (!category.code || !category.name) throw new Error("Category code and name are required");
+  if (!category.name) throw new Error("Category name is required");
+  if (requireCode && !category.code) throw new Error("Category code is required");
   if (category.code.length > 40) throw new Error("Category code must be 40 characters or fewer");
   if (category.name.length > 80) throw new Error("Category name must be 80 characters or fewer");
   if (category.description.length > 240) throw new Error("Category description must be 240 characters or fewer");
@@ -506,7 +508,8 @@ export const resolvers = {
       const user = await inviteCognitoUser({ email: args.email, firstName: args.firstName, lastName: args.lastName, roles });
       try {
         await putTenantMembership({ userId: user.id, username: user.username, tenantId, tenantName: admin.tenantName ?? "Business", roles });
-        await upsertStaffProfile(tenantId, user.id, { employeeCode: args.employeeCode, jobTitle: args.jobTitle, storeId: store.id, storeName: store.name, storeIds: assignedIds, phone: args.phone });
+        const employeeCode = args.employeeCode.trim() || await nextTenantCode(tenantId, "EMPLOYEE");
+        await upsertStaffProfile(tenantId, user.id, { employeeCode, jobTitle: args.jobTitle, storeId: store.id, storeName: store.name, storeIds: assignedIds, phone: args.phone });
       } catch (error) {
         await deleteTenantMembership(user.id, tenantId).catch(() => undefined);
         await deleteStaffProfile(tenantId, user.id).catch(() => undefined);
@@ -625,7 +628,7 @@ export const resolvers = {
     },
     createCategory: (_: unknown, args: { code: string; name: string; description: string; parentId?: string | null }, context: GraphQLContext) => {
       requireAdmin(context);
-      return createCategory(tenant(context), { ...validateCategory(args), status: "active" }, actor(context));
+      return createCategory(tenant(context), { ...validateCategory(args, false), status: "active" }, actor(context));
     },
     updateCategory: (_: unknown, { id, ...input }: { id: string; code: string; name: string; description: string; parentId?: string | null }, context: GraphQLContext) => {
       requireAdmin(context);

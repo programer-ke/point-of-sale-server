@@ -360,6 +360,16 @@ async function main() {
   assert.equal(transaction[0].Put.Item.parentId, category.id, "category hierarchy must be stored on the category record");
 
   dynamoDB.send = async (command) => {
+    if (command.constructor.name === "UpdateCommand") return { Attributes: { value: 7 } };
+    if (command.constructor.name === "GetCommand") return {};
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  const generatedCategory = await repository.createCategory(tenantId, { code: "", name: "Generated", description: "", status: "active" }, { id: "admin", name: "Admin" });
+  assert.equal(generatedCategory.code, "CAT-000007", "blank category codes must use the tenant sequence");
+  assert.equal(transaction[1].Put.Item.partitionKey, "TENANT#tenant-1#LOOKUP#CATEGORY#CAT-000007");
+
+  dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") return { Item: category };
     if (command.constructor.name === "QueryCommand") return { Items: [category, childCategory] };
     throw new Error(`Unexpected command ${command.constructor.name}`);
