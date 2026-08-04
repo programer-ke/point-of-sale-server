@@ -5,7 +5,7 @@ import { getBusinessSettings } from "../repositories/pos-repository";
 import { listStores } from "../repositories/supply-chain-repository";
 import { listTenantMemberships } from "../repositories/tenant-repository";
 import { acquireBillingCapacityLock, billingEnforcementEnabled, requireBillingAccount } from "../repositories/billing-repository";
-import { billingStatus, effectivePlan, featureError, limitError, subscriptionError } from "./billing";
+import { billingStatus, effectivePlan, featureError, limitError, PLANS, subscriptionError, type PlanCode } from "./billing";
 
 export type MutationClass = "onboarding" | "operational" | "safe_settings" | "billing" | "platform";
 
@@ -27,9 +27,10 @@ export const MUTATION_POLICY: Record<string, MutationClass> = {
   markAllNotificationsRead: "operational", createSupplierInvoice: "operational", recordSupplierPayment: "operational", voidSupplierPayment: "operational",
   submitBillingPayment: "billing", scheduleBillingPlan: "billing", cancelBillingSubscription: "billing",
   confirmBillingPayment: "platform", rejectBillingPayment: "platform", assignPlatformBillingPlan: "platform", updateBillingOverride: "platform", attachBillingEtimsReference: "platform",
+  updateBillingContact: "platform", invitePlatformAdmin: "platform", resendPlatformAdminInvitation: "platform", setPlatformAdminEnabled: "platform",
 };
 
-const platformQueries = new Set(["platformBillingAccounts", "platformBillingAccount", "platformBillingConfiguration"]);
+const platformQueries = new Set(["platformBusinesses", "platformMetrics", "platformPayments", "platformBusiness", "platformAdmins", "platformBillingAccount", "platformBillingConfiguration"]);
 const accessQueries = new Set(["subscriptionAccess"]);
 const billingQueries = new Set(["billingOverview"]);
 const accountingQueries = new Set(["accountingSummary", "supplierInvoices", "unbilledGoodsReceipts"]);
@@ -126,9 +127,10 @@ export const applyBillingPolicies = <T extends ResolverCollection>(resolvers: T)
   return { ...resolvers, Query: query, Mutation: mutation } as unknown as T;
 };
 
-export const validateBiasharaDowngrade = async (tenant: string) => {
+export const validatePlanChange = async (tenant: string, planCode: PlanCode) => {
+  const plan = PLANS[planCode];
   const [settings, stores, users] = await Promise.all([getBusinessSettings(tenant), listStores(tenant), enabledUserCount(tenant)]);
-  if (settings.vatRegistered) throw new Error("Disable VAT before downgrading to Biashara");
-  if (stores.filter((store) => store.status === "active").length > 1) throw new Error("Deactivate extra stores before downgrading to Biashara");
-  if (users > 5) throw new Error("Disable extra users before downgrading to Biashara");
+  if (settings.vatRegistered && !plan.vatAccounting) throw new Error(`Disable VAT before changing to ${plan.name}`);
+  if (plan.activeStoreLimit !== null && stores.filter((store) => store.status === "active").length > plan.activeStoreLimit) throw new Error(`Deactivate extra stores before changing to ${plan.name}`);
+  if (plan.activeUserLimit !== null && users > plan.activeUserLimit) throw new Error(`Disable extra users before changing to ${plan.name}`);
 };

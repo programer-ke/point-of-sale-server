@@ -40,6 +40,8 @@ export interface BillingDocument {
   planCode: PlanCode;
   planName: string;
   amountKes: number;
+  subtotalKes: number;
+  vatAmountKes: number;
   issuedOn: string;
   paymentId: string;
   externalEtimsReference: string | null;
@@ -67,6 +69,14 @@ const clean = <T>(item?: Record<string, unknown>): T | null => {
   return value as T;
 };
 
+const taxBreakdown = (totalKes: number) => {
+  if (process.env.BILLING_VENDOR_VAT_REGISTERED !== "true") return { subtotalKes: totalKes, vatAmountKes: 0 };
+  const rate = Number(process.env.BILLING_VENDOR_VAT_RATE ?? "0.16");
+  if (!Number.isFinite(rate) || rate < 0 || rate >= 1) throw new Error("BILLING_VENDOR_VAT_RATE must be between 0 and 1");
+  const subtotalKes = Math.round(totalKes / (1 + rate));
+  return { subtotalKes, vatAmountKes: totalKes - subtotalKes };
+};
+
 export const billingEnforcementEnabled = () => process.env.BILLING_ENFORCEMENT_ENABLED === "true";
 
 export const validateBillingEnvironment = () => {
@@ -76,6 +86,10 @@ export const validateBillingEnvironment = () => {
   if (missing.length) throw new Error(`Billing enforcement requires environment values: ${missing.join(", ")}`);
   if (!/^[A-Z][0-9]{9}[A-Z]$/.test(process.env.BILLING_VENDOR_KRA_PIN!.trim().toUpperCase())) throw new Error("BILLING_VENDOR_KRA_PIN is invalid");
   if (!/^[0-9]{5,12}$/.test(process.env.BILLING_TILL_NUMBER!.trim())) throw new Error("BILLING_TILL_NUMBER is invalid");
+  if (process.env.BILLING_VENDOR_VAT_REGISTERED === "true") {
+    const rate = Number(process.env.BILLING_VENDOR_VAT_RATE ?? "0.16");
+    if (!Number.isFinite(rate) || rate < 0 || rate >= 1) throw new Error("BILLING_VENDOR_VAT_RATE must be between 0 and 1");
+  }
 };
 
 export const acquireBillingCapacityLock = async (tenantId: string, resource: "users" | "stores") => {
@@ -118,12 +132,18 @@ export const createBillingAccount = async (input: {
   termsVersion: string;
   privacyVersion: string;
   acceptedBy: string;
+  billingContactName?: string;
+  billingContactEmail?: string;
+  billingContactPhone?: string;
   trialStartedOn?: string;
 }) => {
   const now = new Date().toISOString();
   const trialStartedOn = input.trialStartedOn ?? kenyaDate();
   const account: BillingAccount = {
     ...input,
+    billingContactName: input.billingContactName?.trim() || input.tenantName,
+    billingContactEmail: input.billingContactEmail?.trim().toLowerCase() || input.ownerUsername,
+    billingContactPhone: input.billingContactPhone?.trim() || "",
     trialStartedOn,
     trialEndsOn: addBillingDays(trialStartedOn, 13),
     paidThrough: null,
@@ -163,6 +183,9 @@ export const assignPlatformBillingPlan = async (input: {
     tenantName: input.tenantName,
     ownerUserId: input.ownerUserId,
     ownerUsername: input.ownerUsername,
+    billingContactName: current.billingContactName || input.tenantName,
+    billingContactEmail: current.billingContactEmail || input.ownerUsername,
+    billingContactPhone: current.billingContactPhone || "",
     planCode: input.planCode,
     pendingPlanCode: null,
     override: null,
@@ -172,6 +195,9 @@ export const assignPlatformBillingPlan = async (input: {
     tenantName: input.tenantName,
     ownerUserId: input.ownerUserId,
     ownerUsername: input.ownerUsername,
+    billingContactName: input.tenantName,
+    billingContactEmail: input.ownerUsername,
+    billingContactPhone: "",
     planCode: input.planCode,
     trialStartedOn,
     trialEndsOn: addBillingDays(trialStartedOn, 13),
@@ -254,6 +280,7 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     tenantName: account.tenantName,
     planCode: input.planCode,
     amountKes: input.amountKes,
+    ...taxBreakdown(input.amountKes),
     mpesaReference,
     paidOn: input.paidOn,
     status: "submitted",
@@ -271,6 +298,7 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     planCode: input.planCode,
     planName: PLANS[input.planCode].name,
     amountKes: input.amountKes,
+    ...taxBreakdown(input.amountKes),
     issuedOn: kenyaDate(),
     paymentId: id,
     externalEtimsReference: null,
@@ -278,7 +306,7 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     createdAt: now,
   };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
-    { Put: { TableName: TABLE_NAME, Item: { ...paymentKey(account.tenantId, id), accessPartition: "PLATFORM#BILLING_PAYMENT", accessSort: `${now}#${id}`, entityType: "billing_payment", ...payment }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+    { Put: { TableName: TABLE_NAME, Item: { ...paymentKey(account.tenantId, id), accessPartition: "PLATFORM#BILLING_PAYMENT#submitted", accessSort: `${now}#${id}`, entityType: "billing_payment", ...payment }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
     { Put: { TableName: TABLE_NAME, Item: { partitionKey: `BILLING_PAYMENT_REF#${mpesaReference}`, sortKey: "CLAIM", entityType: "billing_payment_reference", tenantId: account.tenantId, paymentId: id, createdAt: now }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
     { Put: { TableName: TABLE_NAME, Item: { ...documentKey(account.tenantId, invoiceId), entityType: "billing_document", ...invoice }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
   ] }));
@@ -309,6 +337,7 @@ export const confirmBillingPayment = async (tenantId: string, paymentId: string,
     planCode: payment.planCode,
     planName: PLANS[payment.planCode].name,
     amountKes: payment.amountKes,
+    ...taxBreakdown(payment.amountKes),
     issuedOn: today,
     paymentId,
     externalEtimsReference: null,
@@ -316,7 +345,7 @@ export const confirmBillingPayment = async (tenantId: string, paymentId: string,
     createdAt: now,
   };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
-    { Put: { TableName: TABLE_NAME, Item: { ...paymentKey(tenantId, paymentId), accessPartition: "PLATFORM#BILLING_PAYMENT", accessSort: `${payment.submittedAt}#${paymentId}`, entityType: "billing_payment", ...confirmed }, ConditionExpression: "#status = :submitted", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":submitted": "submitted" } } },
+    { Put: { TableName: TABLE_NAME, Item: { ...paymentKey(tenantId, paymentId), accessPartition: "PLATFORM#BILLING_PAYMENT#confirmed", accessSort: `${payment.submittedAt}#${paymentId}`, entityType: "billing_payment", ...confirmed }, ConditionExpression: "#status = :submitted", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":submitted": "submitted" } } },
     { Update: { TableName: TABLE_NAME, Key: accountKey(tenantId), UpdateExpression: "SET planCode = :plan, paidThrough = :paidThrough, pendingPlanCode = :none, cancelledAt = :none, updatedAt = :now", ExpressionAttributeValues: { ":plan": payment.planCode, ":paidThrough": paidThrough, ":none": null, ":now": now } } },
     { Put: { TableName: TABLE_NAME, Item: { ...documentKey(tenantId, receiptId), entityType: "billing_document", ...receipt }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
   ] }));
@@ -329,10 +358,10 @@ export const rejectBillingPayment = async (tenantId: string, paymentId: string, 
   const response = await dynamoDB.send(new UpdateCommand({
     TableName: TABLE_NAME,
     Key: paymentKey(tenantId, paymentId),
-    UpdateExpression: "SET #status = :rejected, reviewedBy = :reviewer, reviewedAt = :now, rejectionReason = :reason",
+    UpdateExpression: "SET #status = :rejected, reviewedBy = :reviewer, reviewedAt = :now, rejectionReason = :reason, accessPartition = :accessPartition",
     ConditionExpression: "#status = :submitted",
     ExpressionAttributeNames: { "#status": "status" },
-    ExpressionAttributeValues: { ":submitted": "submitted", ":rejected": "rejected", ":reviewer": reviewerId, ":now": new Date().toISOString(), ":reason": trimmed },
+    ExpressionAttributeValues: { ":submitted": "submitted", ":rejected": "rejected", ":reviewer": reviewerId, ":now": new Date().toISOString(), ":reason": trimmed, ":accessPartition": "PLATFORM#BILLING_PAYMENT#rejected" },
     ReturnValues: "ALL_NEW",
   }));
   return clean<BillingPayment>(response.Attributes)!;
@@ -396,6 +425,27 @@ export const setBillingOverride = async (tenantId: string, override: BillingOver
   return next;
 };
 
+export const updateBillingContact = async (tenantId: string, input: { name: string; email: string; phone: string }, actorId: string) => {
+  const account = await requireBillingAccount(tenantId);
+  const name = input.name.trim().replace(/\s+/g, " ");
+  const email = input.email.trim().toLowerCase();
+  const phone = input.phone.trim();
+  if (name.length < 2 || name.length > 100) throw new Error("Billing contact name must be between 2 and 100 characters");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Enter a valid billing contact email");
+  if (phone.length > 30) throw new Error("Billing contact phone is too long");
+  const now = new Date().toISOString();
+  const audit: BillingAudit = {
+    id: randomUUID(), tenantId, action: "billing_contact_updated", actorId, reason: "Billing contact updated",
+    before: JSON.stringify({ name: account.billingContactName || account.tenantName, email: account.billingContactEmail || account.ownerUsername, phone: account.billingContactPhone || "" }),
+    after: JSON.stringify({ name, email, phone }), createdAt: now,
+  };
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
+    { Update: { TableName: TABLE_NAME, Key: accountKey(tenantId), UpdateExpression: "SET billingContactName = :name, billingContactEmail = :email, billingContactPhone = :phone, updatedAt = :now", ExpressionAttributeValues: { ":name": name, ":email": email, ":phone": phone, ":now": now } } },
+    { Put: { TableName: TABLE_NAME, Item: { partitionKey: `TENANT#${tenantId}`, sortKey: `BILLING#AUDIT#${now}#${audit.id}`, entityType: "billing_audit", ...audit } } },
+  ] }));
+  return billingAccountView({ ...account, billingContactName: name, billingContactEmail: email, billingContactPhone: phone, updatedAt: now });
+};
+
 export const attachEtimsReference = async (tenantId: string, documentId: string, reference: string) => {
   const normalized = reference.trim();
   if (normalized.length < 3 || normalized.length > 100) throw new Error("Enter a valid eTIMS reference");
@@ -412,6 +462,9 @@ export const attachEtimsReference = async (tenantId: string, documentId: string,
 
 export const billingAccountView = (account: BillingAccount) => ({
   ...account,
+  billingContactName: account.billingContactName || account.tenantName,
+  billingContactEmail: account.billingContactEmail || account.ownerUsername,
+  billingContactPhone: account.billingContactPhone || "",
   status: billingStatus(account),
   plan: effectivePlan(account),
   graceEndsOn: addBillingDays(account.paidThrough ?? account.trialEndsOn, 1),

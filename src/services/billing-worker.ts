@@ -6,6 +6,7 @@ import { listTenantMemberships } from "../repositories/tenant-repository";
 import { createNotification } from "../repositories/notification-repository";
 import { getCognitoUser } from "./cognito";
 import { sendBillingEmail } from "./billing-email";
+import { refreshPlatformBusinessSummary, refreshPlatformMetrics } from "../repositories/platform-repository";
 
 const reminderFor = (endOn: string, today: string, status: string) => {
   const days = (Date.parse(`${endOn}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000;
@@ -17,6 +18,7 @@ const reminderFor = (endOn: string, today: string, status: string) => {
 
 export const processBillingReminders = async (today = kenyaDate()) => {
   const accounts = await listPlatformBillingAccounts();
+  await Promise.all(accounts.map((account) => refreshPlatformBusinessSummary(account.tenantId)));
   let sent = 0;
   for (const account of accounts) {
     const payments = await listBillingPayments(account.tenantId);
@@ -46,5 +48,6 @@ export const processBillingReminders = async (today = kenyaDate()) => {
       console.error(JSON.stringify({ event: "billing_reminder_failed", tenantId: account.tenantId, reminder: reminder.key, errorName: error instanceof Error ? error.name : "UnknownError" }));
     }
   }
+  await refreshPlatformMetrics();
   return { checked: accounts.length, sent };
 };

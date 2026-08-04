@@ -216,20 +216,30 @@ export const typeDefs = `#graphql
     activeStoreLimit: Int
     vatAccounting: Boolean!
     multiStore: Boolean!
+    capabilities: [String!]!
   }
 
   type BillingUsage { activeUsers: Int!, activeStores: Int! }
   type BillingPayment { id: ID!, tenantId: ID!, tenantName: String!, planCode: String!, amountKes: Int!, mpesaReference: String!, paidOn: String!, status: String!, submittedBy: String!, submittedAt: String!, reviewedBy: String, reviewedAt: String, rejectionReason: String }
-  type BillingDocument { id: ID!, number: String!, tenantId: ID!, kind: String!, planCode: String!, planName: String!, amountKes: Int!, issuedOn: String!, paymentId: ID!, externalEtimsReference: String, notice: String!, createdAt: String! }
+  type BillingDocument { id: ID!, number: String!, tenantId: ID!, kind: String!, planCode: String!, planName: String!, amountKes: Int!, subtotalKes: Int, vatAmountKes: Int, issuedOn: String!, paymentId: ID!, externalEtimsReference: String, notice: String!, createdAt: String! }
   type BillingAudit { id: ID!, tenantId: ID!, action: String!, actorId: String!, reason: String!, before: String!, after: String!, createdAt: String! }
   type BillingAccount {
-    tenantId: ID!, tenantName: String!, ownerUserId: ID!, ownerUsername: String!, planCode: String!, status: String!, plan: BillingPlan!,
+    tenantId: ID!, tenantName: String!, ownerUserId: ID!, ownerUsername: String!, billingContactName: String!, billingContactEmail: String!, billingContactPhone: String!, planCode: String!, status: String!, plan: BillingPlan!,
     trialStartedOn: String!, trialEndsOn: String!, paidThrough: String, graceEndsOn: String!, cancelledAt: String, pendingPlanCode: String,
     termsVersion: String!, privacyVersion: String!, acceptedAt: String!, createdAt: String!, updatedAt: String!
   }
-  type BillingConfiguration { enforcementEnabled: Boolean!, vendorLegalName: String!, vendorKraPin: String!, billingAddress: String!, supportEmail: String!, supportPhone: String!, tillNumber: String!, paymentInstructions: String! }
+  type BillingConfiguration { enforcementEnabled: Boolean!, vendorLegalName: String!, vendorKraPin: String!, vendorVatRegistered: Boolean!, vendorVatRate: Float!, billingAddress: String!, supportEmail: String!, supportPhone: String!, tillNumber: String!, paymentInstructions: String! }
   type BillingOverview { account: BillingAccount!, usage: BillingUsage!, payments: [BillingPayment!]!, documents: [BillingDocument!]!, audits: [BillingAudit!]!, configuration: BillingConfiguration! }
-  type PlatformBillingSummary { tenantId: ID!, tenantName: String!, billingConfigured: Boolean!, account: BillingAccount, usage: BillingUsage!, pendingPayments: Int! }
+  type PlatformBusinessSummary { tenantId: ID!, tenantName: String!, billingConfigured: Boolean!, planCode: String, planName: String, subscriptionStatus: String!, monthlyPriceKes: Int!, activeUsers: Int!, activeStores: Int!, pendingPayments: Int!, pendingPaymentAmountKes: Int!, trialEndsOn: String, paidThrough: String, billingContactEmail: String!, createdAt: String!, updatedAt: String! }
+  type PlatformBusinessConnection { items: [PlatformBusinessSummary!]!, nextCursor: String }
+  type PlatformMetrics { activeBusinesses: Int!, trialingBusinesses: Int!, pastDueBusinesses: Int!, restrictedBusinesses: Int!, unconfiguredBusinesses: Int!, projectedMrrKes: Int!, trialPipelineKes: Int!, collectedThisMonthKes: Int!, collectedAllTimeKes: Int!, pendingPayments: Int!, pendingPaymentAmountKes: Int!, calculatedAt: String! }
+  type PlatformContact { name: String!, email: String!, phone: String!, address: String! }
+  type PlatformAdminContact { id: ID!, name: String!, email: String!, status: String! }
+  type PlatformStore { id: ID!, code: String!, name: String!, address: String!, status: String! }
+  type PlatformBusinessMetadata { summary: PlatformBusinessSummary!, businessContact: PlatformContact!, admins: [PlatformAdminContact!]!, stores: [PlatformStore!]! }
+  type PlatformBusinessDetail { metadata: PlatformBusinessMetadata!, billing: BillingOverview }
+  type PlatformPaymentConnection { items: [BillingPayment!]!, nextCursor: String }
+  type PlatformAdminUser { id: ID!, username: String!, email: String!, name: String!, firstName: String!, lastName: String!, status: String!, emailVerified: Boolean!, createdAt: String!, updatedAt: String! }
   type SubscriptionAccess { status: String!, planCode: String!, planName: String!, trialEndsOn: String, paidThrough: String, graceEndsOn: String, staffAccessAllowed: Boolean! }
 
   type StandardMeasurementUnit { code: String!, dimension: String!, baseUnit: String!, baseUnits: Int! }
@@ -666,7 +676,11 @@ export const typeDefs = `#graphql
     unbilledGoodsReceipts: [GoodsReceipt!]!
     accountingSummary(from: String!, to: String!, storeId: ID, supplierId: ID): AccountingSummary!
     billingOverview: BillingOverview!
-    platformBillingAccounts: [PlatformBillingSummary!]!
+    platformBusinesses(first: Int = 25, after: String, search: String, planCode: String, status: String, billingConfigured: Boolean): PlatformBusinessConnection!
+    platformMetrics: PlatformMetrics!
+    platformPayments(first: Int = 25, after: String, status: String = "submitted", from: String, to: String, tenantId: ID, reference: String): PlatformPaymentConnection!
+    platformBusiness(tenantId: ID!): PlatformBusinessDetail!
+    platformAdmins: [PlatformAdminUser!]!
     platformBillingConfiguration: BillingConfiguration!
     platformBillingAccount(tenantId: ID!): BillingOverview!
     subscriptionAccess: SubscriptionAccess!
@@ -737,5 +751,9 @@ export const typeDefs = `#graphql
     assignPlatformBillingPlan(tenantId: ID!, planCode: String!, reason: String!): BillingAccount!
     updateBillingOverride(tenantId: ID!, monthlyPriceKes: Int, activeUserLimit: Int, unlimitedUsers: Boolean = false, activeStoreLimit: Int, unlimitedStores: Boolean = false, vatAccounting: Boolean, multiStore: Boolean, exempt: Boolean = false, expiresOn: String, reason: String!): BillingAccount!
     attachBillingEtimsReference(tenantId: ID!, documentId: ID!, reference: String!): BillingDocument!
+    updateBillingContact(tenantId: ID, name: String!, email: String!, phone: String = ""): BillingAccount!
+    invitePlatformAdmin(email: String!, firstName: String!, lastName: String!): PlatformAdminUser!
+    resendPlatformAdminInvitation(username: String!): PlatformAdminUser!
+    setPlatformAdminEnabled(username: String!, enabled: Boolean!): PlatformAdminUser!
   }
 `;

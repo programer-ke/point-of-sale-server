@@ -1,6 +1,7 @@
 import { GraphQLError } from "graphql";
 
-export type PlanCode = "biashara" | "biashara_plus";
+export type PlanCode = "biashara" | "biashara_growth" | "biashara_plus";
+export type PlanCapability = "multi_store" | "vat_accounting";
 export type BillingStatus = "trialing" | "active" | "past_due" | "restricted" | "exempt" | "cancelled";
 
 export interface PlanDefinition {
@@ -11,6 +12,7 @@ export interface PlanDefinition {
   activeStoreLimit: number | null;
   vatAccounting: boolean;
   multiStore: boolean;
+  capabilities: PlanCapability[];
 }
 
 export interface BillingOverride {
@@ -31,6 +33,9 @@ export interface BillingAccount {
   tenantName: string;
   ownerUserId: string;
   ownerUsername: string;
+  billingContactName: string;
+  billingContactEmail: string;
+  billingContactPhone: string;
   planCode: PlanCode;
   trialStartedOn: string;
   trialEndsOn: string;
@@ -58,15 +63,27 @@ export const PLANS: Record<PlanCode, PlanDefinition> = {
     activeStoreLimit: 1,
     vatAccounting: false,
     multiStore: false,
+    capabilities: [],
+  },
+  biashara_growth: {
+    code: "biashara_growth",
+    name: "Biashara Growth",
+    monthlyPriceKes: 2_500,
+    activeUserLimit: 10,
+    activeStoreLimit: 3,
+    vatAccounting: true,
+    multiStore: true,
+    capabilities: ["multi_store", "vat_accounting"],
   },
   biashara_plus: {
     code: "biashara_plus",
     name: "Biashara Plus",
-    monthlyPriceKes: 1_500,
-    activeUserLimit: null,
-    activeStoreLimit: null,
+    monthlyPriceKes: 5_000,
+    activeUserLimit: 30,
+    activeStoreLimit: 10,
     vatAccounting: true,
     multiStore: true,
+    capabilities: ["multi_store", "vat_accounting"],
   },
 };
 
@@ -102,13 +119,16 @@ export const overrideIsActive = (override: BillingOverride | null, today = kenya
 export const effectivePlan = (account: BillingAccount, today = kenyaDate()): PlanDefinition => {
   const base = PLANS[account.planCode];
   const override = overrideIsActive(account.override, today) ? account.override : null;
+  const vatAccounting = override?.vatAccounting ?? base.vatAccounting;
+  const multiStore = override?.multiStore ?? base.multiStore;
   return {
     ...base,
     monthlyPriceKes: override?.monthlyPriceKes ?? base.monthlyPriceKes,
     activeUserLimit: override?.activeUserLimit === undefined ? base.activeUserLimit : override.activeUserLimit,
     activeStoreLimit: override?.activeStoreLimit === undefined ? base.activeStoreLimit : override.activeStoreLimit,
-    vatAccounting: override?.vatAccounting ?? base.vatAccounting,
-    multiStore: override?.multiStore ?? base.multiStore,
+    vatAccounting,
+    multiStore,
+    capabilities: [multiStore ? "multi_store" : null, vatAccounting ? "vat_accounting" : null].filter((value): value is PlanCapability => Boolean(value)),
   };
 };
 
@@ -121,7 +141,7 @@ export const billingStatus = (account: BillingAccount, today = kenyaDate()): Bil
 };
 
 export const validatePlanCode = (value: string): PlanCode => {
-  if (value !== "biashara" && value !== "biashara_plus") throw new Error("Select Biashara or Biashara Plus");
+  if (value !== "biashara" && value !== "biashara_growth" && value !== "biashara_plus") throw new Error("Select a valid BiasharaKit plan");
   return value;
 };
 
@@ -132,10 +152,10 @@ export const subscriptionError = () => new GraphQLError(
 
 export const featureError = (feature: string) => new GraphQLError(
   `${feature} is available on Biashara Plus. Upgrade the workspace from Billing to continue.`,
-  { extensions: { code: "FEATURE_NOT_INCLUDED", feature, requiredPlan: "biashara_plus" } },
+  { extensions: { code: "FEATURE_NOT_INCLUDED", feature, requiredPlan: "biashara_growth" } },
 );
 
 export const limitError = (resource: "users" | "stores", limit: number) => new GraphQLError(
-  `Biashara supports up to ${limit} active ${resource}. Upgrade to Biashara Plus to add more.`,
-  { extensions: { code: "PLAN_LIMIT_REACHED", resource, limit, requiredPlan: "biashara_plus" } },
+  `Your plan supports up to ${limit} active ${resource}. Upgrade or request a custom limit to add more.`,
+  { extensions: { code: "PLAN_LIMIT_REACHED", resource, limit, requiredPlan: "biashara_growth" } },
 );

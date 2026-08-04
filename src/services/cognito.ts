@@ -35,12 +35,12 @@ const attributesToRecord = (attributes: AttributeType[] | undefined) =>
 
 const normalizeRoles = (roles: readonly string[]): UserRole[] => [
   ...new Set(
-    roles.filter((role): role is UserRole => role === "admin" || role === "staff"),
+    roles.filter((role): role is UserRole => role === "admin" || role === "staff" || role === "superadmin"),
   ),
 ];
 
 const primaryRole = (roles: UserRole[]) =>
-  roles.includes("admin") ? "admin" : roles.includes("staff") ? "staff" : "unassigned";
+  roles.includes("superadmin") ? "superadmin" : roles.includes("admin") ? "admin" : roles.includes("staff") ? "staff" : "unassigned";
 
 const mapUser = (user: UserType, roles: UserRole[]) => {
   const attributes = attributesToRecord(user.Attributes);
@@ -175,6 +175,31 @@ export const inviteCognitoUser = async (input: {
   }
 
   return getCognitoUser(username);
+};
+
+export const listPlatformAdmins = async () => {
+  const users: UserType[] = [];
+  let nextToken: string | undefined;
+  do {
+    const response = await cognito.send(new ListUsersInGroupCommand({ UserPoolId: userPoolId(), GroupName: "superadmin", NextToken: nextToken }));
+    users.push(...(response.Users ?? []));
+    nextToken = response.NextToken;
+  } while (nextToken);
+  return users.map((user) => mapUser(user, ["superadmin"]));
+};
+
+export const invitePlatformAdmin = (input: { email: string; firstName: string; lastName: string }) =>
+  inviteCognitoUser({ ...input, roles: ["superadmin"] });
+
+export const setPlatformAdminEnabled = async (username: string, enabled: boolean, actorUsername: string) => {
+  if (!enabled && username === actorUsername) throw new Error("You cannot disable your own platform administrator account");
+  const admins = await listPlatformAdmins();
+  const target = admins.find((admin) => admin.username === username);
+  if (!target) throw new Error("Platform administrator was not found");
+  if (!enabled && target.status !== "DISABLED" && admins.filter((admin) => admin.status !== "DISABLED").length <= 1) {
+    throw new Error("The platform must retain at least one active superadmin");
+  }
+  return setCognitoUserEnabled(username, enabled);
 };
 
 export const resendCognitoInvitation = async (username: string) => {

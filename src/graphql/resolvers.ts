@@ -3,7 +3,10 @@ import {
   getCognitoUser,
   deleteCognitoUser,
   inviteCognitoUser,
+  invitePlatformAdmin,
+  listPlatformAdmins,
   resendCognitoInvitation,
+  setPlatformAdminEnabled,
   setCognitoUserEnabled,
   setCognitoUserRoles,
   updateCognitoUserEmail,
@@ -123,7 +126,7 @@ import {
 import { accountingSummary } from "../repositories/accounting-repository";
 import { sendPurchaseOrderEmail } from "../services/purchase-order-email";
 import { sendBillingEmail } from "../services/billing-email";
-import { applyBillingPolicies, validateBiasharaDowngrade } from "../domain/billing-policy";
+import { applyBillingPolicies, validatePlanChange } from "../domain/billing-policy";
 import { PRIVACY_VERSION, TERMS_VERSION, validatePlanCode, type BillingOverride } from "../domain/billing";
 import {
   attachEtimsReference,
@@ -144,7 +147,16 @@ import {
   scheduleBillingPlan,
   setBillingOverride,
   submitBillingPayment,
+  updateBillingContact,
 } from "../repositories/billing-repository";
+import {
+  getPlatformMetrics,
+  listPlatformBusinessPage,
+  listPlatformPaymentPage,
+  platformBusinessMetadata,
+  refreshPlatformBusinessSummary,
+  refreshPlatformMetrics,
+} from "../repositories/platform-repository";
 const requireStaff = (context: GraphQLContext) => requireRole(context, ["admin", "staff"]);
 const requireAdmin = (context: GraphQLContext) => requireRole(context, ["admin"]);
 const actor = (context: GraphQLContext) => ({ id: context.auth.id, name: context.auth.username });
@@ -312,6 +324,8 @@ const billingConfiguration = () => ({
   enforcementEnabled: billingEnforcementEnabled(),
   vendorLegalName: process.env.BILLING_VENDOR_LEGAL_NAME ?? "",
   vendorKraPin: process.env.BILLING_VENDOR_KRA_PIN ?? "",
+  vendorVatRegistered: process.env.BILLING_VENDOR_VAT_REGISTERED === "true",
+  vendorVatRate: Number(process.env.BILLING_VENDOR_VAT_RATE ?? "0.16"),
   billingAddress: process.env.BILLING_VENDOR_ADDRESS ?? "",
   supportEmail: process.env.BILLING_SUPPORT_EMAIL ?? "",
   supportPhone: process.env.BILLING_SUPPORT_PHONE ?? "",
@@ -529,20 +543,23 @@ const baseResolvers = {
     accountingSummary: (_: unknown, args: { from: string; to: string; storeId?: string; supplierId?: string }, context: GraphQLContext) => { requireAdmin(context); const range = validateDateRange(args.from, args.to) as { from: string; to: string }; return accountingSummary(tenant(context), { ...range, storeId: args.storeId, supplierId: args.supplierId }); },
     billingOverview: (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return billingOverview(tenant(context)); },
     platformBillingConfiguration: (_: unknown, _args: unknown, context: GraphQLContext) => { requirePlatformAdmin(context); return billingConfiguration(); },
-    platformBillingAccounts: async (_: unknown, _args: unknown, context: GraphQLContext) => {
+    platformBusinesses: (_: unknown, args: { first?: number; after?: string; search?: string; planCode?: string; status?: string; billingConfigured?: boolean }, context: GraphQLContext) => {
       requirePlatformAdmin(context);
-      const [tenants, accounts] = await Promise.all([listTenantRecords(), listPlatformBillingAccounts()]);
-      const accountsByTenant = new Map(accounts.map((account) => [account.tenantId, account]));
-      const businesses = [...tenants];
-      for (const account of accounts) {
-        if (!businesses.some((business) => business.id === account.tenantId)) businesses.push({ id: account.tenantId, name: account.tenantName, ownerUserId: account.ownerUserId, status: "active", createdAt: account.createdAt, updatedAt: account.updatedAt });
-      }
-      return Promise.all(businesses.map(async (business) => {
-        const account = accountsByTenant.get(business.id) ?? null;
-        const [usage, payments] = await Promise.all([billingUsage(business.id), account ? listBillingPayments(business.id) : Promise.resolve([])]);
-        return { tenantId: business.id, tenantName: business.name, billingConfigured: Boolean(account), account: account ? billingAccountView(account) : null, usage, pendingPayments: payments.filter((payment) => payment.status === "submitted").length };
-      }));
+      return listPlatformBusinessPage({ ...args, planCode: args.planCode ? validatePlanCode(args.planCode) : null });
     },
+    platformMetrics: (_: unknown, _args: unknown, context: GraphQLContext) => { requirePlatformAdmin(context); return getPlatformMetrics(); },
+    platformPayments: (_: unknown, args: { first?: number; after?: string; status?: string; from?: string; to?: string; tenantId?: string; reference?: string }, context: GraphQLContext) => {
+      requirePlatformAdmin(context);
+      const status = args.status ?? "submitted";
+      if (status !== "submitted" && status !== "confirmed" && status !== "rejected") throw new Error("Select a valid payment status");
+      return listPlatformPaymentPage({ ...args, status });
+    },
+    platformBusiness: async (_: unknown, { tenantId }: { tenantId: string }, context: GraphQLContext) => {
+      requirePlatformAdmin(context);
+      const [metadata, account] = await Promise.all([platformBusinessMetadata(tenantId), getBillingAccount(tenantId)]);
+      return { metadata, billing: account ? await billingOverview(tenantId) : null };
+    },
+    platformAdmins: (_: unknown, _args: unknown, context: GraphQLContext) => { requirePlatformAdmin(context); return listPlatformAdmins(); },
     platformBillingAccount: (_: unknown, { tenantId }: { tenantId: string }, context: GraphQLContext) => { requirePlatformAdmin(context); return billingOverview(tenantId); },
     subscriptionAccess: async (_: unknown, _args: unknown, context: GraphQLContext) => {
       requireStaff(context);
@@ -559,7 +576,7 @@ const baseResolvers = {
       const identity = requireIdentity(context);
       const planCode = validatePlanCode(setup.planCode);
       if (setup.termsVersion !== TERMS_VERSION || setup.privacyVersion !== PRIVACY_VERSION) throw new Error("Review and accept the current Terms and Privacy Policy");
-      if (setup.vatRegistered && planCode !== "biashara_plus") throw new Error("VAT and accounting require Biashara Plus");
+      if (setup.vatRegistered && planCode === "biashara") throw new Error("VAT and accounting require Biashara Growth or Plus");
       if (identity.tenantId) {
         const user = await setCognitoUserRoles(identity.username, identity.roles);
         const store = await ensureMainStore(identity.tenantId);
@@ -569,6 +586,7 @@ const baseResolvers = {
         const current = await ensureBusinessSettings(identity.tenantId, identity.tenantName ?? name, user.email);
         if (!(await getBillingAccount(identity.tenantId))) await createBillingAccount({ tenantId: identity.tenantId, tenantName: identity.tenantName ?? name, ownerUserId: identity.id, ownerUsername: identity.username, planCode, termsVersion: setup.termsVersion, privacyVersion: setup.privacyVersion, acceptedBy: identity.id });
         if (setup.vatRegistered) await updateBusinessSettings(identity.tenantId, { ...current, vatRegistered: true, kraPin: setup.kraPin, vatEffectiveFrom: setup.vatEffectiveFrom ?? new Date().toISOString().slice(0, 10), withholdingVatAgent: setup.withholdingVatAgent }, { id: identity.id, name: identity.username });
+        await refreshPlatformBusinessSummary(identity.tenantId);
         return mergeProfile(identity.tenantId, { ...user, roles: identity.roles });
       }
       const { membership } = await createTenant({ name, ownerUserId: identity.id, ownerUsername: identity.username });
@@ -579,6 +597,7 @@ const baseResolvers = {
       const current = await ensureBusinessSettings(membership.tenantId, name, user.email);
       if (setup.vatRegistered) await updateBusinessSettings(membership.tenantId, { ...current, vatRegistered: true, kraPin: setup.kraPin, vatEffectiveFrom: setup.vatEffectiveFrom ?? new Date().toISOString().slice(0, 10), withholdingVatAgent: setup.withholdingVatAgent }, { id: identity.id, name: identity.username });
       await setCognitoUserRoles(identity.username, membership.roles);
+      await refreshPlatformBusinessSummary(membership.tenantId);
       return mergeProfile(membership.tenantId, { ...user, roles: membership.roles });
     },
     inviteUser: async (
@@ -605,6 +624,7 @@ const baseResolvers = {
         await deleteCognitoUser(user.username).catch(() => undefined);
         throw error;
       }
+      await refreshPlatformBusinessSummary(tenantId);
       return mergeProfile(tenantId, { ...user, roles });
     },
     resendUserInvitation: async (_: unknown, { username }: { username: string }, context: GraphQLContext) => {
@@ -630,7 +650,10 @@ const baseResolvers = {
       if (admin.username === username && !enabled) throw new Error("Administrators cannot disable their own account");
       const membership = (await listTenantMemberships(tenant(context))).find((value) => value.username === username);
       if (!membership) throw new Error("Staff user was not found in this business");
-      return mergeProfile(tenant(context), await setCognitoUserEnabled(username, enabled));
+      const tenantId = tenant(context);
+      const result = mergeProfile(tenantId, await setCognitoUserEnabled(username, enabled));
+      await refreshPlatformBusinessSummary(tenantId);
+      return result;
     },
     updateStaffEmail: async (_: unknown, { username, email }: { username: string; email: string }, context: GraphQLContext) => {
       requireAdmin(context);
@@ -651,6 +674,7 @@ const baseResolvers = {
       await deleteCognitoUser(username);
       await Promise.all([deleteTenantMembership(membership.userId, tenantId), deleteStaffProfile(tenantId, membership.userId)]);
       cashierDirectories.delete(tenantId);
+      await refreshPlatformBusinessSummary(tenantId);
       return true;
     },
     updateMyProfile: async (_: unknown, input: { phone: string }, context: GraphQLContext) => {
@@ -785,8 +809,8 @@ const baseResolvers = {
       const [user, profile, store] = await Promise.all([getCognitoUser(authenticated.username), getStaffProfile(tenantId, authenticated.id), selectedStore(context, args.storeId)]);
       return completeSale(tenantId, { ...args, storeId: store.id }, { id: authenticated.id, name: user.name, employeeCode: profile?.employeeCode, storeName: store.name, role: activeRole(authenticated) });
     },
-    createStore: (_: unknown, input: Parameters<typeof createStore>[1], context: GraphQLContext) => { requireAdmin(context); return createStore(tenant(context), input, actor(context)); },
-    updateStore: async (_: unknown, { id, ...input }: { id: string } & Parameters<typeof updateStore>[2], context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); if (input.status === "inactive") { const memberships = await listTenantMemberships(tenantId); const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId)); if ([...profiles.values()].some((profile) => profile.storeIds?.includes(id) || profile.storeId === id)) throw new Error("Reassign staff before deactivating this store"); } return updateStore(tenantId, id, input); },
+    createStore: async (_: unknown, input: Parameters<typeof createStore>[1], context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); const result = await createStore(tenantId, input, actor(context)); await refreshPlatformBusinessSummary(tenantId); return result; },
+    updateStore: async (_: unknown, { id, ...input }: { id: string } & Parameters<typeof updateStore>[2], context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); if (input.status === "inactive") { const memberships = await listTenantMemberships(tenantId); const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId)); if ([...profiles.values()].some((profile) => profile.storeIds?.includes(id) || profile.storeId === id)) throw new Error("Reassign staff before deactivating this store"); } const result = await updateStore(tenantId, id, input); await refreshPlatformBusinessSummary(tenantId); return result; },
     createSupplier: (_: unknown, input: { code: string; name: string; contactName: string; phone: string; email: string; address: string; vatRegistered: boolean; defaultPaymentTermsDays: number }, context: GraphQLContext) => { requireAdmin(context); return createSupplier(tenant(context), input); },
     updateSupplier: (_: unknown, { id, ...input }: { id: string; name?: string; contactName?: string; phone?: string; email?: string; address?: string; vatRegistered?: boolean; defaultPaymentTermsDays?: number; status?: "active" | "inactive" }, context: GraphQLContext) => { requireAdmin(context); return updateSupplier(tenant(context), id, input); },
     upsertSupplierProduct: (_: unknown, input: { supplierId: string; productId: string; productUnitId?: string | null; supplierSku: string; purchaseUnit: string; purchaseQuantity: number; purchaseMeasurementUnit: string; lastPurchasePrice?: number | null; preferred: boolean }, context: GraphQLContext) => { requireAdmin(context); return upsertSupplierProduct(tenant(context), { ...input, lastPurchasePrice: input.lastPurchasePrice ?? null }); },
@@ -863,24 +887,25 @@ const baseResolvers = {
       const payment = await submitBillingPayment(account, { ...input, planCode: validatePlanCode(input.planCode), submittedBy: admin.id });
       const supportEmail = process.env.BILLING_SUPPORT_EMAIL;
       if (supportEmail) await sendBillingEmail({ to: supportEmail, subject: `Payment review: ${account.tenantName}`, heading: "New M-Pesa payment submission", message: `${account.tenantName} submitted ${payment.mpesaReference} for KES ${payment.amountKes.toLocaleString("en-KE")}. Review it in Platform Billing.` }).catch((error) => console.error(JSON.stringify({ event: "billing_review_email_failed", tenantId: account.tenantId, errorName: error instanceof Error ? error.name : "UnknownError" })));
+      await Promise.all([refreshPlatformBusinessSummary(account.tenantId), refreshPlatformMetrics()]);
       return payment;
     },
     scheduleBillingPlan: async (_: unknown, { planCode: value }: { planCode: string }, context: GraphQLContext) => {
-      requireAdmin(context); const planCode = validatePlanCode(value); if (planCode === "biashara") await validateBiasharaDowngrade(tenant(context));
+      requireAdmin(context); const planCode = validatePlanCode(value); await validatePlanChange(tenant(context), planCode);
       return billingAccountView(await scheduleBillingPlan(tenant(context), planCode));
     },
-    cancelBillingSubscription: async (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return billingAccountView(await cancelBillingSubscription(tenant(context))); },
-    confirmBillingPayment: async (_: unknown, { tenantId, paymentId }: { tenantId: string; paymentId: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const submitted = await getBillingPayment(tenantId, paymentId); if (submitted?.planCode === "biashara") await validateBiasharaDowngrade(tenantId); const payment = await confirmBillingPayment(tenantId, paymentId, admin.id); await sendPaymentReviewEmail(tenantId, true).catch((error) => console.error(JSON.stringify({ event: "billing_confirmation_email_failed", tenantId, errorName: error instanceof Error ? error.name : "UnknownError" }))); return payment; },
-    rejectBillingPayment: async (_: unknown, { tenantId, paymentId, reason }: { tenantId: string; paymentId: string; reason: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const payment = await rejectBillingPayment(tenantId, paymentId, admin.id, reason); await sendPaymentReviewEmail(tenantId, false, reason).catch((error) => console.error(JSON.stringify({ event: "billing_rejection_email_failed", tenantId, errorName: error instanceof Error ? error.name : "UnknownError" }))); return payment; },
+    cancelBillingSubscription: async (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); const result = billingAccountView(await cancelBillingSubscription(tenantId)); await Promise.all([refreshPlatformBusinessSummary(tenantId), refreshPlatformMetrics()]); return result; },
+    confirmBillingPayment: async (_: unknown, { tenantId, paymentId }: { tenantId: string; paymentId: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const submitted = await getBillingPayment(tenantId, paymentId); const current = await requireBillingAccount(tenantId); if (submitted && submitted.planCode !== current.planCode) await validatePlanChange(tenantId, submitted.planCode); const payment = await confirmBillingPayment(tenantId, paymentId, admin.id); await sendPaymentReviewEmail(tenantId, true).catch((error) => console.error(JSON.stringify({ event: "billing_confirmation_email_failed", tenantId, errorName: error instanceof Error ? error.name : "UnknownError" }))); await Promise.all([refreshPlatformBusinessSummary(tenantId), refreshPlatformMetrics()]); return payment; },
+    rejectBillingPayment: async (_: unknown, { tenantId, paymentId, reason }: { tenantId: string; paymentId: string; reason: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const payment = await rejectBillingPayment(tenantId, paymentId, admin.id, reason); await sendPaymentReviewEmail(tenantId, false, reason).catch((error) => console.error(JSON.stringify({ event: "billing_rejection_email_failed", tenantId, errorName: error instanceof Error ? error.name : "UnknownError" }))); await Promise.all([refreshPlatformBusinessSummary(tenantId), refreshPlatformMetrics()]); return payment; },
     assignPlatformBillingPlan: async (_: unknown, { tenantId, planCode: value, reason }: { tenantId: string; planCode: string; reason: string }, context: GraphQLContext) => {
       const admin = requirePlatformAdmin(context);
       const planCode = validatePlanCode(value);
       const business = await getTenantRecord(tenantId);
       if (!business) throw new Error("Business was not found");
-      if (planCode === "biashara") await validateBiasharaDowngrade(tenantId);
+      await validatePlanChange(tenantId, planCode);
       const owner = await getTenantMembership(business.ownerUserId);
       if (!owner || owner.tenantId !== tenantId) throw new Error("The business owner membership is missing; restore it before configuring billing");
-      return billingAccountView(await assignPlatformBillingPlan({
+      const result = billingAccountView(await assignPlatformBillingPlan({
         tenantId,
         tenantName: business.name,
         ownerUserId: business.ownerUserId,
@@ -891,15 +916,29 @@ const baseResolvers = {
         actorId: admin.id,
         reason,
       }));
+      await Promise.all([refreshPlatformBusinessSummary(tenantId), refreshPlatformMetrics()]);
+      return result;
     },
     updateBillingOverride: async (_: unknown, input: { tenantId: string; monthlyPriceKes?: number | null; activeUserLimit?: number | null; unlimitedUsers: boolean; activeStoreLimit?: number | null; unlimitedStores: boolean; vatAccounting?: boolean | null; multiStore?: boolean | null; exempt: boolean; expiresOn?: string | null; reason: string }, context: GraphQLContext) => {
       const admin = requirePlatformAdmin(context);
       if (input.monthlyPriceKes != null && (!Number.isSafeInteger(input.monthlyPriceKes) || input.monthlyPriceKes < 0)) throw new Error("Monthly price must be a non-negative whole KES amount");
       const override: BillingOverride = { monthlyPriceKes: input.monthlyPriceKes, activeUserLimit: input.unlimitedUsers ? null : input.activeUserLimit, activeStoreLimit: input.unlimitedStores ? null : input.activeStoreLimit, vatAccounting: input.vatAccounting, multiStore: input.multiStore, exempt: input.exempt, expiresOn: input.expiresOn, reason: input.reason.trim(), updatedAt: new Date().toISOString(), updatedBy: admin.id };
       if (override.reason.length < 3) throw new Error("Provide an override reason");
-      return billingAccountView(await setBillingOverride(input.tenantId, override, admin.id));
+      const result = billingAccountView(await setBillingOverride(input.tenantId, override, admin.id));
+      await Promise.all([refreshPlatformBusinessSummary(input.tenantId), refreshPlatformMetrics()]);
+      return result;
     },
     attachBillingEtimsReference: (_: unknown, { tenantId, documentId, reference }: { tenantId: string; documentId: string; reference: string }, context: GraphQLContext) => { requirePlatformAdmin(context); return attachEtimsReference(tenantId, documentId, reference); },
+    updateBillingContact: async (_: unknown, input: { tenantId?: string; name: string; email: string; phone: string }, context: GraphQLContext) => {
+      const tenantId = context.auth.activeRole === "superadmin" ? (requirePlatformAdmin(context), input.tenantId) : (requireAdmin(context), tenant(context));
+      if (!tenantId) throw new Error("Business is required");
+      const result = await updateBillingContact(tenantId, input, context.auth.id);
+      await refreshPlatformBusinessSummary(tenantId);
+      return result;
+    },
+    invitePlatformAdmin: (_: unknown, input: { email: string; firstName: string; lastName: string }, context: GraphQLContext) => { requirePlatformAdmin(context); return invitePlatformAdmin(input); },
+    resendPlatformAdminInvitation: async (_: unknown, { username }: { username: string }, context: GraphQLContext) => { requirePlatformAdmin(context); const admins = await listPlatformAdmins(); if (!admins.some((admin) => admin.username === username)) throw new Error("Platform administrator was not found"); return resendCognitoInvitation(username); },
+    setPlatformAdminEnabled: (_: unknown, { username, enabled }: { username: string; enabled: boolean }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); return setPlatformAdminEnabled(username, enabled, admin.username); },
   },
 };
 
