@@ -13,7 +13,8 @@ const account = (updates = {}) => ({
 
 assert.equal(PLANS.biashara.activeUserLimit, 5);
 assert.equal(PLANS.biashara.activeStoreLimit, 1);
-assert.equal(PLANS.biashara_growth.monthlyPriceKes, 2500);
+assert.equal(PLANS.biashara.monthlyPriceKes, 800);
+assert.equal(PLANS.biashara_growth.monthlyPriceKes, 2000);
 assert.equal(PLANS.biashara_growth.activeUserLimit, 10);
 assert.equal(PLANS.biashara_growth.activeStoreLimit, 3);
 assert.deepEqual(PLANS.biashara_growth.capabilities, ["multi_store", "vat_accounting"]);
@@ -33,14 +34,14 @@ const trialCharge = nextBillingPayment(account({ planCode: "biashara_growth" }),
 assert.equal(trialCharge.dueOn, "2026-08-15");
 assert.equal(trialCharge.periodStartsOn, "2026-08-15");
 assert.equal(trialCharge.periodEndsOn, "2026-09-14");
-assert.equal(trialCharge.amountKes, 2500);
+assert.equal(trialCharge.amountKes, 2000);
 const launchOffer = { id: "offer-1", label: "Launch offer", pricePercent: 70, durationMonths: 6, remainingPayments: 6, startsOn: "2026-08-15", reason: "Launch", assignedAt: "2026-08-04", assignedBy: "admin" };
 const offeredCharge = nextBillingPayment(account({ planCode: "biashara_growth", pendingPlanCode: "biashara_plus", offer: launchOffer }), "2026-08-04");
 assert.equal(offeredCharge.planCode, "biashara_plus", "the scheduled plan determines the upcoming payment");
 assert.equal(offeredCharge.baseAmountKes, 5000);
 assert.equal(offeredCharge.amountKes, 3500, "a 70% price offer charges 70% of the normal rate");
 assert.equal(offeredCharge.offerRemainingPayments, 6);
-assert.equal(nextBillingPayment(account({ offer: { ...launchOffer, remainingPayments: 0 } }), "2026-08-04").amountKes, 1000, "a consumed offer no longer changes the charge");
+assert.equal(nextBillingPayment(account({ offer: { ...launchOffer, remainingPayments: 0 } }), "2026-08-04").amountKes, 800, "a consumed offer no longer changes the charge");
 
 const mutationFields = Object.keys(buildSchema(typeDefs).getMutationType().getFields()).sort();
 assert.deepEqual(Object.keys(MUTATION_POLICY).sort(), mutationFields, "Every GraphQL mutation must have an explicit billing policy");

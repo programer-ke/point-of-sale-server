@@ -25,12 +25,12 @@ export const MUTATION_POLICY: Record<string, MutationClass> = {
   convertStockRequisition: "operational", createStocktake: "operational", completeStocktake: "operational", cancelStocktake: "operational",
   openCashShift: "operational", recordCashMovement: "operational", closeCashShift: "operational", markNotificationRead: "operational",
   markAllNotificationsRead: "operational", createSupplierInvoice: "operational", recordSupplierPayment: "operational", voidSupplierPayment: "operational",
-  submitBillingPayment: "billing", scheduleBillingPlan: "billing", cancelBillingSubscription: "billing",
+  submitBillingPayment: "billing", scheduleBillingPlan: "billing", cancelBillingSubscription: "billing", claimBillingPromotion: "billing",
   confirmBillingPayment: "platform", rejectBillingPayment: "platform", assignPlatformBillingPlan: "platform", updateBillingOverride: "platform", setBillingOffer: "platform", clearBillingOffer: "platform", attachBillingEtimsReference: "platform",
-  updateBillingContact: "platform", invitePlatformAdmin: "platform", resendPlatformAdminInvitation: "platform", setPlatformAdminEnabled: "platform",
+  updateBillingContact: "platform", invitePlatformAdmin: "platform", resendPlatformAdminInvitation: "platform", setPlatformAdminEnabled: "platform", saveBillingPromotion: "platform", setBillingPromotionEnabled: "platform",
 };
 
-const platformQueries = new Set(["platformBusinesses", "platformMetrics", "platformPayments", "platformBusiness", "platformAdmins", "platformBillingAccount", "platformBillingConfiguration"]);
+const platformQueries = new Set(["platformBusinesses", "platformMetrics", "platformPayments", "platformBusiness", "platformAdmins", "platformBillingPromotions", "platformBillingAccount", "platformBillingConfiguration"]);
 const accessQueries = new Set(["subscriptionAccess"]);
 const billingQueries = new Set(["billingOverview"]);
 const accountingQueries = new Set(["accountingSummary", "supplierInvoices", "unbilledGoodsReceipts"]);

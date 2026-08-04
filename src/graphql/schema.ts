@@ -228,10 +228,11 @@ export const typeDefs = `#graphql
     trialStartedOn: String!, trialEndsOn: String!, paidThrough: String, graceEndsOn: String!, cancelledAt: String, pendingPlanCode: String,
     termsVersion: String!, privacyVersion: String!, acceptedAt: String!, createdAt: String!, updatedAt: String!, customTerms: Boolean!, offer: BillingOffer
   }
-  type BillingOffer { id: ID!, label: String!, pricePercent: Int!, durationMonths: Int!, remainingPayments: Int!, startsOn: String!, reason: String!, assignedAt: String!, assignedBy: String! }
+  type BillingOffer { id: ID!, promotionId: ID, label: String!, pricePercent: Int!, durationMonths: Int!, remainingPayments: Int!, startsOn: String!, reason: String!, assignedAt: String!, assignedBy: String! }
+  type BillingPromotion { id: ID!, name: String!, description: String!, pricePercent: Int!, durationMonths: Int!, audience: String!, planCodes: [String!]!, startsOn: String!, endsOn: String!, enabled: Boolean!, createdAt: String!, createdBy: String!, updatedAt: String!, updatedBy: String! }
   type NextBillingPayment { planCode: String!, planName: String!, dueOn: String!, periodStartsOn: String!, periodEndsOn: String!, baseAmountKes: Int!, amountKes: Int!, offerId: ID, offerLabel: String, offerPricePercent: Int, offerRemainingPayments: Int!, paymentPending: Boolean! }
   type BillingConfiguration { enforcementEnabled: Boolean!, vendorLegalName: String!, vendorKraPin: String!, vendorVatRegistered: Boolean!, vendorVatRate: Float!, billingAddress: String!, supportEmail: String!, supportPhone: String!, tillNumber: String!, paymentInstructions: String! }
-  type BillingOverview { account: BillingAccount!, nextPayment: NextBillingPayment!, usage: BillingUsage!, payments: [BillingPayment!]!, documents: [BillingDocument!]!, audits: [BillingAudit!]!, configuration: BillingConfiguration! }
+  type BillingOverview { account: BillingAccount!, nextPayment: NextBillingPayment!, usage: BillingUsage!, payments: [BillingPayment!]!, documents: [BillingDocument!]!, audits: [BillingAudit!]!, configuration: BillingConfiguration!, availablePromotions: [BillingPromotion!]! }
   type PlatformBusinessSummary { tenantId: ID!, tenantName: String!, planCode: String!, planName: String!, subscriptionStatus: String!, monthlyPriceKes: Int!, activeUsers: Int!, activeStores: Int!, pendingPayments: Int!, pendingPaymentAmountKes: Int!, trialEndsOn: String, paidThrough: String, billingContactEmail: String!, createdAt: String!, updatedAt: String! }
   type PlatformBusinessConnection { items: [PlatformBusinessSummary!]!, nextCursor: String }
   type PlatformMetrics { activeBusinesses: Int!, trialingBusinesses: Int!, expiringTrials: Int!, pastDueBusinesses: Int!, restrictedBusinesses: Int!, projectedMrrKes: Int!, trialPipelineKes: Int!, collectedThisMonthKes: Int!, collectedAllTimeKes: Int!, pendingPayments: Int!, pendingPaymentAmountKes: Int!, calculatedAt: String! }
@@ -683,13 +684,14 @@ export const typeDefs = `#graphql
     platformPayments(first: Int = 25, after: String, status: String = "submitted", from: String, to: String, tenantId: ID, reference: String): PlatformPaymentConnection!
     platformBusiness(tenantId: ID!): PlatformBusinessDetail!
     platformAdmins: [PlatformAdminUser!]!
+    platformBillingPromotions: [BillingPromotion!]!
     platformBillingConfiguration: BillingConfiguration!
     platformBillingAccount(tenantId: ID!): BillingOverview!
     subscriptionAccess: SubscriptionAccess!
   }
 
   type Mutation {
-    createBusiness(name: String!, planCode: String!, termsVersion: String!, privacyVersion: String!, vatRegistered: Boolean = false, kraPin: String = "", vatEffectiveFrom: String, withholdingVatAgent: Boolean = false): User!
+    createBusiness(name: String!, planCode: String!, promotionId: ID, termsVersion: String!, privacyVersion: String!, vatRegistered: Boolean = false, kraPin: String = "", vatEffectiveFrom: String, withholdingVatAgent: Boolean = false): User!
     inviteUser(email: String!, firstName: String!, lastName: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", storeId: ID!, storeIds: [ID!] = [], phone: String = ""): User!
     resendUserInvitation(username: String!): User!
     updateUserRoles(username: String!, roles: [String!]!): User!
@@ -754,6 +756,9 @@ export const typeDefs = `#graphql
     updateBillingOverride(tenantId: ID!, monthlyPriceKes: Int, activeUserLimit: Int, unlimitedUsers: Boolean = false, activeStoreLimit: Int, unlimitedStores: Boolean = false, vatAccounting: Boolean, multiStore: Boolean, exempt: Boolean = false, expiresOn: String, reason: String!): BillingAccount!
     setBillingOffer(tenantId: ID!, label: String!, pricePercent: Int!, durationMonths: Int!, startsOn: String!, reason: String!): BillingAccount!
     clearBillingOffer(tenantId: ID!): BillingAccount!
+    saveBillingPromotion(id: ID, name: String!, description: String!, pricePercent: Int!, durationMonths: Int!, audience: String!, planCodes: [String!]!, startsOn: String!, endsOn: String!, enabled: Boolean!): BillingPromotion!
+    setBillingPromotionEnabled(id: ID!, enabled: Boolean!): BillingPromotion!
+    claimBillingPromotion(promotionId: ID!): BillingAccount!
     attachBillingEtimsReference(tenantId: ID!, documentId: ID!, reference: String!): BillingDocument!
     updateBillingContact(tenantId: ID, name: String!, email: String!, phone: String = ""): BillingAccount!
     invitePlatformAdmin(email: String!, firstName: String!, lastName: String!): PlatformAdminUser!

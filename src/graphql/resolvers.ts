@@ -159,6 +159,14 @@ import {
   refreshPlatformBusinessSummary,
   syncPlatformBusinessMetrics,
 } from "../repositories/platform-repository";
+import {
+  applyBillingPromotion,
+  listBillingPromotions,
+  listEligibleBillingPromotions,
+  saveBillingPromotion,
+  setBillingPromotionEnabled,
+  type BillingPromotionInput,
+} from "../repositories/billing-promotion-repository";
 const requireStaff = (context: GraphQLContext) => requireRole(context, ["admin", "staff"]);
 const requireAdmin = (context: GraphQLContext) => requireRole(context, ["admin"]);
 const actor = (context: GraphQLContext) => ({ id: context.auth.id, name: context.auth.username });
@@ -345,7 +353,8 @@ const billingOverview = async (tenantId: string) => {
   const [account, usage, payments, documents, audits] = await Promise.all([
     requireBillingAccount(tenantId), billingUsage(tenantId), listBillingPayments(tenantId), listBillingDocuments(tenantId), listBillingAudits(tenantId),
   ]);
-  return { account: billingAccountView(account), nextPayment: { ...nextBillingPayment(account), paymentPending: payments.some(({ status }) => status === "submitted") }, usage, payments, documents, audits, configuration: billingConfiguration() };
+  const availablePromotions = account.offer?.remainingPayments ? [] : await listEligibleBillingPromotions("existing_accounts", account.pendingPlanCode ?? account.planCode);
+  return { account: billingAccountView(account), nextPayment: { ...nextBillingPayment(account), paymentPending: payments.some(({ status }) => status === "submitted") }, usage, payments, documents, audits, configuration: billingConfiguration(), availablePromotions };
 };
 
 const sendPaymentReviewEmail = async (tenantId: string, approved: boolean, reason = "") => {
@@ -562,6 +571,7 @@ const baseResolvers = {
       return { metadata, billing };
     },
     platformAdmins: (_: unknown, _args: unknown, context: GraphQLContext) => { requirePlatformAdmin(context); return listPlatformAdmins(); },
+    platformBillingPromotions: (_: unknown, _args: unknown, context: GraphQLContext) => { requirePlatformAdmin(context); return listBillingPromotions(); },
     platformBillingAccount: (_: unknown, { tenantId }: { tenantId: string }, context: GraphQLContext) => { requirePlatformAdmin(context); return billingOverview(tenantId); },
     subscriptionAccess: async (_: unknown, _args: unknown, context: GraphQLContext) => {
       requireStaff(context);
@@ -573,7 +583,7 @@ const baseResolvers = {
   },
 
   Mutation: {
-    createBusiness: async (_: unknown, setup: { name: string; planCode: string; termsVersion: string; privacyVersion: string; vatRegistered: boolean; kraPin: string; vatEffectiveFrom?: string | null; withholdingVatAgent: boolean }, context: GraphQLContext) => {
+    createBusiness: async (_: unknown, setup: { name: string; planCode: string; promotionId?: string | null; termsVersion: string; privacyVersion: string; vatRegistered: boolean; kraPin: string; vatEffectiveFrom?: string | null; withholdingVatAgent: boolean }, context: GraphQLContext) => {
       const { name } = setup;
       const identity = requireIdentity(context);
       const planCode = validatePlanCode(setup.planCode);
@@ -587,12 +597,14 @@ const baseResolvers = {
         }
         const current = await ensureBusinessSettings(identity.tenantId, identity.tenantName ?? name, user.email);
         if (!(await getBillingAccount(identity.tenantId))) await createBillingAccount({ tenantId: identity.tenantId, tenantName: identity.tenantName ?? name, ownerUserId: identity.id, ownerUsername: identity.username, planCode, termsVersion: setup.termsVersion, privacyVersion: setup.privacyVersion, acceptedBy: identity.id });
+        if (setup.promotionId) await applyBillingPromotion(identity.tenantId, setup.promotionId, "new_accounts", identity.id);
         if (setup.vatRegistered) await updateBusinessSettings(identity.tenantId, { ...current, vatRegistered: true, kraPin: setup.kraPin, vatEffectiveFrom: setup.vatEffectiveFrom ?? new Date().toISOString().slice(0, 10), withholdingVatAgent: setup.withholdingVatAgent }, { id: identity.id, name: identity.username });
         await syncPlatformBusinessMetrics(identity.tenantId);
         return mergeProfile(identity.tenantId, { ...user, roles: identity.roles });
       }
       const { membership } = await createTenant({ name, ownerUserId: identity.id, ownerUsername: identity.username });
       await createBillingAccount({ tenantId: membership.tenantId, tenantName: name, ownerUserId: identity.id, ownerUsername: identity.username, planCode, termsVersion: setup.termsVersion, privacyVersion: setup.privacyVersion, acceptedBy: identity.id });
+      if (setup.promotionId) await applyBillingPromotion(membership.tenantId, setup.promotionId, "new_accounts", identity.id);
       const store = await ensureMainStore(membership.tenantId);
       await upsertStaffProfile(membership.tenantId, identity.id, { employeeCode: "OWNER", jobTitle: "Owner", storeId: store.id, storeName: store.name, phone: "" });
       const user = await getCognitoUser(identity.username);
@@ -939,6 +951,26 @@ const baseResolvers = {
     clearBillingOffer: async (_: unknown, { tenantId }: { tenantId: string }, context: GraphQLContext) => {
       const admin = requirePlatformAdmin(context);
       const result = billingAccountView(await setBillingOffer(tenantId, null, admin.id));
+      await syncPlatformBusinessMetrics(tenantId);
+      return result;
+    },
+    saveBillingPromotion: async (_: unknown, input: BillingPromotionInput & { id?: string | null }, context: GraphQLContext) => {
+      const admin = requirePlatformAdmin(context);
+      const { id, ...promotionInput } = input;
+      const promotion = await saveBillingPromotion(id ?? null, promotionInput, admin.id);
+      await recordPlatformAudit({ action: id ? "billing_promotion_updated" : "billing_promotion_created", actorId: admin.id, target: promotion.id, reason: `${promotion.name} saved` });
+      return promotion;
+    },
+    setBillingPromotionEnabled: async (_: unknown, { id, enabled }: { id: string; enabled: boolean }, context: GraphQLContext) => {
+      const admin = requirePlatformAdmin(context);
+      const promotion = await setBillingPromotionEnabled(id, enabled, admin.id);
+      await recordPlatformAudit({ action: enabled ? "billing_promotion_enabled" : "billing_promotion_disabled", actorId: admin.id, target: id, reason: `${promotion.name} ${enabled ? "enabled" : "disabled"}` });
+      return promotion;
+    },
+    claimBillingPromotion: async (_: unknown, { promotionId }: { promotionId: string }, context: GraphQLContext) => {
+      const admin = requireAdmin(context);
+      const tenantId = tenant(context);
+      const result = billingAccountView(await applyBillingPromotion(tenantId, promotionId, "existing_accounts", admin.id));
       await syncPlatformBusinessMetrics(tenantId);
       return result;
     },

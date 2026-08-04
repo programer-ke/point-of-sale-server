@@ -448,7 +448,7 @@ export const setBillingOverride = async (tenantId: string, override: BillingOver
   return next;
 };
 
-export const setBillingOffer = async (tenantId: string, input: { label: string; pricePercent: number; durationMonths: number; startsOn: string; reason: string } | null, actorId: string) => {
+export const setBillingOffer = async (tenantId: string, input: { label: string; pricePercent: number; durationMonths: number; startsOn: string; reason: string; promotionId?: string | null } | null, actorId: string) => {
   const account = await requireBillingAccount(tenantId);
   const now = new Date().toISOString();
   let offer: BillingOffer | null = null;
@@ -460,7 +460,7 @@ export const setBillingOffer = async (tenantId: string, input: { label: string; 
     if (!Number.isInteger(input.durationMonths) || input.durationMonths < 1 || input.durationMonths > 24) throw new Error("Offer duration must be between 1 and 24 monthly payments");
     addBillingDays(input.startsOn, 0);
     if (reason.length < 3) throw new Error("Provide a reason for the offer");
-    offer = { id: randomUUID(), label, pricePercent: input.pricePercent, durationMonths: input.durationMonths, remainingPayments: input.durationMonths, startsOn: input.startsOn, reason, assignedAt: now, assignedBy: actorId };
+    offer = { id: randomUUID(), promotionId: input.promotionId ?? null, label, pricePercent: input.pricePercent, durationMonths: input.durationMonths, remainingPayments: input.durationMonths, startsOn: input.startsOn, reason, assignedAt: now, assignedBy: actorId };
   }
   const audit: BillingAudit = {
     id: randomUUID(), tenantId, action: offer ? "billing_offer_assigned" : "billing_offer_cleared", actorId,
@@ -468,7 +468,7 @@ export const setBillingOffer = async (tenantId: string, input: { label: string; 
   };
   const next = { ...account, offer, updatedAt: now };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
-    { Put: { TableName: TABLE_NAME, Item: { ...accountKey(tenantId), accessPartition: "PLATFORM#BILLING", accessSort: tenantId, entityType: "billing_account", ...next }, ConditionExpression: "attribute_exists(partitionKey)" } },
+    { Put: { TableName: TABLE_NAME, Item: { ...accountKey(tenantId), accessPartition: "PLATFORM#BILLING", accessSort: tenantId, entityType: "billing_account", ...next }, ConditionExpression: "attribute_exists(partitionKey) AND updatedAt = :expectedUpdatedAt", ExpressionAttributeValues: { ":expectedUpdatedAt": account.updatedAt } } },
     { Put: { TableName: TABLE_NAME, Item: { partitionKey: `TENANT#${tenantId}`, sortKey: `BILLING#AUDIT#${now}#${audit.id}`, entityType: "billing_audit", ...audit }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
   ] }));
   return next;

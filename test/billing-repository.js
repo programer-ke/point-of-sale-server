@@ -42,6 +42,7 @@ async function main() {
   assert.equal(offered.offer.remainingPayments, 6);
   const offerTransaction = commands.find((command) => command.constructor.name === "TransactWriteCommand").input.TransactItems;
   assert.equal(offerTransaction[1].Put.Item.action, "billing_offer_assigned");
+  assert.match(offerTransaction[0].Put.ConditionExpression, /updatedAt/, "offer claims must reject concurrent account changes");
 
   commands.length = 0;
   dynamoDB.send = async (command) => {

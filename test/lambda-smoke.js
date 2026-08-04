@@ -73,6 +73,22 @@ async function main() {
   }, {}, () => {});
   assert.equal(preflight.statusCode, 204);
 
+  const publicPromotions = await handler({
+    ...event,
+    routeKey: "GET /public/billing-promotions",
+    rawPath: "/public/billing-promotions",
+    queryStringParameters: { planCode: "biashara" },
+    requestContext: {
+      ...event.requestContext,
+      routeKey: "GET /public/billing-promotions",
+      http: { ...event.requestContext.http, method: "GET", path: "/public/billing-promotions" },
+      authorizer: undefined,
+    },
+    body: undefined,
+  }, {}, () => {});
+  assert.equal(publicPromotions.statusCode, 200, "signup promotion reads must not require Cognito");
+  assert.deepEqual(JSON.parse(publicPromotions.body), []);
+
   const result = await handler(event, {}, () => {});
 
   assert.equal(result.statusCode, 200);

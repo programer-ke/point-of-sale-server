@@ -30,6 +30,7 @@ export interface BillingOverride {
 
 export interface BillingOffer {
   id: string;
+  promotionId?: string | null;
   label: string;
   pricePercent: number;
   durationMonths: number;
@@ -71,7 +72,7 @@ export const PLANS: Record<PlanCode, PlanDefinition> = {
   biashara: {
     code: "biashara",
     name: "Biashara",
-    monthlyPriceKes: 1_000,
+    monthlyPriceKes: 800,
     activeUserLimit: 5,
     activeStoreLimit: 1,
     vatAccounting: false,
@@ -81,7 +82,7 @@ export const PLANS: Record<PlanCode, PlanDefinition> = {
   biashara_growth: {
     code: "biashara_growth",
     name: "Biashara Growth",
-    monthlyPriceKes: 2_500,
+    monthlyPriceKes: 2_000,
     activeUserLimit: 10,
     activeStoreLimit: 3,
     vatAccounting: true,
