@@ -117,6 +117,12 @@ async function main() {
   }
   assert.equal(transaction[2].Put.Item.orderNumber, sale.orderNumber);
 
+  await assert.rejects(
+    () => repository.completeSale(tenantId, { storeId: "store-1", paymentMethod: "cash", amountTendered: 300, items: [{ productId: "product-1", quantity: 1, expectedCatalogPrice: 100 }], requestId: "sale-stale-price" }, { id: "cashier-1", name: "Cashier" }),
+    (error) => error.extensions?.code === "PRICE_CHANGED" && error.extensions.priceChanges[0].currentPrice === 125,
+    "checkout must reject a catalog price that changed after the basket was built",
+  );
+
   const adminOverride = await repository.completeSale(
     tenantId,
     { storeId: "store-1", paymentMethod: "cash", amountTendered: 300, items: [{ productId: "product-1", quantity: 1, unitPriceOverride: 100, priceOverrideReason: "Customer goodwill" }], requestId: "sale-admin-override" },
@@ -153,15 +159,33 @@ async function main() {
   );
   checkoutPolicy = undefined;
 
-  const belowCostProduct = await repository.updateProduct(
+  await assert.rejects(
+    () => repository.updateProduct(tenantId, "product-1", { sellingPrice: 60 }, { id: "admin", name: "Admin" }),
+    /Use Adjust prices/,
+  );
+  const belowCostProduct = await repository.adjustProductPrices(
     tenantId,
     "product-1",
-    { sellingPrice: 60 },
+    { lines: [{ productUnitId: "product-1-default", newPrice: 60 }], effectiveAt: "2026-01-01T00:00:00.000Z", reason: "Supplier cost review", requestId: "price-now" },
     { id: "admin", name: "Admin" },
   );
   assert.equal(belowCostProduct.sellingPrice, 60, "below-cost prices warn in the UI but remain valid");
-  assert.match(transaction[1].Put.Item.reason, /Selling price changed from 125.00 to 60.00/);
+  assert.match(transaction[1].Put.Item.reason, /125.00 to 60.00/);
   assert.equal(sale.items[0].price, 125, "product price updates must not rewrite completed sales");
+
+  const scheduled = await repository.adjustProductPrices(
+    tenantId,
+    "product-1",
+    { lines: [{ productUnitId: "product-1-default", newPrice: 150 }], effectiveAt: "2099-01-01T00:00:00.000Z", reason: "Future supplier increase", requestId: "price-future" },
+    { id: "admin", name: "Admin" },
+  );
+  assert.equal(repository.pendingPriceAdjustment(scheduled)?.lines[0].newPrice, 150);
+  assert.equal(repository.regularVariantPrice(scheduled, "product-1-default", new Date("2100-01-01T00:00:00.000Z")), 150);
+  product.priceAdjustment = scheduled.priceAdjustment;
+  const cancelled = await repository.cancelProductPriceAdjustment(tenantId, "product-1", "Labels are not ready", { id: "admin", name: "Admin" }, "price-cancel");
+  assert.equal(cancelled.priceAdjustment, undefined);
+  assert.match(transaction[1].Put.Item.reason, /cancelled adjustment/);
+  delete product.priceAdjustment;
 
   const firstPage = await repository.getProductPage(tenantId, { limit: 1 });
   assert.equal(firstPage.items.length, 1);

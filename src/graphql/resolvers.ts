@@ -23,12 +23,16 @@ import {
 } from "../repositories/tenant-repository";
 import {
   completeSale,
+  adjustProductPrices,
+  cancelProductPriceAdjustment,
   createCategory,
   createProduct,
   deleteCategory,
   dashboardSummary,
   businessReport,
   effectiveProductPrice,
+  pendingPriceAdjustment,
+  regularVariantPrice,
   ensureBusinessSettings,
   findProduct,
   getBusinessMeasurementSettings,
@@ -392,8 +396,11 @@ const baseResolvers = {
     withholdingVatAgent: (settings: { withholdingVatAgent?: boolean }) => settings.withholdingVatAgent ?? false,
   },
   Product: {
+    sellingPrice: (product: ProductRecord) => regularVariantPrice(product, product.saleVariants[0].id),
     effectivePrice: (product: ProductRecord) => effectiveProductPrice(product),
-    onPromotion: (product: ProductRecord) => effectiveProductPrice(product) < product.sellingPrice,
+    onPromotion: (product: ProductRecord) => effectiveProductPrice(product) < regularVariantPrice(product, product.saleVariants[0].id),
+    pendingPriceAdjustment: (product: ProductRecord) => pendingPriceAdjustment(product),
+    saleVariants: (product: ProductRecord) => product.saleVariants.map((variant) => ({ ...variant, sellingPrice: regularVariantPrice(product, variant.id) })),
     productUnits: (product: ProductRecord & { storeStock?: { quantity: number; inventoryValue: number } | null }) => {
       const fallbackBaseCost = product.buyingPrice / measurementUnit(product.stockUnit).baseUnits;
       const baseCost = product.storeStock && product.storeStock.quantity > 0
@@ -401,7 +408,7 @@ const baseResolvers = {
         : fallbackBaseCost;
       return productUnitsOf(product).map((unit) => {
         const estimatedCost = baseCost * unit.quantityInBaseUnits;
-        const sellingPrice = unit.sellingPrice ?? null;
+        const sellingPrice = unit.sellingPrice == null ? null : regularVariantPrice(product, unit.id);
         const marginAmount = sellingPrice == null ? null : sellingPrice - estimatedCost;
         return { ...unit, unitRate: sellingPrice == null ? null : sellingPrice / unit.quantityInBaseUnits, estimatedCost, marginAmount, marginPercent: sellingPrice == null || sellingPrice === 0 ? null : marginAmount! / sellingPrice, belowCost: sellingPrice != null && sellingPrice < estimatedCost };
       });
@@ -806,12 +813,25 @@ const baseResolvers = {
         validateMoney(updates.promotionPrice, "Promotion price");
         const current = await getProduct(tenant(context), id);
         if (!current) throw new Error("Product not found");
-        if (updates.promotionPrice >= (updates.sellingPrice ?? current.sellingPrice)) throw new Error("Promotion price must be lower than the regular selling price");
+        const defaultUnitId = current.saleVariants[0].id;
+        if (updates.promotionPrice >= regularVariantPrice(current, defaultUnitId)) throw new Error("Promotion price must be lower than the regular selling price");
+        const scheduled = pendingPriceAdjustment(current);
+        const scheduledDefaultPrice = scheduled?.lines.find((line) => line.productUnitId === defaultUnitId)?.newPrice;
+        const promotionEndsAt = updates.promotionEndsAt === undefined ? current.promotionEndsAt : updates.promotionEndsAt;
+        if (scheduled && scheduledDefaultPrice !== undefined && (!promotionEndsAt || Date.parse(promotionEndsAt) >= Date.parse(scheduled.effectiveAt)) && updates.promotionPrice >= scheduledDefaultPrice) throw new Error("Promotion price must remain lower than the scheduled regular price");
       }
       if (updates.promotionStartsAt && Number.isNaN(Date.parse(updates.promotionStartsAt))) throw new Error("Promotion start date is invalid");
       if (updates.promotionEndsAt && Number.isNaN(Date.parse(updates.promotionEndsAt))) throw new Error("Promotion end date is invalid");
       if (updates.promotionStartsAt && updates.promotionEndsAt && Date.parse(updates.promotionEndsAt) <= Date.parse(updates.promotionStartsAt)) throw new Error("Promotion end must be after its start");
       return updateProduct(tenant(context), id, updates, actor(context));
+    },
+    adjustProductPrices: (_: unknown, input: { productId: string; lines: Array<{ productUnitId: string; newPrice: number }>; effectiveAt: string; reason: string; requestId: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      return adjustProductPrices(tenant(context), input.productId, input, actor(context));
+    },
+    cancelProductPriceAdjustment: (_: unknown, input: { productId: string; reason: string; requestId: string }, context: GraphQLContext) => {
+      requireAdmin(context);
+      return cancelProductPriceAdjustment(tenant(context), input.productId, input.reason, actor(context), input.requestId);
     },
     archiveProduct: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
       requireAdmin(context);
@@ -829,7 +849,7 @@ const baseResolvers = {
         paymentMethod: "cash" | "mpesa";
         amountTendered?: number | null;
         mpesaReference?: string | null;
-        items: Array<{ productId: string; variantId?: string | null; quantity: number; unitPriceOverride?: number | null; priceOverrideReason?: string | null }>;
+        items: Array<{ productId: string; variantId?: string | null; quantity: number; expectedCatalogPrice?: number | null; unitPriceOverride?: number | null; priceOverrideReason?: string | null }>;
         requestId: string;
       },
       context: GraphQLContext,

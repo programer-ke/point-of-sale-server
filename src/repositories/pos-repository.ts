@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { GraphQLError } from "graphql";
 import {
   BatchGetCommand,
   DeleteCommand,
@@ -16,6 +17,16 @@ import { allocateLots, commitIdempotent, existingIdempotentResult, getStore, lis
 import { nextTenantCode } from "./code-generator";
 
 export interface SaleVariantRecord { id: string; name: string; sku: string; barcode: string; quantityInBaseUnits: number; sellingPrice: number; status: "active" | "inactive" }
+
+export interface ProductPriceAdjustmentRecord {
+  id: string;
+  effectiveAt: string;
+  reason: string;
+  lines: Array<{ productUnitId: string; productUnitName: string; previousPrice: number; newPrice: number }>;
+  createdBy: string;
+  createdByName: string;
+  createdAt: string;
+}
 
 export interface CategoryRecord {
   id: string;
@@ -48,6 +59,7 @@ export interface ProductRecord {
   promotionPrice?: number | null;
   promotionStartsAt?: string | null;
   promotionEndsAt?: string | null;
+  priceAdjustment?: ProductPriceAdjustmentRecord | null;
   status: "active" | "inactive";
   createdAt: string;
   updatedAt: string;
@@ -299,6 +311,22 @@ const legacyProductUnits = (product: ProductRecord): ProductUnitRecord[] => vari
   status: variant.status,
 }));
 export const productUnitsOf = (product: ProductRecord) => product.productUnits?.length ? product.productUnits : legacyProductUnits(product);
+const adjustmentIsEffective = (product: ProductRecord, at = new Date()) => Boolean(product.priceAdjustment && Date.parse(product.priceAdjustment.effectiveAt) <= at.getTime());
+export const pendingPriceAdjustment = (product: ProductRecord, at = new Date()) => product.priceAdjustment && !adjustmentIsEffective(product, at) ? product.priceAdjustment : null;
+export const regularVariantPrice = (product: ProductRecord, variantId: string, at = new Date()) => {
+  const variant = variantsOf(product).find((candidate) => candidate.id === variantId);
+  if (!variant) throw new Error("Product sale variant is unavailable");
+  if (!adjustmentIsEffective(product, at)) return variant.sellingPrice;
+  return product.priceAdjustment!.lines.find((line) => line.productUnitId === variantId)?.newPrice ?? variant.sellingPrice;
+};
+const materializeEffectiveAdjustment = (product: ProductRecord, at = new Date()): ProductRecord => {
+  if (!adjustmentIsEffective(product, at)) return product;
+  const prices = new Map(product.priceAdjustment!.lines.map((line) => [line.productUnitId, line.newPrice]));
+  const saleVariants = variantsOf(product).map((variant) => ({ ...variant, sellingPrice: prices.get(variant.id) ?? variant.sellingPrice }));
+  const productUnits = productUnitsOf(product).map((unit) => ({ ...unit, sellingPrice: unit.sellingPrice == null ? null : prices.get(unit.id) ?? unit.sellingPrice }));
+  const { priceAdjustment: _priceAdjustment, ...withoutAdjustment } = product;
+  return { ...withoutAdjustment, sellingPrice: saleVariants[0].sellingPrice, saleVariants, productUnits };
+};
 const weightedProductBaseCost = async (tenantId: string, productId: string, fallback: number) => {
   const stores = await listInventoryStores(tenantId);
   const stock = (await Promise.all(stores.map((store) => getStoreStock(tenantId, store.id)))).flat().filter((item) => item.productId === productId);
@@ -373,7 +401,7 @@ const queryCollection = async <T>(tenantId: string, partition: string, options?:
 };
 
 export const listCategories = (tenantId: string) => queryCollection<CategoryRecord>(tenantId, "CATALOG#CATEGORY");
-export const listProducts = (tenantId: string) => queryCollection<ProductRecord>(tenantId, "CATALOG#PRODUCT").then((products) => products.map((product) => ({ ...product, saleVariants: variantsOf(product) })));
+export const listProducts = (tenantId: string) => queryCollection<ProductRecord>(tenantId, "CATALOG#PRODUCT").then((products) => products.map((product) => materializeEffectiveAdjustment({ ...product, saleVariants: variantsOf(product) })));
 export const listSales = (tenantId: string, limit = 50, range?: { from?: string; to?: string }) => queryCollection<SaleRecord>(tenantId, "SALE", { limit, ...range });
 export const listSalesByStaff = async (tenantId: string, staffId: string, limit = 50, range?: { from?: string; to?: string }) => {
   const sales: SaleRecord[] = [];
@@ -666,14 +694,15 @@ export const updateBusinessReceiptSettings = async (
 };
 
 export const effectiveProductPrice = (product: ProductRecord, at = new Date()) => {
+  const regularPrice = regularVariantPrice(product, variantsOf(product)[0].id, at);
   const promotionalPrice = product.promotionPrice;
-  if (typeof promotionalPrice !== "number" || promotionalPrice < 0 || promotionalPrice >= product.sellingPrice) {
-    return product.sellingPrice;
+  if (typeof promotionalPrice !== "number" || promotionalPrice < 0 || promotionalPrice >= regularPrice) {
+    return regularPrice;
   }
   const timestamp = at.getTime();
   const startsAt = product.promotionStartsAt ? Date.parse(product.promotionStartsAt) : Number.NEGATIVE_INFINITY;
   const endsAt = product.promotionEndsAt ? Date.parse(product.promotionEndsAt) : Number.POSITIVE_INFINITY;
-  return timestamp >= startsAt && timestamp <= endsAt ? promotionalPrice : product.sellingPrice;
+  return timestamp >= startsAt && timestamp <= endsAt ? promotionalPrice : regularPrice;
 };
 
 export const findProduct = async (tenantId: string, term: string) => {
@@ -855,8 +884,21 @@ export const updateProduct = async (
   updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "saleVariants" | "promotionPrice" | "promotionStartsAt" | "promotionEndsAt" | "status" | "vatClass">> & { productUnits?: ProductUnitInput[]; acknowledgeBelowCost?: boolean },
   actor: { id: string; name: string },
 ) => {
-  const current = await getProduct(tenantId, id);
-  if (!current) throw new Error("Product not found");
+  const storedCurrent = await getProduct(tenantId, id);
+  if (!storedCurrent) throw new Error("Product not found");
+  const current = materializeEffectiveAdjustment(storedCurrent);
+  if (updates.productUnits?.length) {
+    const currentPrices = new Map(productUnitsOf(current).filter((unit) => unit.sellable && unit.sellingPrice != null).map((unit) => [unit.id, regularVariantPrice(current, unit.id)]));
+    const changedExistingPrice = updates.productUnits.some((unit) => currentPrices.has(unit.id ?? "") && unit.sellingPrice !== currentPrices.get(unit.id ?? ""));
+    if (changedExistingPrice) throw new Error("Use Adjust prices to change an existing selling unit price");
+  }
+  if (updates.saleVariants?.length && updates.productUnits === undefined) {
+    const currentPrices = new Map(variantsOf(current).map((variant) => [variant.id, regularVariantPrice(current, variant.id)]));
+    if (updates.saleVariants.some((variant) => currentPrices.has(variant.id) && variant.sellingPrice !== currentPrices.get(variant.id))) throw new Error("Use Adjust prices to change an existing selling unit price");
+  }
+  if (updates.sellingPrice !== undefined && updates.productUnits === undefined && updates.saleVariants === undefined && updates.sellingPrice !== regularVariantPrice(current, variantsOf(current)[0].id)) {
+    throw new Error("Use Adjust prices to change an existing selling unit price");
+  }
   const businessSettings = await getBusinessSettings(tenantId);
   const nextVatClass = updates.vatClass === undefined ? current.vatClass : updates.vatClass;
   if (businessSettings.vatRegistered && !isVatClass(nextVatClass)) throw new Error("Select a VAT class for this product");
@@ -905,6 +947,84 @@ export const updateProduct = async (
   return next;
 };
 
+export const adjustProductPrices = async (
+  tenantId: string,
+  productId: string,
+  input: { lines: Array<{ productUnitId: string; newPrice: number }>; effectiveAt: string; reason: string; requestId: string },
+  actor: { id: string; name: string },
+) => {
+  const payload = { productId, ...input };
+  const previous = await existingIdempotentResult<ProductRecord>(tenantId, "adjust_product_prices", input.requestId, payload);
+  if (previous) return previous;
+  const stored = await getProduct(tenantId, productId);
+  if (!stored) throw new Error("Product not found");
+  const now = new Date(); const nowIso = now.toISOString();
+  const effectiveTime = Date.parse(input.effectiveAt);
+  if (Number.isNaN(effectiveTime)) throw new Error("Enter a valid price effective date and time");
+  const reason = input.reason.trim();
+  if (reason.length < 3 || reason.length > 200) throw new Error("Enter a price adjustment reason between 3 and 200 characters");
+  if (!input.lines.length || input.lines.length > 20 || new Set(input.lines.map((line) => line.productUnitId)).size !== input.lines.length) throw new Error("Select 1 to 20 unique selling units");
+
+  const current = materializeEffectiveAdjustment(stored, now);
+  const units = productUnitsOf(current);
+  const sellable = new Map(units.filter((unit) => unit.sellable && unit.status === "active" && unit.sellingPrice != null).map((unit) => [unit.id, unit]));
+  const lines = input.lines.map((line) => {
+    const unit = sellable.get(line.productUnitId);
+    if (!unit) throw new Error("Select an active selling unit");
+    if (!Number.isFinite(line.newPrice) || line.newPrice < 0 || Math.round(line.newPrice * 100) / 100 !== line.newPrice) throw new Error("Selling prices must be non-negative amounts with at most two decimal places");
+    if (line.newPrice === unit.sellingPrice) throw new Error(`${unit.name} already has that selling price`);
+    return { productUnitId: unit.id, productUnitName: unit.name, previousPrice: unit.sellingPrice!, newPrice: line.newPrice };
+  });
+  const defaultId = variantsOf(current)[0].id;
+  const defaultNewPrice = lines.find((line) => line.productUnitId === defaultId)?.newPrice ?? regularVariantPrice(current, defaultId, now);
+  const promotionOverlaps = typeof current.promotionPrice === "number" && (!current.promotionEndsAt || Date.parse(current.promotionEndsAt) >= effectiveTime);
+  if (promotionOverlaps && current.promotionPrice! >= defaultNewPrice) throw new Error("The regular price must remain above the overlapping promotion price");
+
+  const immediate = effectiveTime <= now.getTime();
+  const adjustment: ProductPriceAdjustmentRecord = { id: randomUUID(), effectiveAt: immediate ? nowIso : new Date(effectiveTime).toISOString(), reason, lines, createdBy: actor.id, createdByName: actor.name, createdAt: nowIso };
+  let next: ProductRecord;
+  if (immediate) {
+    const prices = new Map(lines.map((line) => [line.productUnitId, line.newPrice]));
+    const saleVariants = variantsOf(current).map((variant) => ({ ...variant, sellingPrice: prices.get(variant.id) ?? variant.sellingPrice }));
+    const productUnits = units.map((unit) => ({ ...unit, sellingPrice: unit.sellingPrice == null ? null : prices.get(unit.id) ?? unit.sellingPrice }));
+    next = { ...current, sellingPrice: saleVariants[0].sellingPrice, saleVariants, productUnits, priceAdjustment: null, updatedAt: nowIso };
+  } else {
+    next = { ...current, priceAdjustment: adjustment, updatedAt: nowIso };
+  }
+  const replacing = Boolean(pendingPriceAdjustment(stored, now));
+  const detail = lines.map((line) => `${line.productUnitName}: ${line.previousPrice.toFixed(2)} to ${line.newPrice.toFixed(2)}`).join("; ");
+  const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [
+    { Put: { TableName: TABLE_NAME, Item: { ...productKey(tenantId, productId), accessPartition: tenantKey(tenantId, "CATALOG#PRODUCT"), accessSort: `${next.name.toLowerCase()}#${productId}`, entityType: "product", tenantId, ...next }, ConditionExpression: "updatedAt = :expected", ExpressionAttributeValues: { ":expected": stored.updatedAt } } },
+    auditPut(tenantId, { action: replacing ? "product.price_adjustment.replaced" : immediate ? "product.price_adjustment.applied" : "product.price_adjustment.scheduled", entityType: "product", entityId: productId, productName: next.name, reason: `${reason} — ${detail}; effective ${adjustment.effectiveAt}${replacing ? "; replaced the previous scheduled adjustment" : ""}`.slice(0, 1000), actorId: actor.id, actorName: actor.name }, nowIso),
+  ];
+  return commitIdempotent(tenantId, "adjust_product_prices", input.requestId, payload, next, transaction);
+};
+
+export const cancelProductPriceAdjustment = async (
+  tenantId: string,
+  productId: string,
+  reasonInput: string,
+  actor: { id: string; name: string },
+  requestId: string,
+) => {
+  const payload = { productId, reason: reasonInput, requestId };
+  const previous = await existingIdempotentResult<ProductRecord>(tenantId, "cancel_product_price_adjustment", requestId, payload);
+  if (previous) return previous;
+  const current = await getProduct(tenantId, productId);
+  if (!current) throw new Error("Product not found");
+  const pending = pendingPriceAdjustment(current);
+  if (!pending) throw new Error("This product has no upcoming price adjustment");
+  const reason = reasonInput.trim();
+  if (reason.length < 3 || reason.length > 200) throw new Error("Enter a cancellation reason between 3 and 200 characters");
+  const now = new Date().toISOString();
+  const { priceAdjustment: _priceAdjustment, ...withoutAdjustment } = current;
+  const next: ProductRecord = { ...withoutAdjustment, updatedAt: now };
+  return commitIdempotent(tenantId, "cancel_product_price_adjustment", requestId, payload, next, [
+    { Put: { TableName: TABLE_NAME, Item: { ...productKey(tenantId, productId), accessPartition: tenantKey(tenantId, "CATALOG#PRODUCT"), accessSort: `${next.name.toLowerCase()}#${productId}`, entityType: "product", tenantId, ...next }, ConditionExpression: "updatedAt = :expected", ExpressionAttributeValues: { ":expected": current.updatedAt } } },
+    auditPut(tenantId, { action: "product.price_adjustment.cancelled", entityType: "product", entityId: productId, productName: next.name, reason: `${reason} — cancelled adjustment effective ${pending.effectiveAt}`.slice(0, 1000), actorId: actor.id, actorName: actor.name }, now),
+  ]);
+};
+
 export const getCashShift = async (tenantId: string, id: string) => stripKeys<CashShiftRecord>((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: cashShiftKey(tenantId, id) }))).Item);
 export const getOpenCashShift = async (tenantId: string, storeId: string, cashierId: string) => {
   const lookup = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: openCashShiftKey(tenantId, storeId, cashierId) }));
@@ -930,14 +1050,14 @@ export const completeSale = async (
     paymentMethod: "cash" | "mpesa";
     amountTendered?: number | null;
     mpesaReference?: string | null;
-    items: Array<{ productId: string; variantId?: string | null; quantity: number; unitPriceOverride?: number | null; priceOverrideReason?: string | null }>;
+    items: Array<{ productId: string; variantId?: string | null; quantity: number; expectedCatalogPrice?: number | null; unitPriceOverride?: number | null; priceOverrideReason?: string | null }>;
     requestId: string;
   },
   actor: { id: string; name: string; employeeCode?: string; storeName?: string; role?: "admin" | "staff" },
 ) => {
   const previous = await existingIdempotentResult<SaleRecord>(tenantId, "complete_sale", input.requestId, input); if (previous) return previous;
-  const grouped = new Map<string, { productId: string; variantId?: string | null; quantity: number; unitPriceOverride?: number | null; priceOverrideReason?: string | null }>();
-  for (const item of input.items) { const key = `${item.productId}#${item.variantId ?? "default"}`; const current = grouped.get(key); if (current && (current.unitPriceOverride !== item.unitPriceOverride || current.priceOverrideReason !== item.priceOverrideReason)) throw new Error("Duplicate sale lines must use the same price override"); grouped.set(key, { ...item, quantity: (current?.quantity ?? 0) + item.quantity }); }
+  const grouped = new Map<string, { productId: string; variantId?: string | null; quantity: number; expectedCatalogPrice?: number | null; unitPriceOverride?: number | null; priceOverrideReason?: string | null }>();
+  for (const item of input.items) { const key = `${item.productId}#${item.variantId ?? "default"}`; const current = grouped.get(key); if (current && (current.expectedCatalogPrice !== item.expectedCatalogPrice || current.unitPriceOverride !== item.unitPriceOverride || current.priceOverrideReason !== item.priceOverrideReason)) throw new Error("Duplicate sale lines must use the same expected price and override"); grouped.set(key, { ...item, quantity: (current?.quantity ?? 0) + item.quantity }); }
   if (grouped.size === 0) throw new Error("Add at least one product to the sale");
   if (grouped.size > 40) throw new Error("A sale can contain at most 40 distinct variants");
   if ([...grouped.values()].some(({ quantity }) => !Number.isInteger(quantity) || quantity <= 0)) throw new Error("Sale quantities must be positive whole numbers");
@@ -946,6 +1066,14 @@ export const completeSale = async (
   if (products.some((product) => !product || product.status !== "active")) throw new Error("One or more products are unavailable");
   const byProduct = new Map(products.map((product) => [product!.id, product!]));
   const resolvedItems = [...grouped.values()].map((item) => { const product = byProduct.get(item.productId)!; const variants = variantsOf(product).filter((variant) => variant.status === "active"); const variant = variants.find((candidate) => candidate.id === item.variantId) ?? (!item.variantId ? variants[0] : undefined); if (!variant) throw new Error(`${product.name} sale variant is unavailable`); return { ...item, product, variant, inventoryQuantity: item.quantity * variant.quantityInBaseUnits }; });
+  const pricingAt = new Date();
+  const priceChanges = resolvedItems.flatMap(({ product, variant, expectedCatalogPrice }) => {
+    if (expectedCatalogPrice === undefined || expectedCatalogPrice === null) return [];
+    const regularPrice = regularVariantPrice(product, variant.id, pricingAt);
+    const currentPrice = variantsOf(product)[0]?.id === variant.id ? effectiveProductPrice(product, pricingAt) : regularPrice;
+    return currentPrice === expectedCatalogPrice ? [] : [{ productId: product.id, productName: product.name, variantId: variant.id, variantName: variant.name, previousPrice: expectedCatalogPrice, currentPrice }];
+  });
+  if (priceChanges.length) throw new GraphQLError("One or more basket prices changed. Review the updated totals before completing the sale.", { extensions: { code: "PRICE_CHANGED", priceChanges } });
   const inventoryByProduct = new Map<string, number>(); for (const item of resolvedItems) inventoryByProduct.set(item.productId, (inventoryByProduct.get(item.productId) ?? 0) + item.inventoryQuantity);
   const now = new Date().toISOString();
   const id = randomUUID();
@@ -956,7 +1084,8 @@ export const completeSale = async (
   if (input.paymentMethod === "cash" && !cashShift) throw new Error("Open a cash shift before accepting cash sales");
   const remainingCostByProduct = new Map([...inventoryByProduct].map(([productId, inventoryQuantity]) => [productId, { quantity: inventoryQuantity, costMinor: (allocations.get(productId) ?? []).reduce((sum, allocation) => sum + allocation.costMinor, 0) }]));
   const saleItems: SaleItemRecord[] = resolvedItems.map(({ product, variant, quantity, inventoryQuantity, unitPriceOverride, priceOverrideReason }) => {
-    const defaultSale = variantsOf(product)[0]?.id === variant.id; const authoritativePrice = defaultSale ? effectiveProductPrice(product, new Date(now)) : variant.sellingPrice;
+    const regularPrice = regularVariantPrice(product, variant.id, new Date(now));
+    const defaultSale = variantsOf(product)[0]?.id === variant.id; const authoritativePrice = defaultSale ? effectiveProductPrice(product, new Date(now)) : regularPrice;
     const overrideRequested = unitPriceOverride !== undefined && unitPriceOverride !== null && unitPriceOverride !== authoritativePrice;
     const reason = priceOverrideReason?.trim() ?? "";
     if (overrideRequested) {
@@ -990,8 +1119,8 @@ export const completeSale = async (
       quantity,
       price,
       ...(overrideRequested ? { priceBeforeOverride: authoritativePrice, priceOverrideReason: reason } : {}),
-      regularPrice: variant.sellingPrice,
-      promotionApplied: authoritativePrice < variant.sellingPrice,
+      regularPrice,
+      promotionApplied: authoritativePrice < regularPrice,
       cost,
       total,
       vatClass,
@@ -1161,7 +1290,7 @@ export const businessReport = async (tenantId: string, range: { from: string; to
     }
   }
   const stockAdjustments = audits.filter(({ action }) => action === "stock.adjusted");
-  const priceChanges = audits.filter(({ action }) => action === "product.price.updated");
+  const priceChanges = audits.filter(({ action }) => action === "product.price.updated" || action.startsWith("product.price_adjustment."));
   const revenue = roundMoney(filteredSales.reduce((sum, sale) => sum + sale.totalAmount, 0));
   const grossProfit = roundMoney(filteredSales.flatMap(({ items }) => items).reduce((sum, item) => sum + item.total - (item.vatAmount ?? 0) - item.cost * item.quantity, 0));
   const stockCostValue = roundMoney([...valueByProduct.values()].reduce((sum, value) => sum + value, 0));

@@ -55,6 +55,7 @@ export const typeDefs = `#graphql
     promotionPrice: Float
     promotionStartsAt: String
     promotionEndsAt: String
+    pendingPriceAdjustment: ProductPriceAdjustment
     effectivePrice: Float!
     onPromotion: Boolean!
     storeStock: StoreProductStock
@@ -65,6 +66,8 @@ export const typeDefs = `#graphql
 
   type SaleVariant { id: ID!, name: String!, sku: String!, barcode: String!, quantityInBaseUnits: Int!, sellingPrice: Float!, status: String! }
   type ProductUnit { id: ID!, labelCode: String!, name: String!, parentUnitId: ID, multiplier: Int!, quantityInBaseUnits: Int!, sellable: Boolean!, purchasable: Boolean!, sellingPrice: Float, unitRate: Float, estimatedCost: Float, marginAmount: Float, marginPercent: Float, belowCost: Boolean!, sku: String!, barcode: String!, status: String! }
+  type ProductPriceAdjustmentLine { productUnitId: ID!, productUnitName: String!, previousPrice: Float!, newPrice: Float! }
+  type ProductPriceAdjustment { id: ID!, effectiveAt: String!, reason: String!, lines: [ProductPriceAdjustmentLine!]!, createdBy: ID!, createdByName: String!, createdAt: String! }
 
   type ProductPage {
     items: [Product!]!
@@ -291,11 +294,13 @@ export const typeDefs = `#graphql
     productId: ID!
     variantId: ID
     quantity: Int!
+    expectedCatalogPrice: Float
     unitPriceOverride: Float
     priceOverrideReason: String
   }
   input SaleVariantInput { id: ID, name: String!, sku: String = "", barcode: String = "", quantityInBaseUnits: Int!, sellingPrice: Float!, status: String = "active" }
   input ProductUnitInput { id: ID, labelCode: String!, name: String!, parentUnitId: ID, multiplier: Int!, quantityInBaseUnits: Int, sellable: Boolean!, purchasable: Boolean!, sellingPrice: Float, sku: String = "", barcode: String = "", status: String = "active" }
+  input ProductPriceAdjustmentLineInput { productUnitId: ID!, newPrice: Float! }
 
   type Store {
     id: ID!
@@ -711,6 +716,8 @@ export const typeDefs = `#graphql
     deleteCategory(id: ID!): Boolean!
     createProduct(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, vatClass: String, stockUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!, productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false): Product!
     updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, vatClass: String, stockUnit: String, tracksExpiry: Boolean, saleVariants: [SaleVariantInput!], productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false, promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
+    adjustProductPrices(productId: ID!, lines: [ProductPriceAdjustmentLineInput!]!, effectiveAt: String!, reason: String!, requestId: ID!): Product!
+    cancelProductPriceAdjustment(productId: ID!, reason: String!, requestId: ID!): Product!
     archiveProduct(id: ID!): Product!
     completeSale(storeId: ID, customerName: String, paymentMethod: String!, amountTendered: Float, mpesaReference: String, items: [SaleItemInput!]!, requestId: ID!): Sale!
     createStore(code: String = "", name: String!, address: String = "", receiptBusinessName: String = "", receiptAddress: String = "", receiptPhone: String = "", receiptEmail: String = "", receiptFooter: String = "", receiptReturnPolicy: String = ""): Store!

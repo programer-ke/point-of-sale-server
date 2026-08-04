@@ -16,7 +16,7 @@ export const MUTATION_POLICY: Record<string, MutationClass> = {
   updateBusinessSettings: "safe_settings", updateBusinessDetails: "safe_settings", updateBusinessReceiptSettings: "safe_settings",
   updateBusinessCheckoutSettings: "safe_settings", updateBusinessMeasurementSettings: "safe_settings",
   createCategory: "operational", updateCategory: "operational", deleteCategory: "operational", createProduct: "operational",
-  updateProduct: "operational", archiveProduct: "operational", completeSale: "operational", createStore: "operational", updateStore: "operational",
+  updateProduct: "operational", adjustProductPrices: "operational", cancelProductPriceAdjustment: "operational", archiveProduct: "operational", completeSale: "operational", createStore: "operational", updateStore: "operational",
   createSupplier: "operational", updateSupplier: "operational", upsertSupplierProduct: "operational", removeSupplierProduct: "operational",
   upsertStorePolicy: "operational", createPurchaseOrder: "operational", updatePurchaseOrder: "operational", issuePurchaseOrder: "operational",
   sendPurchaseOrderEmail: "operational", closePurchaseOrder: "operational", cancelPurchaseOrder: "operational", receivePurchaseOrder: "operational",
