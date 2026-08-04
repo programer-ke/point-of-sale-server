@@ -26,7 +26,7 @@ export const MUTATION_POLICY: Record<string, MutationClass> = {
   openCashShift: "operational", recordCashMovement: "operational", closeCashShift: "operational", markNotificationRead: "operational",
   markAllNotificationsRead: "operational", createSupplierInvoice: "operational", recordSupplierPayment: "operational", voidSupplierPayment: "operational",
   submitBillingPayment: "billing", scheduleBillingPlan: "billing", cancelBillingSubscription: "billing",
-  confirmBillingPayment: "platform", rejectBillingPayment: "platform", assignPlatformBillingPlan: "platform", updateBillingOverride: "platform", attachBillingEtimsReference: "platform",
+  confirmBillingPayment: "platform", rejectBillingPayment: "platform", assignPlatformBillingPlan: "platform", updateBillingOverride: "platform", setBillingOffer: "platform", clearBillingOffer: "platform", attachBillingEtimsReference: "platform",
   updateBillingContact: "platform", invitePlatformAdmin: "platform", resendPlatformAdminInvitation: "platform", setPlatformAdminEnabled: "platform",
 };
 

@@ -3,18 +3,23 @@ import { GetSuppressedDestinationCommand, SESv2Client, SendEmailCommand } from "
 const ses = new SESv2Client({ region: process.env.AWS_REGION ?? "us-east-1" });
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]!));
 
-export const sendBillingEmail = async (input: { to: string; subject: string; heading: string; message: string }) => {
+export const sendBillingEmail = async (
+  input: { to: string; subject: string; heading: string; message: string },
+  client: Pick<SESv2Client, "send"> = ses,
+) => {
   const to = input.to.trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) throw new Error("Billing recipient email is invalid");
   try {
-    await ses.send(new GetSuppressedDestinationCommand({ EmailAddress: to }));
+    await client.send(new GetSuppressedDestinationCommand({ EmailAddress: to }));
     return { status: "suppressed" as const };
   } catch (error) {
     if (!(error instanceof Error) || error.name !== "NotFoundException") throw error;
   }
   const from = process.env.BILLING_FROM_EMAIL || process.env.SES_FROM_EMAIL || "BiasharaKit Billing <billing@biasharakit.com>";
-  const response = await ses.send(new SendEmailCommand({
+  const replyTo = process.env.SES_REPLY_TO_EMAIL || "support@biasharakit.com";
+  const response = await client.send(new SendEmailCommand({
     FromEmailAddress: from,
+    ReplyToAddresses: [replyTo],
     Destination: { ToAddresses: [to] },
     Content: { Simple: {
       Subject: { Data: input.subject, Charset: "UTF-8" },

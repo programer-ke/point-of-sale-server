@@ -1,7 +1,7 @@
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
 import { dynamoDB, TABLE_NAME } from "../config/db";
-import { billingStatus, effectivePlan, kenyaDate, type BillingStatus, type PlanCode } from "../domain/billing";
+import { billingStatus, effectivePlan, kenyaDate, nextBillingPayment, type BillingStatus, type PlanCode } from "../domain/billing";
 import { getBusinessSettings } from "./pos-repository";
 import { getBillingAccount, getBillingPayment, listBillingPayments, type BillingPayment, type PaymentStatus } from "./billing-repository";
 import { getTenantRecord, listTenantMemberships } from "./tenant-repository";
@@ -12,10 +12,9 @@ export interface PlatformBusinessSummary {
   tenantId: string;
   tenantName: string;
   normalizedName: string;
-  billingConfigured: boolean;
-  planCode: PlanCode | null;
-  planName: string | null;
-  subscriptionStatus: BillingStatus | "unconfigured";
+  planCode: PlanCode;
+  planName: string;
+  subscriptionStatus: BillingStatus;
   monthlyPriceKes: number;
   activeUsers: number;
   activeStores: number;
@@ -34,7 +33,6 @@ export interface PlatformMetrics {
   expiringTrials: number;
   pastDueBusinesses: number;
   restrictedBusinesses: number;
-  unconfiguredBusinesses: number;
   projectedMrrKes: number;
   trialPipelineKes: number;
   collectedThisMonthKes: number;
@@ -69,29 +67,29 @@ export const refreshPlatformBusinessSummary = async (tenantId: string) => {
   const [tenant, account, memberships, stores, payments] = await Promise.all([
     getTenantRecord(tenantId), getBillingAccount(tenantId), listTenantMemberships(tenantId), listStores(tenantId), listBillingPayments(tenantId),
   ]);
-  if (!tenant && !account) throw new Error("Business was not found");
+  if (!account) throw new Error("Billing account is required before publishing a business to the platform directory");
   const users = await Promise.all(memberships.map(({ username }) => getCognitoUser(username)));
-  const tenantName = tenant?.name ?? account!.tenantName;
+  const tenantName = tenant?.name ?? account.tenantName;
   const pending = payments.filter((payment) => payment.status === "submitted");
-  const plan = account ? effectivePlan(account) : null;
+  const plan = effectivePlan(account);
+  const upcomingPayment = nextBillingPayment(account);
   const now = new Date().toISOString();
   const summary: PlatformBusinessSummary = {
     tenantId,
     tenantName,
     normalizedName: normalizeName(tenantName),
-    billingConfigured: Boolean(account),
-    planCode: account?.planCode ?? null,
-    planName: plan?.name ?? null,
-    subscriptionStatus: account ? billingStatus(account) : "unconfigured",
-    monthlyPriceKes: plan?.monthlyPriceKes ?? 0,
+    planCode: account.planCode,
+    planName: plan.name,
+    subscriptionStatus: billingStatus(account),
+    monthlyPriceKes: upcomingPayment.amountKes,
     activeUsers: users.filter((user) => user.status !== "DISABLED").length,
     activeStores: stores.filter((store) => store.status === "active").length,
     pendingPayments: pending.length,
     pendingPaymentAmountKes: pending.reduce((sum, payment) => sum + payment.amountKes, 0),
-    trialEndsOn: account?.trialEndsOn ?? null,
-    paidThrough: account?.paidThrough ?? null,
-    billingContactEmail: account?.billingContactEmail || account?.ownerUsername || "",
-    createdAt: tenant?.createdAt ?? account!.createdAt,
+    trialEndsOn: account.trialEndsOn,
+    paidThrough: account.paidThrough,
+    billingContactEmail: account.billingContactEmail || account.ownerUsername,
+    createdAt: tenant?.createdAt ?? account.createdAt,
     updatedAt: now,
   };
   await dynamoDB.send(new PutCommand({
@@ -101,14 +99,14 @@ export const refreshPlatformBusinessSummary = async (tenantId: string) => {
   return summary;
 };
 
-type PlatformBusinessPageInput = { first?: number; after?: string | null; search?: string | null; planCode?: PlanCode | null; status?: string | null; billingConfigured?: boolean | null };
+type PlatformBusinessPageInput = { first?: number; after?: string | null; search?: string | null; planCode?: PlanCode | null; status?: string | null };
 
 export const listPlatformBusinessPage = async (input: PlatformBusinessPageInput) => {
   const first = Math.min(Math.max(input.first ?? 25, 1), 100);
   const search = input.search?.trim() ?? "";
   if (/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(search)) {
     const item = await getPlatformBusinessSummary(search);
-    const matches = item && (input.planCode == null || item.planCode === input.planCode) && (input.status == null || item.subscriptionStatus === input.status) && (input.billingConfigured == null || item.billingConfigured === input.billingConfigured);
+    const matches = item && (input.planCode == null || item.planCode === input.planCode) && (input.status == null || item.subscriptionStatus === input.status);
     return { items: matches ? [item] : [], nextCursor: null };
   }
   const items: PlatformBusinessSummary[] = [];
@@ -127,7 +125,6 @@ export const listPlatformBusinessPage = async (input: PlatformBusinessPageInput)
       const item = clean<PlatformBusinessSummary>(raw)!;
       if (input.planCode != null && item.planCode !== input.planCode) continue;
       if (input.status != null && item.subscriptionStatus !== input.status) continue;
-      if (input.billingConfigured != null && item.billingConfigured !== input.billingConfigured) continue;
       items.push(item);
       if (items.length === first) break;
     }
@@ -200,7 +197,6 @@ export const refreshPlatformMetrics = async () => {
     expiringTrials: summaries.filter((item) => item.subscriptionStatus === "trialing" && item.trialEndsOn != null && item.trialEndsOn >= kenyaDate() && item.trialEndsOn <= trialExpiryCutoff).length,
     pastDueBusinesses: summaries.filter((item) => item.subscriptionStatus === "past_due").length,
     restrictedBusinesses: summaries.filter((item) => item.subscriptionStatus === "restricted" || item.subscriptionStatus === "cancelled").length,
-    unconfiguredBusinesses: summaries.filter((item) => !item.billingConfigured).length,
     projectedMrrKes: summaries.filter((item) => item.subscriptionStatus === "active").reduce((sum, item) => sum + item.monthlyPriceKes, 0),
     trialPipelineKes: summaries.filter((item) => item.subscriptionStatus === "trialing").reduce((sum, item) => sum + item.monthlyPriceKes, 0),
     collectedThisMonthKes: confirmed.filter((payment) => (payment.reviewedAt ?? "").startsWith(month)).reduce((sum, payment) => sum + payment.amountKes, 0),
@@ -224,7 +220,6 @@ const metricContribution = (summary: PlatformBusinessSummary | null) => ({
   expiringTrials: summary?.subscriptionStatus === "trialing" && summary.trialEndsOn != null && summary.trialEndsOn >= kenyaDate() && summary.trialEndsOn <= (() => { const date = new Date(`${kenyaDate()}T00:00:00Z`); date.setUTCDate(date.getUTCDate() + 7); return date.toISOString().slice(0, 10); })() ? 1 : 0,
   pastDueBusinesses: summary?.subscriptionStatus === "past_due" ? 1 : 0,
   restrictedBusinesses: summary && (summary.subscriptionStatus === "restricted" || summary.subscriptionStatus === "cancelled") ? 1 : 0,
-  unconfiguredBusinesses: summary && !summary.billingConfigured ? 1 : 0,
   projectedMrrKes: summary?.subscriptionStatus === "active" ? summary.monthlyPriceKes : 0,
   trialPipelineKes: summary?.subscriptionStatus === "trialing" ? summary.monthlyPriceKes : 0,
   pendingPayments: summary?.pendingPayments ?? 0,
@@ -239,7 +234,7 @@ export const syncPlatformBusinessMetrics = async (tenantId: string, confirmedCol
   for (const key of Object.keys(after) as Array<keyof typeof after>) values[`:${key}`] = after[key] - before[key];
   await dynamoDB.send(new UpdateCommand({
     TableName: TABLE_NAME, Key: metricsKey,
-    UpdateExpression: "SET calculatedAt = :calculatedAt ADD activeBusinesses :activeBusinesses, trialingBusinesses :trialingBusinesses, expiringTrials :expiringTrials, pastDueBusinesses :pastDueBusinesses, restrictedBusinesses :restrictedBusinesses, unconfiguredBusinesses :unconfiguredBusinesses, projectedMrrKes :projectedMrrKes, trialPipelineKes :trialPipelineKes, pendingPayments :pendingPayments, pendingPaymentAmountKes :pendingPaymentAmountKes, collectedAllTimeKes :collectedAll, collectedThisMonthKes :collectedMonth",
+    UpdateExpression: "SET calculatedAt = :calculatedAt ADD activeBusinesses :activeBusinesses, trialingBusinesses :trialingBusinesses, expiringTrials :expiringTrials, pastDueBusinesses :pastDueBusinesses, restrictedBusinesses :restrictedBusinesses, projectedMrrKes :projectedMrrKes, trialPipelineKes :trialPipelineKes, pendingPayments :pendingPayments, pendingPaymentAmountKes :pendingPaymentAmountKes, collectedAllTimeKes :collectedAll, collectedThisMonthKes :collectedMonth",
     ExpressionAttributeValues: values,
   }));
   return next;

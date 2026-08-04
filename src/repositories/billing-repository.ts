@@ -7,8 +7,10 @@ import {
   billingStatus,
   effectivePlan,
   kenyaDate,
+  nextBillingPayment,
   PLANS,
   type BillingAccount,
+  type BillingOffer,
   type BillingOverride,
   type PlanCode,
 } from "../domain/billing";
@@ -22,6 +24,11 @@ export interface BillingPayment {
   tenantName: string;
   planCode: PlanCode;
   amountKes: number;
+  baseAmountKes: number;
+  periodStartsOn: string;
+  periodEndsOn: string;
+  offerId: string | null;
+  offerPricePercent: number | null;
   mpesaReference: string;
   paidOn: string;
   status: PaymentStatus;
@@ -151,6 +158,7 @@ export const createBillingAccount = async (input: {
     pendingPlanCode: null,
     acceptedAt: now,
     override: null,
+    offer: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -209,6 +217,7 @@ export const assignPlatformBillingPlan = async (input: {
     acceptedBy: input.actorId,
     acceptedAt: now,
     override: null,
+    offer: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -261,15 +270,13 @@ const documentNumber = (kind: BillingDocumentKind, now: string, id: string) =>
   `TMK-${kind === "invoice" ? "INV" : "RCT"}-${now.slice(0, 7).replace("-", "")}-${id.slice(0, 8).toUpperCase()}`;
 
 export const submitBillingPayment = async (account: BillingAccount, input: {
-  planCode: PlanCode;
-  amountKes: number;
   mpesaReference: string;
   paidOn: string;
   submittedBy: string;
 }) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input.paidOn) || input.paidOn > kenyaDate()) throw new Error("Payment date must be a valid date that is not in the future");
-  const expected = effectivePlan({ ...account, planCode: input.planCode }).monthlyPriceKes;
-  if (!Number.isSafeInteger(input.amountKes) || input.amountKes !== expected) throw new Error(`Payment amount must be KES ${expected.toLocaleString("en-KE")}`);
+  if ((await listBillingPayments(account.tenantId)).some(({ status }) => status === "submitted")) throw new Error("A payment is already awaiting review");
+  const charge = nextBillingPayment(account);
   const mpesaReference = normalizeMpesaReference(input.mpesaReference);
   const now = new Date().toISOString();
   const id = randomUUID();
@@ -278,9 +285,14 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     id,
     tenantId: account.tenantId,
     tenantName: account.tenantName,
-    planCode: input.planCode,
-    amountKes: input.amountKes,
-    ...taxBreakdown(input.amountKes),
+    planCode: charge.planCode,
+    amountKes: charge.amountKes,
+    baseAmountKes: charge.baseAmountKes,
+    periodStartsOn: charge.periodStartsOn,
+    periodEndsOn: charge.periodEndsOn,
+    offerId: charge.offerId,
+    offerPricePercent: charge.offerPricePercent,
+    ...taxBreakdown(charge.amountKes),
     mpesaReference,
     paidOn: input.paidOn,
     status: "submitted",
@@ -295,10 +307,10 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     number: documentNumber("invoice", now, invoiceId),
     tenantId: account.tenantId,
     kind: "invoice",
-    planCode: input.planCode,
-    planName: PLANS[input.planCode].name,
-    amountKes: input.amountKes,
-    ...taxBreakdown(input.amountKes),
+    planCode: charge.planCode,
+    planName: PLANS[charge.planCode].name,
+    amountKes: charge.amountKes,
+    ...taxBreakdown(charge.amountKes),
     issuedOn: kenyaDate(),
     paymentId: id,
     externalEtimsReference: null,
@@ -324,8 +336,7 @@ export const confirmBillingPayment = async (tenantId: string, paymentId: string,
   if (payment.status === "confirmed") return payment;
   if (payment.status !== "submitted") throw new Error("Only submitted payments can be confirmed");
   const today = kenyaDate();
-  const periodStartsOn = account.paidThrough && account.paidThrough >= today ? addBillingDays(account.paidThrough, 1) : today;
-  const paidThrough = addBillingDays(addBillingMonth(periodStartsOn), -1);
+  const paidThrough = payment.periodEndsOn ?? addBillingDays(addBillingMonth(account.paidThrough && account.paidThrough >= today ? addBillingDays(account.paidThrough, 1) : today), -1);
   const now = new Date().toISOString();
   const receiptId = randomUUID();
   const confirmed: BillingPayment = { ...payment, status: "confirmed", reviewedBy: reviewerId, reviewedAt: now };
@@ -344,9 +355,21 @@ export const confirmBillingPayment = async (tenantId: string, paymentId: string,
     notice: "Payment receipt only. This is not a KRA tax invoice and does not replace an eTIMS invoice.",
     createdAt: now,
   };
+  const accountUpdate = payment.offerId ? {
+    Update: {
+      TableName: TABLE_NAME,
+      Key: accountKey(tenantId),
+      UpdateExpression: "SET planCode = :plan, paidThrough = :paidThrough, pendingPlanCode = :none, cancelledAt = :none, updatedAt = :now, #offer.#remaining = #offer.#remaining - :one",
+      ConditionExpression: "#offer.#id = :offerId AND #offer.#remaining > :zero",
+      ExpressionAttributeNames: { "#offer": "offer", "#remaining": "remainingPayments", "#id": "id" },
+      ExpressionAttributeValues: { ":plan": payment.planCode, ":paidThrough": paidThrough, ":none": null, ":now": now, ":one": 1, ":zero": 0, ":offerId": payment.offerId },
+    },
+  } : {
+    Update: { TableName: TABLE_NAME, Key: accountKey(tenantId), UpdateExpression: "SET planCode = :plan, paidThrough = :paidThrough, pendingPlanCode = :none, cancelledAt = :none, updatedAt = :now", ExpressionAttributeValues: { ":plan": payment.planCode, ":paidThrough": paidThrough, ":none": null, ":now": now } },
+  };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
     { Put: { TableName: TABLE_NAME, Item: { ...paymentKey(tenantId, paymentId), accessPartition: "PLATFORM#BILLING_PAYMENT#confirmed", accessSort: `${payment.submittedAt}#${paymentId}`, entityType: "billing_payment", ...confirmed }, ConditionExpression: "#status = :submitted", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":submitted": "submitted" } } },
-    { Update: { TableName: TABLE_NAME, Key: accountKey(tenantId), UpdateExpression: "SET planCode = :plan, paidThrough = :paidThrough, pendingPlanCode = :none, cancelledAt = :none, updatedAt = :now", ExpressionAttributeValues: { ":plan": payment.planCode, ":paidThrough": paidThrough, ":none": null, ":now": now } } },
+    accountUpdate,
     { Put: { TableName: TABLE_NAME, Item: { ...documentKey(tenantId, receiptId), entityType: "billing_document", ...receipt }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
   ] }));
   return confirmed;
@@ -425,6 +448,32 @@ export const setBillingOverride = async (tenantId: string, override: BillingOver
   return next;
 };
 
+export const setBillingOffer = async (tenantId: string, input: { label: string; pricePercent: number; durationMonths: number; startsOn: string; reason: string } | null, actorId: string) => {
+  const account = await requireBillingAccount(tenantId);
+  const now = new Date().toISOString();
+  let offer: BillingOffer | null = null;
+  if (input) {
+    const label = input.label.trim().replace(/\s+/g, " ");
+    const reason = input.reason.trim();
+    if (label.length < 2 || label.length > 80) throw new Error("Offer label must be between 2 and 80 characters");
+    if (!Number.isInteger(input.pricePercent) || input.pricePercent < 1 || input.pricePercent > 100) throw new Error("Offer price percentage must be between 1 and 100");
+    if (!Number.isInteger(input.durationMonths) || input.durationMonths < 1 || input.durationMonths > 24) throw new Error("Offer duration must be between 1 and 24 monthly payments");
+    addBillingDays(input.startsOn, 0);
+    if (reason.length < 3) throw new Error("Provide a reason for the offer");
+    offer = { id: randomUUID(), label, pricePercent: input.pricePercent, durationMonths: input.durationMonths, remainingPayments: input.durationMonths, startsOn: input.startsOn, reason, assignedAt: now, assignedBy: actorId };
+  }
+  const audit: BillingAudit = {
+    id: randomUUID(), tenantId, action: offer ? "billing_offer_assigned" : "billing_offer_cleared", actorId,
+    reason: offer?.reason ?? "Billing offer cleared", before: JSON.stringify(account.offer ?? null), after: JSON.stringify(offer), createdAt: now,
+  };
+  const next = { ...account, offer, updatedAt: now };
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
+    { Put: { TableName: TABLE_NAME, Item: { ...accountKey(tenantId), accessPartition: "PLATFORM#BILLING", accessSort: tenantId, entityType: "billing_account", ...next }, ConditionExpression: "attribute_exists(partitionKey)" } },
+    { Put: { TableName: TABLE_NAME, Item: { partitionKey: `TENANT#${tenantId}`, sortKey: `BILLING#AUDIT#${now}#${audit.id}`, entityType: "billing_audit", ...audit }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+  ] }));
+  return next;
+};
+
 export const updateBillingContact = async (tenantId: string, input: { name: string; email: string; phone: string }, actorId: string) => {
   const account = await requireBillingAccount(tenantId);
   const name = input.name.trim().replace(/\s+/g, " ");
@@ -462,10 +511,12 @@ export const attachEtimsReference = async (tenantId: string, documentId: string,
 
 export const billingAccountView = (account: BillingAccount) => ({
   ...account,
+  offer: account.offer ?? null,
   billingContactName: account.billingContactName || account.tenantName,
   billingContactEmail: account.billingContactEmail || account.ownerUsername,
   billingContactPhone: account.billingContactPhone || "",
   status: billingStatus(account),
   plan: effectivePlan(account),
+  customTerms: Boolean(account.override && (!account.override.expiresOn || account.override.expiresOn >= kenyaDate())),
   graceEndsOn: addBillingDays(account.paidThrough ?? account.trialEndsOn, 1),
 });

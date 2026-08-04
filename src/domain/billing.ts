@@ -28,6 +28,18 @@ export interface BillingOverride {
   updatedBy: string;
 }
 
+export interface BillingOffer {
+  id: string;
+  label: string;
+  pricePercent: number;
+  durationMonths: number;
+  remainingPayments: number;
+  startsOn: string;
+  reason: string;
+  assignedAt: string;
+  assignedBy: string;
+}
+
 export interface BillingAccount {
   tenantId: string;
   tenantName: string;
@@ -47,6 +59,7 @@ export interface BillingAccount {
   acceptedAt: string;
   acceptedBy: string;
   override: BillingOverride | null;
+  offer: BillingOffer | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -138,6 +151,44 @@ export const billingStatus = (account: BillingAccount, today = kenyaDate()): Bil
   if (today <= accessEndsOn) return account.paidThrough ? "active" : "trialing";
   if (today <= addBillingDays(accessEndsOn, 1)) return "past_due";
   return account.cancelledAt ? "cancelled" : "restricted";
+};
+
+export interface NextBillingPayment {
+  planCode: PlanCode;
+  planName: string;
+  dueOn: string;
+  periodStartsOn: string;
+  periodEndsOn: string;
+  baseAmountKes: number;
+  amountKes: number;
+  offerId: string | null;
+  offerLabel: string | null;
+  offerPricePercent: number | null;
+  offerRemainingPayments: number;
+}
+
+export const nextBillingPayment = (account: BillingAccount, today = kenyaDate()): NextBillingPayment => {
+  const accessEndsOn = account.paidThrough ?? account.trialEndsOn;
+  const dueOn = addBillingDays(accessEndsOn, 1);
+  const periodStartsOn = dueOn >= today ? dueOn : today;
+  const periodEndsOn = addBillingDays(addBillingMonth(periodStartsOn), -1);
+  const planCode = account.pendingPlanCode ?? account.planCode;
+  const plan = effectivePlan({ ...account, planCode }, periodStartsOn);
+  const offer = account.offer && account.offer.remainingPayments > 0 && periodStartsOn >= account.offer.startsOn ? account.offer : null;
+  const amountKes = offer ? Math.round(plan.monthlyPriceKes * offer.pricePercent / 100) : plan.monthlyPriceKes;
+  return {
+    planCode,
+    planName: plan.name,
+    dueOn,
+    periodStartsOn,
+    periodEndsOn,
+    baseAmountKes: plan.monthlyPriceKes,
+    amountKes,
+    offerId: offer?.id ?? null,
+    offerLabel: offer?.label ?? null,
+    offerPricePercent: offer?.pricePercent ?? null,
+    offerRemainingPayments: offer?.remainingPayments ?? 0,
+  };
 };
 
 export const validatePlanCode = (value: string): PlanCode => {

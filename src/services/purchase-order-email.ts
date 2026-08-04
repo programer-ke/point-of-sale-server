@@ -110,6 +110,7 @@ export const sendPurchaseOrderEmail = async (
   try {
     const response = await client.send(new SendEmailCommand({
       FromEmailAddress: process.env.SES_FROM_EMAIL || "BiasharaKit Orders <orders@biasharakit.com>",
+      ReplyToAddresses: [process.env.SES_REPLY_TO_EMAIL || "support@biasharakit.com"],
       Destination: { ToAddresses: [recipient] },
       Content: { Simple: {
         Subject: { Data: content.subject, Charset: "UTF-8" },

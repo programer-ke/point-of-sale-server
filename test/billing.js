@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { buildSchema } = require("graphql");
-const { addBillingMonth, billingStatus, effectivePlan, PLANS } = require("../dist/domain/billing");
+const { addBillingMonth, billingStatus, effectivePlan, nextBillingPayment, PLANS } = require("../dist/domain/billing");
 const { MUTATION_POLICY, applyBillingPolicies } = require("../dist/domain/billing-policy");
 const { typeDefs } = require("../dist/graphql/schema");
 
@@ -8,7 +8,7 @@ const account = (updates = {}) => ({
   tenantId: "tenant-1", tenantName: "Market", ownerUserId: "owner", ownerUsername: "owner@example.com",
   planCode: "biashara", trialStartedOn: "2026-08-01", trialEndsOn: "2026-08-14", paidThrough: null,
   cancelledAt: null, pendingPlanCode: null, termsVersion: "v1", privacyVersion: "v1", acceptedAt: "2026-08-01T00:00:00Z",
-  acceptedBy: "owner", override: null, createdAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:00:00Z", ...updates,
+  acceptedBy: "owner", override: null, offer: null, createdAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:00:00Z", ...updates,
 });
 
 assert.equal(PLANS.biashara.activeUserLimit, 5);
@@ -29,6 +29,18 @@ assert.equal(billingStatus(account({ paidThrough: "2026-09-30" }), "2026-09-30")
 assert.equal(billingStatus(account({ cancelledAt: "2026-08-01T00:00:00Z" }), "2026-08-16"), "cancelled");
 assert.equal(billingStatus(account({ override: { exempt: true, reason: "Partner", updatedAt: "2026-08-01", updatedBy: "admin" } }), "2027-01-01"), "exempt");
 assert.deepEqual(effectivePlan(account({ override: { activeUserLimit: 8, monthlyPriceKes: 1200, reason: "Custom", updatedAt: "2026-08-01", updatedBy: "admin" } })).activeUserLimit, 8);
+const trialCharge = nextBillingPayment(account({ planCode: "biashara_growth" }), "2026-08-04");
+assert.equal(trialCharge.dueOn, "2026-08-15");
+assert.equal(trialCharge.periodStartsOn, "2026-08-15");
+assert.equal(trialCharge.periodEndsOn, "2026-09-14");
+assert.equal(trialCharge.amountKes, 2500);
+const launchOffer = { id: "offer-1", label: "Launch offer", pricePercent: 70, durationMonths: 6, remainingPayments: 6, startsOn: "2026-08-15", reason: "Launch", assignedAt: "2026-08-04", assignedBy: "admin" };
+const offeredCharge = nextBillingPayment(account({ planCode: "biashara_growth", pendingPlanCode: "biashara_plus", offer: launchOffer }), "2026-08-04");
+assert.equal(offeredCharge.planCode, "biashara_plus", "the scheduled plan determines the upcoming payment");
+assert.equal(offeredCharge.baseAmountKes, 5000);
+assert.equal(offeredCharge.amountKes, 3500, "a 70% price offer charges 70% of the normal rate");
+assert.equal(offeredCharge.offerRemainingPayments, 6);
+assert.equal(nextBillingPayment(account({ offer: { ...launchOffer, remainingPayments: 0 } }), "2026-08-04").amountKes, 1000, "a consumed offer no longer changes the charge");
 
 const mutationFields = Object.keys(buildSchema(typeDefs).getMutationType().getFields()).sort();
 assert.deepEqual(Object.keys(MUTATION_POLICY).sort(), mutationFields, "Every GraphQL mutation must have an explicit billing policy");

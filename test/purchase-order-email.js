@@ -40,12 +40,14 @@ async function main() {
   assert.match(rendered.text, /Ksh/);
 
   const sentCommands = [];
+  let sendEmailInput;
   const sent = await sendPurchaseOrderEmail(order, supplier, business, {
     send: async (command) => {
       sentCommands.push(command.constructor.name);
       if (command.constructor.name === "GetSuppressedDestinationCommand") {
         const error = new Error("not found"); error.name = "NotFoundException"; throw error;
       }
+      sendEmailInput = command.input;
       return { MessageId: "message-1" };
     },
   });
@@ -53,6 +55,7 @@ async function main() {
   assert.equal(sent.emailRecipient, "buyer@example.com");
   assert.equal(sent.emailMessageId, "message-1");
   assert.deepEqual(sentCommands, ["GetSuppressedDestinationCommand", "SendEmailCommand"]);
+  assert.deepEqual(sendEmailInput.ReplyToAddresses, ["support@biasharakit.com"]);
 
   const suppressed = await sendPurchaseOrderEmail(order, supplier, business, {
     send: async () => ({ SuppressedDestination: { Reason: "BOUNCE" } }),

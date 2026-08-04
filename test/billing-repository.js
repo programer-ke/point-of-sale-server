@@ -35,6 +35,25 @@ async function main() {
   assert.equal(transaction[1].Put.Item.action, "billing_plan_assigned");
   assert.equal(transaction[1].Put.Item.reason, "Move to standard Plus plan");
   assert.match(transaction[1].Put.Item.before, /old exception/);
+
+  commands.length = 0;
+  const offered = await repository.setBillingOffer("tenant-1", { label: "Launch offer", pricePercent: 70, durationMonths: 6, startsOn: "2026-10-01", reason: "Approved launch promotion" }, "superadmin");
+  assert.equal(offered.offer.pricePercent, 70);
+  assert.equal(offered.offer.remainingPayments, 6);
+  const offerTransaction = commands.find((command) => command.constructor.name === "TransactWriteCommand").input.TransactItems;
+  assert.equal(offerTransaction[1].Put.Item.action, "billing_offer_assigned");
+
+  commands.length = 0;
+  dynamoDB.send = async (command) => {
+    commands.push(command);
+    if (command.constructor.name === "QueryCommand") return { Items: [] };
+    if (command.constructor.name === "TransactWriteCommand") return {};
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  const payment = await repository.submitBillingPayment({ ...existing, paidThrough: "2099-09-30", override: null, offer: null }, { mpesaReference: "SAMPLE1234", paidOn: "2026-08-04", submittedBy: "owner" });
+  assert.equal(payment.planCode, "biashara_plus", "the pending plan is charged without accepting a client-selected plan");
+  assert.equal(payment.amountKes, 5000, "the server calculates the exact upcoming amount");
+  assert.equal(payment.periodStartsOn, "2099-10-01", "early payment starts after the paid-through date");
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

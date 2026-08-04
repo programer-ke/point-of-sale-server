@@ -127,7 +127,7 @@ import { accountingSummary } from "../repositories/accounting-repository";
 import { sendPurchaseOrderEmail } from "../services/purchase-order-email";
 import { sendBillingEmail } from "../services/billing-email";
 import { applyBillingPolicies, validatePlanChange } from "../domain/billing-policy";
-import { PRIVACY_VERSION, TERMS_VERSION, validatePlanCode, type BillingOverride } from "../domain/billing";
+import { nextBillingPayment, PRIVACY_VERSION, TERMS_VERSION, validatePlanCode, type BillingOverride } from "../domain/billing";
 import {
   attachEtimsReference,
   assignPlatformBillingPlan,
@@ -145,6 +145,7 @@ import {
   rejectBillingPayment,
   requireBillingAccount,
   scheduleBillingPlan,
+  setBillingOffer,
   setBillingOverride,
   submitBillingPayment,
   updateBillingContact,
@@ -344,7 +345,7 @@ const billingOverview = async (tenantId: string) => {
   const [account, usage, payments, documents, audits] = await Promise.all([
     requireBillingAccount(tenantId), billingUsage(tenantId), listBillingPayments(tenantId), listBillingDocuments(tenantId), listBillingAudits(tenantId),
   ]);
-  return { account: billingAccountView(account), usage, payments, documents, audits, configuration: billingConfiguration() };
+  return { account: billingAccountView(account), nextPayment: { ...nextBillingPayment(account), paymentPending: payments.some(({ status }) => status === "submitted") }, usage, payments, documents, audits, configuration: billingConfiguration() };
 };
 
 const sendPaymentReviewEmail = async (tenantId: string, approved: boolean, reason = "") => {
@@ -544,7 +545,7 @@ const baseResolvers = {
     accountingSummary: (_: unknown, args: { from: string; to: string; storeId?: string; supplierId?: string }, context: GraphQLContext) => { requireAdmin(context); const range = validateDateRange(args.from, args.to) as { from: string; to: string }; return accountingSummary(tenant(context), { ...range, storeId: args.storeId, supplierId: args.supplierId }); },
     billingOverview: (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); return billingOverview(tenant(context)); },
     platformBillingConfiguration: (_: unknown, _args: unknown, context: GraphQLContext) => { requirePlatformAdmin(context); return billingConfiguration(); },
-    platformBusinesses: (_: unknown, args: { first?: number; after?: string; search?: string; planCode?: string; status?: string; billingConfigured?: boolean }, context: GraphQLContext) => {
+    platformBusinesses: (_: unknown, args: { first?: number; after?: string; search?: string; planCode?: string; status?: string }, context: GraphQLContext) => {
       requirePlatformAdmin(context);
       return listPlatformBusinessPage({ ...args, planCode: args.planCode ? validatePlanCode(args.planCode) : null });
     },
@@ -557,8 +558,8 @@ const baseResolvers = {
     },
     platformBusiness: async (_: unknown, { tenantId }: { tenantId: string }, context: GraphQLContext) => {
       requirePlatformAdmin(context);
-      const [metadata, account] = await Promise.all([platformBusinessMetadata(tenantId), getBillingAccount(tenantId)]);
-      return { metadata, billing: account ? await billingOverview(tenantId) : null };
+      const [metadata, billing] = await Promise.all([platformBusinessMetadata(tenantId), billingOverview(tenantId)]);
+      return { metadata, billing };
     },
     platformAdmins: (_: unknown, _args: unknown, context: GraphQLContext) => { requirePlatformAdmin(context); return listPlatformAdmins(); },
     platformBillingAccount: (_: unknown, { tenantId }: { tenantId: string }, context: GraphQLContext) => { requirePlatformAdmin(context); return billingOverview(tenantId); },
@@ -883,9 +884,9 @@ const baseResolvers = {
     createSupplierInvoice: (_: unknown, { receiptId, invoiceNumber, invoiceDate, paymentTermsDays, requestId }: { receiptId: string; invoiceNumber: string; invoiceDate?: string | null; paymentTermsDays?: number | null; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createSupplierInvoiceForReceipt(tenant(context), receiptId, { invoiceNumber, invoiceDate, paymentTermsDays }, actor(context), requestId); },
     recordSupplierPayment: (_: unknown, { invoiceId, amount, method, reference, paidAt, requestId }: { invoiceId: string; amount: number; method: "cash" | "bank_transfer" | "mobile_money" | "cheque" | "other"; reference?: string; paidAt: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return recordSupplierPayment(tenant(context), invoiceId, { amount, method, reference, paidAt }, actor(context), requestId); },
     voidSupplierPayment: (_: unknown, { invoiceId, paymentId, reason, requestId }: { invoiceId: string; paymentId: string; reason: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return voidSupplierPayment(tenant(context), invoiceId, paymentId, reason, actor(context), requestId); },
-    submitBillingPayment: async (_: unknown, input: { planCode: string; amountKes: number; mpesaReference: string; paidOn: string }, context: GraphQLContext) => {
+    submitBillingPayment: async (_: unknown, input: { mpesaReference: string; paidOn: string }, context: GraphQLContext) => {
       const admin = requireAdmin(context); const account = await requireBillingAccount(tenant(context));
-      const payment = await submitBillingPayment(account, { ...input, planCode: validatePlanCode(input.planCode), submittedBy: admin.id });
+      const payment = await submitBillingPayment(account, { ...input, submittedBy: admin.id });
       const supportEmail = process.env.BILLING_SUPPORT_EMAIL;
       if (supportEmail) await sendBillingEmail({ to: supportEmail, subject: `Payment review: ${account.tenantName}`, heading: "New M-Pesa payment submission", message: `${account.tenantName} submitted ${payment.mpesaReference} for KES ${payment.amountKes.toLocaleString("en-KE")}. Review it in Platform Billing.` }).catch((error) => console.error(JSON.stringify({ event: "billing_review_email_failed", tenantId: account.tenantId, errorName: error instanceof Error ? error.name : "UnknownError" })));
       await syncPlatformBusinessMetrics(account.tenantId);
@@ -927,6 +928,18 @@ const baseResolvers = {
       if (override.reason.length < 3) throw new Error("Provide an override reason");
       const result = billingAccountView(await setBillingOverride(input.tenantId, override, admin.id));
       await syncPlatformBusinessMetrics(input.tenantId);
+      return result;
+    },
+    setBillingOffer: async (_: unknown, input: { tenantId: string; label: string; pricePercent: number; durationMonths: number; startsOn: string; reason: string }, context: GraphQLContext) => {
+      const admin = requirePlatformAdmin(context);
+      const result = billingAccountView(await setBillingOffer(input.tenantId, input, admin.id));
+      await syncPlatformBusinessMetrics(input.tenantId);
+      return result;
+    },
+    clearBillingOffer: async (_: unknown, { tenantId }: { tenantId: string }, context: GraphQLContext) => {
+      const admin = requirePlatformAdmin(context);
+      const result = billingAccountView(await setBillingOffer(tenantId, null, admin.id));
+      await syncPlatformBusinessMetrics(tenantId);
       return result;
     },
     attachBillingEtimsReference: (_: unknown, { tenantId, documentId, reference }: { tenantId: string; documentId: string; reference: string }, context: GraphQLContext) => { requirePlatformAdmin(context); return attachEtimsReference(tenantId, documentId, reference); },

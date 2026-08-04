@@ -8,7 +8,7 @@ cognito.getCognitoUser = async () => { cognitoCalls += 1; throw new Error("direc
 
 const summary = (tenantId, tenantName, updates = {}) => ({
   partitionKey: `PLATFORM#BUSINESS#${tenantId}`, sortKey: "SUMMARY", accessPartition: "PLATFORM#BUSINESS", accessSort: `${tenantName.toLowerCase()}#${tenantId}`,
-  entityType: "platform_business_summary", tenantId, tenantName, normalizedName: tenantName.toLowerCase(), billingConfigured: true,
+  entityType: "platform_business_summary", tenantId, tenantName, normalizedName: tenantName.toLowerCase(),
   planCode: "biashara", planName: "Biashara", subscriptionStatus: "active", monthlyPriceKes: 1000, activeUsers: 2, activeStores: 1,
   pendingPayments: 0, pendingPaymentAmountKes: 0, trialEndsOn: "2026-08-14", paidThrough: "2026-09-30", billingContactEmail: "owner@example.com",
   createdAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-04T00:00:00Z", ...updates,
