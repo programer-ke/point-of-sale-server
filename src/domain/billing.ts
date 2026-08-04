@@ -36,6 +36,8 @@ export interface BillingOffer {
   pricePercent: number;
   durationMonths: number;
   remainingPayments: number;
+  billingInterval?: BillingInterval;
+  planCode?: PlanCode;
   startsOn: string;
   reason: string;
   assignedAt: string;
@@ -148,6 +150,9 @@ export const validateBillingInterval = (value: string): BillingInterval => {
   return value;
 };
 
+export const billingGraceDays = (account: BillingAccount) =>
+  (account.pendingBillingInterval ?? account.billingInterval ?? "monthly") === "annual" ? 7 : 1;
+
 export const overrideIsActive = (override: BillingOverride | null, today = kenyaDate()) =>
   Boolean(override && (!override.expiresOn || override.expiresOn >= today));
 
@@ -171,7 +176,7 @@ export const billingStatus = (account: BillingAccount, today = kenyaDate()): Bil
   if (overrideIsActive(account.override, today) && account.override?.exempt) return "exempt";
   const accessEndsOn = account.paidThrough ?? account.trialEndsOn;
   if (today <= accessEndsOn) return account.paidThrough ? "active" : "trialing";
-  if (today <= addBillingDays(accessEndsOn, 1)) return "past_due";
+  if (today <= addBillingDays(accessEndsOn, billingGraceDays(account))) return "past_due";
   return account.cancelledAt ? "cancelled" : "restricted";
 };
 
@@ -186,6 +191,8 @@ export interface NextBillingPayment {
   billingInterval: BillingInterval;
   billingMonths: number;
   savingsKes: number;
+  annualDiscountKes: number;
+  promotionCreditKes: number;
   offerId: string | null;
   offerLabel: string | null;
   offerPricePercent: number | null;
@@ -195,17 +202,20 @@ export interface NextBillingPayment {
 export const nextBillingPayment = (account: BillingAccount, today = kenyaDate()): NextBillingPayment => {
   const accessEndsOn = account.paidThrough ?? account.trialEndsOn;
   const dueOn = addBillingDays(accessEndsOn, 1);
-  const periodStartsOn = dueOn >= today ? dueOn : today;
+  const withinGrace = today <= addBillingDays(accessEndsOn, billingGraceDays(account));
+  const periodStartsOn = dueOn >= today || withinGrace ? dueOn : today;
   const planCode = account.pendingPlanCode ?? account.planCode;
   const plan = effectivePlan({ ...account, planCode }, periodStartsOn);
   const billingInterval = account.pendingBillingInterval ?? account.billingInterval ?? "monthly";
   const billingMonths = billingInterval === "annual" ? 12 : 1;
   const periodEndsOn = addBillingDays(addBillingMonths(periodStartsOn, billingMonths), -1);
-  const offer = billingInterval === "monthly" && account.offer && account.offer.remainingPayments > 0 && periodStartsOn >= account.offer.startsOn ? account.offer : null;
+  const offerInterval = account.offer?.billingInterval ?? "monthly";
+  const offer = account.offer && account.offer.remainingPayments > 0 && offerInterval === billingInterval && (!account.offer.planCode || account.offer.planCode === planCode) && periodStartsOn >= account.offer.startsOn ? account.offer : null;
   const baseAmountKes = plan.monthlyPriceKes * billingMonths;
-  const amountKes = offer
-    ? Math.round(plan.monthlyPriceKes * offer.pricePercent / 100)
-    : billingInterval === "annual" ? annualPriceKes(plan.monthlyPriceKes) : plan.monthlyPriceKes;
+  const intervalAmountKes = billingInterval === "annual" ? annualPriceKes(plan.monthlyPriceKes) : plan.monthlyPriceKes;
+  const annualDiscountKes = baseAmountKes - intervalAmountKes;
+  const amountKes = offer ? Math.round(intervalAmountKes * offer.pricePercent / 100) : intervalAmountKes;
+  const promotionCreditKes = intervalAmountKes - amountKes;
   return {
     planCode,
     planName: plan.name,
@@ -217,6 +227,8 @@ export const nextBillingPayment = (account: BillingAccount, today = kenyaDate())
     billingInterval,
     billingMonths,
     savingsKes: baseAmountKes - amountKes,
+    annualDiscountKes,
+    promotionCreditKes,
     offerId: offer?.id ?? null,
     offerLabel: offer?.label ?? null,
     offerPricePercent: offer?.pricePercent ?? null,

@@ -4,6 +4,7 @@ import { dynamoDB, TABLE_NAME } from "../config/db";
 import {
   addBillingDays,
   addBillingMonth,
+  billingGraceDays,
   billingStatus,
   effectivePlan,
   kenyaDate,
@@ -28,10 +29,13 @@ export interface BillingPayment {
   billingMonths: number;
   amountKes: number;
   baseAmountKes: number;
+  annualDiscountKes: number;
+  promotionCreditKes: number;
   periodStartsOn: string;
   periodEndsOn: string;
   offerId: string | null;
   offerPricePercent: number | null;
+  offerLabel: string | null;
   mpesaReference: string;
   paidOn: string;
   status: PaymentStatus;
@@ -52,6 +56,10 @@ export interface BillingDocument {
   billingInterval: BillingInterval;
   billingMonths: number;
   amountKes: number;
+  baseAmountKes: number;
+  annualDiscountKes: number;
+  promotionCreditKes: number;
+  promotionLabel: string | null;
   subtotalKes: number;
   vatAmountKes: number;
   issuedOn: string;
@@ -192,6 +200,9 @@ export const assignPlatformBillingPlan = async (input: {
   const reason = input.reason.trim();
   if (reason.length < 3) throw new Error("Provide a reason for the plan assignment");
   const current = await getBillingAccount(input.tenantId);
+  if (current?.offer?.remainingPayments && input.planCode !== (current.offer.planCode ?? current.pendingPlanCode ?? current.planCode)) {
+    throw new Error("Clear the active promotion before assigning a different plan");
+  }
   const now = new Date().toISOString();
   const trialStartedOn = kenyaDate();
   const next: BillingAccount = current ? {
@@ -302,10 +313,13 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     billingMonths: charge.billingMonths,
     amountKes: charge.amountKes,
     baseAmountKes: charge.baseAmountKes,
+    annualDiscountKes: charge.annualDiscountKes,
+    promotionCreditKes: charge.promotionCreditKes,
     periodStartsOn: charge.periodStartsOn,
     periodEndsOn: charge.periodEndsOn,
     offerId: charge.offerId,
     offerPricePercent: charge.offerPricePercent,
+    offerLabel: charge.offerLabel,
     ...taxBreakdown(charge.amountKes),
     mpesaReference,
     paidOn: input.paidOn,
@@ -326,6 +340,10 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     billingInterval: charge.billingInterval,
     billingMonths: charge.billingMonths,
     amountKes: charge.amountKes,
+    baseAmountKes: charge.baseAmountKes,
+    annualDiscountKes: charge.annualDiscountKes,
+    promotionCreditKes: charge.promotionCreditKes,
+    promotionLabel: charge.offerLabel,
     ...taxBreakdown(charge.amountKes),
     issuedOn: kenyaDate(),
     paymentId: id,
@@ -366,6 +384,10 @@ export const confirmBillingPayment = async (tenantId: string, paymentId: string,
     billingInterval: payment.billingInterval ?? "monthly",
     billingMonths: payment.billingMonths ?? 1,
     amountKes: payment.amountKes,
+    baseAmountKes: payment.baseAmountKes ?? payment.amountKes,
+    annualDiscountKes: payment.annualDiscountKes ?? 0,
+    promotionCreditKes: payment.promotionCreditKes ?? 0,
+    promotionLabel: payment.offerLabel ?? null,
     ...taxBreakdown(payment.amountKes),
     issuedOn: today,
     paymentId,
@@ -423,6 +445,9 @@ export const cancelBillingSubscription = async (tenantId: string) => {
 export const scheduleBillingPlan = async (tenantId: string, planCode: PlanCode) => {
   const account = await requireBillingAccount(tenantId);
   if (account.planCode === planCode) return account;
+  if (account.offer?.remainingPayments && planCode !== (account.offer.planCode ?? account.pendingPlanCode ?? account.planCode)) {
+    throw new Error("The plan can be changed after the current promotion ends");
+  }
   const now = new Date().toISOString();
   const response = await dynamoDB.send(new UpdateCommand({
     TableName: TABLE_NAME,
@@ -439,8 +464,8 @@ export const scheduleBillingInterval = async (tenantId: string, billingInterval:
   if ((await listBillingPayments(tenantId)).some(({ status }) => status === "submitted")) {
     throw new Error("Wait for the submitted payment to be reviewed before changing billing frequency");
   }
-  if (billingInterval === "annual" && account.offer?.remainingPayments) {
-    throw new Error("Annual billing is available after the current monthly promotion ends");
+  if (account.offer?.remainingPayments && billingInterval !== (account.offer.billingInterval ?? "monthly")) {
+    throw new Error("Billing frequency can be changed after the current promotion ends");
   }
   const currentInterval = account.billingInterval ?? "monthly";
   const pendingBillingInterval = billingInterval === currentInterval ? null : billingInterval;
@@ -487,22 +512,20 @@ export const setBillingOverride = async (tenantId: string, override: BillingOver
   return next;
 };
 
-export const setBillingOffer = async (tenantId: string, input: { label: string; pricePercent: number; durationMonths: number; startsOn: string; reason: string; promotionId?: string | null } | null, actorId: string) => {
+export const setBillingOffer = async (tenantId: string, input: { label: string; pricePercent: number; durationMonths: number; startsOn: string; reason: string; promotionId?: string | null; billingInterval?: BillingInterval; planCode?: PlanCode } | null, actorId: string) => {
   const account = await requireBillingAccount(tenantId);
   const now = new Date().toISOString();
   let offer: BillingOffer | null = null;
   if (input) {
-    if ((account.pendingBillingInterval ?? account.billingInterval ?? "monthly") === "annual") {
-      throw new Error("Switch this subscription to monthly billing before assigning a promotional offer");
-    }
+    if (account.offer?.remainingPayments) throw new Error("This workspace already has an active promotional offer");
     const label = input.label.trim().replace(/\s+/g, " ");
     const reason = input.reason.trim();
     if (label.length < 2 || label.length > 80) throw new Error("Offer label must be between 2 and 80 characters");
     if (!Number.isInteger(input.pricePercent) || input.pricePercent < 1 || input.pricePercent > 100) throw new Error("Offer price percentage must be between 1 and 100");
-    if (!Number.isInteger(input.durationMonths) || input.durationMonths < 1 || input.durationMonths > 24) throw new Error("Offer duration must be between 1 and 24 monthly payments");
+    if (!Number.isInteger(input.durationMonths) || input.durationMonths < 1 || input.durationMonths > 24) throw new Error("Offer duration must be between 1 and 24 payments");
     addBillingDays(input.startsOn, 0);
     if (reason.length < 3) throw new Error("Provide a reason for the offer");
-    offer = { id: randomUUID(), promotionId: input.promotionId ?? null, label, pricePercent: input.pricePercent, durationMonths: input.durationMonths, remainingPayments: input.durationMonths, startsOn: input.startsOn, reason, assignedAt: now, assignedBy: actorId };
+    offer = { id: randomUUID(), promotionId: input.promotionId ?? null, label, pricePercent: input.pricePercent, durationMonths: input.durationMonths, remainingPayments: input.durationMonths, billingInterval: input.billingInterval ?? account.pendingBillingInterval ?? account.billingInterval ?? "monthly", planCode: input.planCode ?? account.pendingPlanCode ?? account.planCode, startsOn: input.startsOn, reason, assignedAt: now, assignedBy: actorId };
   }
   const audit: BillingAudit = {
     id: randomUUID(), tenantId, action: offer ? "billing_offer_assigned" : "billing_offer_cleared", actorId,
@@ -562,5 +585,5 @@ export const billingAccountView = (account: BillingAccount) => ({
   status: billingStatus(account),
   plan: effectivePlan(account),
   customTerms: Boolean(account.override && (!account.override.expiresOn || account.override.expiresOn >= kenyaDate())),
-  graceEndsOn: addBillingDays(account.paidThrough ?? account.trialEndsOn, 1),
+  graceEndsOn: addBillingDays(account.paidThrough ?? account.trialEndsOn, billingGraceDays(account)),
 });

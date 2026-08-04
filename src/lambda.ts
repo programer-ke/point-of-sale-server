@@ -9,6 +9,7 @@ import { processBillingReminders } from "./services/billing-worker";
 import { validateBillingEnvironment } from "./repositories/billing-repository";
 import { validatePlanCode } from "./domain/billing";
 import { listEligibleBillingPromotions } from "./repositories/billing-promotion-repository";
+import { validateBillingInterval } from "./domain/billing";
 
 let databaseReady: Promise<void> | undefined;
 const ensureDatabaseReady = () => {
@@ -39,18 +40,19 @@ export const handler = async (...args: Parameters<typeof apolloHandler>) => {
   }
   await ensureDatabaseReady();
   if (event.requestContext.http.method === "GET" && event.rawPath === "/public/billing-promotions") {
-    let planCode;
+    let planCode; let billingInterval;
     try {
       planCode = validatePlanCode(event.queryStringParameters?.planCode ?? "");
+      billingInterval = validateBillingInterval(event.queryStringParameters?.billingInterval ?? "monthly");
     } catch {
       return { statusCode: 400, headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "Select a valid plan" }) };
     }
     try {
-      const promotions = await listEligibleBillingPromotions("new_accounts", planCode);
+      const promotions = await listEligibleBillingPromotions("new_accounts", planCode, billingInterval);
       return {
         statusCode: 200,
         headers: { "content-type": "application/json", "cache-control": "no-store" },
-        body: JSON.stringify(promotions.map(({ id, name, description, pricePercent, durationMonths, planCodes, startsOn, endsOn }) => ({ id, name, description, pricePercent, durationMonths, planCodes, startsOn, endsOn }))),
+        body: JSON.stringify(promotions.map(({ id, name, description, pricePercent, durationMonths, planCodes, billingIntervals, startsOn, endsOn }) => ({ id, name, description, pricePercent, durationMonths, planCodes, billingIntervals, startsOn, endsOn }))),
       };
     } catch (error) {
       console.error(JSON.stringify({ event: "public_billing_promotions_failed", errorName: error instanceof Error ? error.name : "UnknownError" }));

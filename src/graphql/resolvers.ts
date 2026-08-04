@@ -354,8 +354,8 @@ const billingOverview = async (tenantId: string) => {
   const [account, usage, payments, documents, audits] = await Promise.all([
     requireBillingAccount(tenantId), billingUsage(tenantId), listBillingPayments(tenantId), listBillingDocuments(tenantId), listBillingAudits(tenantId),
   ]);
-  const annual = (account.pendingBillingInterval ?? account.billingInterval ?? "monthly") === "annual";
-  const availablePromotions = account.offer?.remainingPayments || annual ? [] : await listEligibleBillingPromotions("existing_accounts", account.pendingPlanCode ?? account.planCode);
+  const billingInterval = account.pendingBillingInterval ?? account.billingInterval ?? "monthly";
+  const availablePromotions = account.offer?.remainingPayments ? [] : await listEligibleBillingPromotions("existing_accounts", account.pendingPlanCode ?? account.planCode, billingInterval);
   return { account: billingAccountView(account), nextPayment: { ...nextBillingPayment(account), paymentPending: payments.some(({ status }) => status === "submitted") }, usage, payments, documents, audits, configuration: billingConfiguration(), availablePromotions };
 };
 
@@ -374,11 +374,17 @@ const baseResolvers = {
   BillingPayment: {
     billingInterval: (payment: { billingInterval?: string }) => payment.billingInterval ?? "monthly",
     billingMonths: (payment: { billingMonths?: number }) => payment.billingMonths ?? 1,
+    annualDiscountKes: (payment: { annualDiscountKes?: number }) => payment.annualDiscountKes ?? 0,
+    promotionCreditKes: (payment: { promotionCreditKes?: number }) => payment.promotionCreditKes ?? 0,
   },
   BillingDocument: {
     billingInterval: (document: { billingInterval?: string }) => document.billingInterval ?? "monthly",
     billingMonths: (document: { billingMonths?: number }) => document.billingMonths ?? 1,
+    baseAmountKes: (document: { baseAmountKes?: number; amountKes: number }) => document.baseAmountKes ?? document.amountKes,
+    annualDiscountKes: (document: { annualDiscountKes?: number }) => document.annualDiscountKes ?? 0,
+    promotionCreditKes: (document: { promotionCreditKes?: number }) => document.promotionCreditKes ?? 0,
   },
+  BillingOffer: { billingInterval: (offer: { billingInterval?: string }) => offer.billingInterval ?? "monthly" },
   BusinessSettings: {
     vatRegistered: (settings: { vatRegistered?: boolean }) => settings.vatRegistered ?? false,
     kraPin: (settings: { kraPin?: string }) => settings.kraPin ?? "",
@@ -598,7 +604,6 @@ const baseResolvers = {
       const identity = requireIdentity(context);
       const planCode = validatePlanCode(setup.planCode);
       const billingInterval = validateBillingInterval(setup.billingInterval);
-      if (billingInterval === "annual" && setup.promotionId) throw new Error("Promotional offers apply to monthly billing only");
       if (setup.termsVersion !== TERMS_VERSION || setup.privacyVersion !== PRIVACY_VERSION) throw new Error("Review and accept the current Terms and Privacy Policy");
       if (setup.vatRegistered && planCode === "biashara") throw new Error("VAT and accounting require Biashara Growth or Plus");
       if (identity.tenantId) {

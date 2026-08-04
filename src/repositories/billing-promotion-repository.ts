@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { dynamoDB, TABLE_NAME } from "../config/db";
-import { addBillingDays, kenyaDate, validatePlanCode, type PlanCode } from "../domain/billing";
-import { requireBillingAccount, setBillingOffer } from "./billing-repository";
+import { addBillingDays, kenyaDate, validateBillingInterval, validatePlanCode, type BillingInterval, type PlanCode } from "../domain/billing";
+import { listBillingPayments, requireBillingAccount, setBillingOffer } from "./billing-repository";
 
 export type BillingPromotionAudience = "new_accounts" | "existing_accounts" | "all_accounts";
 
@@ -14,6 +14,7 @@ export interface BillingPromotion {
   durationMonths: number;
   audience: BillingPromotionAudience;
   planCodes: PlanCode[];
+  billingIntervals: BillingInterval[];
   startsOn: string;
   endsOn: string;
   enabled: boolean;
@@ -23,13 +24,14 @@ export interface BillingPromotion {
   updatedBy: string;
 }
 
-export type BillingPromotionInput = Pick<BillingPromotion, "name" | "description" | "pricePercent" | "durationMonths" | "audience" | "planCodes" | "startsOn" | "endsOn" | "enabled">;
+export type BillingPromotionInput = Pick<BillingPromotion, "name" | "description" | "pricePercent" | "durationMonths" | "audience" | "planCodes" | "billingIntervals" | "startsOn" | "endsOn" | "enabled">;
 
 const promotionKey = (id: string) => ({ partitionKey: `PLATFORM#BILLING_PROMOTION#${id}`, sortKey: "PROMOTION" });
 const clean = (item?: Record<string, unknown>): BillingPromotion | null => {
   if (!item) return null;
   const { partitionKey: _pk, sortKey: _sk, accessPartition: _ap, accessSort: _as, entityType: _type, ...promotion } = item;
-  return promotion as unknown as BillingPromotion;
+  const result = promotion as unknown as BillingPromotion;
+  return { ...result, billingIntervals: result.billingIntervals?.length ? result.billingIntervals : ["monthly"] };
 };
 
 const validateAudience = (value: string): BillingPromotionAudience => {
@@ -43,11 +45,13 @@ const validateInput = (input: BillingPromotionInput): BillingPromotionInput => {
   if (name.length < 2 || name.length > 80) throw new Error("Promotion name must be between 2 and 80 characters");
   if (description.length < 2 || description.length > 240) throw new Error("Promotion description must be between 2 and 240 characters");
   if (!Number.isInteger(input.pricePercent) || input.pricePercent < 1 || input.pricePercent > 100) throw new Error("Promotion price percentage must be between 1 and 100");
-  if (!Number.isInteger(input.durationMonths) || input.durationMonths < 1 || input.durationMonths > 24) throw new Error("Promotion duration must be between 1 and 24 monthly payments");
+  if (!Number.isInteger(input.durationMonths) || input.durationMonths < 1 || input.durationMonths > 24) throw new Error("Promotion duration must be between 1 and 24 payments");
   addBillingDays(input.startsOn, 0); addBillingDays(input.endsOn, 0);
   if (input.endsOn < input.startsOn) throw new Error("Promotion end date must be on or after its start date");
   const planCodes = [...new Set(input.planCodes.map(validatePlanCode))];
   if (planCodes.length === 0) throw new Error("Select at least one eligible plan");
+  const billingIntervals = [...new Set(input.billingIntervals.map(validateBillingInterval))];
+  if (billingIntervals.length === 0) throw new Error("Select at least one eligible billing frequency");
   return {
     name,
     description,
@@ -55,6 +59,7 @@ const validateInput = (input: BillingPromotionInput): BillingPromotionInput => {
     durationMonths: input.durationMonths,
     audience: validateAudience(input.audience),
     planCodes,
+    billingIntervals,
     startsOn: input.startsOn,
     endsOn: input.endsOn,
     enabled: input.enabled,
@@ -84,16 +89,17 @@ export const listBillingPromotions = async () => {
   return promotions;
 };
 
-export const promotionIsEligible = (promotion: BillingPromotion, audience: Exclude<BillingPromotionAudience, "all_accounts">, planCode: PlanCode, today = kenyaDate()) =>
+export const promotionIsEligible = (promotion: BillingPromotion, audience: Exclude<BillingPromotionAudience, "all_accounts">, planCode: PlanCode, billingInterval: BillingInterval, today = kenyaDate()) =>
   promotion.enabled
   && promotion.startsOn <= today
   && promotion.endsOn >= today
   && (promotion.audience === "all_accounts" || promotion.audience === audience)
-  && promotion.planCodes.includes(planCode);
+  && promotion.planCodes.includes(planCode)
+  && promotion.billingIntervals.includes(billingInterval);
 
-export const listEligibleBillingPromotions = async (audience: Exclude<BillingPromotionAudience, "all_accounts">, planCode: PlanCode) =>
+export const listEligibleBillingPromotions = async (audience: Exclude<BillingPromotionAudience, "all_accounts">, planCode: PlanCode, billingInterval: BillingInterval) =>
   (await listBillingPromotions())
-    .filter((promotion) => promotionIsEligible(promotion, audience, planCode))
+    .filter((promotion) => promotionIsEligible(promotion, audience, planCode, billingInterval))
     .sort((left, right) => left.pricePercent - right.pricePercent || left.endsOn.localeCompare(right.endsOn));
 
 export const saveBillingPromotion = async (id: string | null, rawInput: BillingPromotionInput, actorId: string) => {
@@ -125,10 +131,12 @@ export const setBillingPromotionEnabled = async (id: string, enabled: boolean, a
 
 export const applyBillingPromotion = async (tenantId: string, promotionId: string, audience: Exclude<BillingPromotionAudience, "all_accounts">, actorId: string) => {
   const [account, promotion] = await Promise.all([requireBillingAccount(tenantId), getBillingPromotion(promotionId)]);
-  if ((account.pendingBillingInterval ?? account.billingInterval ?? "monthly") === "annual") throw new Error("Promotional offers apply to monthly billing only");
-  if (!promotion || !promotionIsEligible(promotion, audience, account.pendingPlanCode ?? account.planCode)) throw new Error("This promotion is no longer available for the selected plan");
+  const billingInterval = account.pendingBillingInterval ?? account.billingInterval ?? "monthly";
+  const planCode = account.pendingPlanCode ?? account.planCode;
+  if (!promotion || !promotionIsEligible(promotion, audience, planCode, billingInterval)) throw new Error("This promotion is no longer available for the selected plan and billing frequency");
   if (account.offer?.promotionId === promotion.id && account.offer.remainingPayments > 0) return account;
   if (account.offer?.remainingPayments) throw new Error("This workspace already has an active promotional offer");
+  if ((await listBillingPayments(tenantId)).some(({ status }) => status === "submitted")) throw new Error("Wait for the submitted payment to be reviewed before applying a promotion");
   return setBillingOffer(tenantId, {
     label: promotion.name,
     pricePercent: promotion.pricePercent,
@@ -136,5 +144,7 @@ export const applyBillingPromotion = async (tenantId: string, promotionId: strin
     startsOn: audience === "new_accounts" ? addBillingDays(account.trialEndsOn, 1) : kenyaDate(),
     reason: `Activated from platform promotion ${promotion.id}`,
     promotionId: promotion.id,
+    billingInterval,
+    planCode,
   }, actorId);
 };

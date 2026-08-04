@@ -44,6 +44,16 @@ async function main() {
   assert.equal(offerTransaction[1].Put.Item.action, "billing_offer_assigned");
   assert.match(offerTransaction[0].Put.ConditionExpression, /updatedAt/, "offer claims must reject concurrent account changes");
 
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return { Item: { partitionKey: "TENANT#tenant-1", sortKey: "BILLING#ACCOUNT", entityType: "billing_account", ...existing, offer: offered.offer } };
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  await assert.rejects(
+    () => repository.setBillingOffer("tenant-1", { label: "Second offer", pricePercent: 50, durationMonths: 2, startsOn: "2026-10-01", reason: "Attempt to stack offers" }, "superadmin"),
+    /already has an active promotional offer/,
+    "an account cannot stack or replace an active promotion",
+  );
+
   commands.length = 0;
   dynamoDB.send = async (command) => {
     commands.push(command);
@@ -55,8 +65,16 @@ async function main() {
   assert.equal(payment.planCode, "biashara_plus", "the pending plan is charged without accepting a client-selected plan");
   assert.equal(payment.billingInterval, "annual");
   assert.equal(payment.amountKes, 54000, "the server calculates the exact annual amount with a 10% discount");
+  assert.equal(payment.baseAmountKes, 60000);
+  assert.equal(payment.annualDiscountKes, 6000);
+  assert.equal(payment.promotionCreditKes, 0);
   assert.equal(payment.periodStartsOn, "2099-10-01", "early payment starts after the paid-through date");
   assert.equal(payment.periodEndsOn, "2100-09-30", "annual payment covers twelve calendar months");
+  const paymentTransaction = commands.find((command) => command.constructor.name === "TransactWriteCommand").input.TransactItems;
+  const invoice = paymentTransaction[2].Put.Item;
+  assert.equal(invoice.baseAmountKes, 60000, "the invoice snapshots the undiscounted plan amount");
+  assert.equal(invoice.annualDiscountKes, 6000, "the invoice snapshots the annual discount separately");
+  assert.equal(invoice.promotionCreditKes, 0);
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });
