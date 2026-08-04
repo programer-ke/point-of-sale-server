@@ -1,4 +1,5 @@
-import { GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { randomUUID } from "node:crypto";
 import { dynamoDB, TABLE_NAME } from "../config/db";
 import { billingStatus, effectivePlan, kenyaDate, type BillingStatus, type PlanCode } from "../domain/billing";
 import { getBusinessSettings } from "./pos-repository";
@@ -30,6 +31,7 @@ export interface PlatformBusinessSummary {
 export interface PlatformMetrics {
   activeBusinesses: number;
   trialingBusinesses: number;
+  expiringTrials: number;
   pastDueBusinesses: number;
   restrictedBusinesses: number;
   unconfiguredBusinesses: number;
@@ -155,7 +157,12 @@ export const listPlatformPaymentPage = async (input: { first?: number; after?: s
     const tenantId = claim.Item?.tenantId as string | undefined; const paymentId = claim.Item?.paymentId as string | undefined;
     if (!tenantId || !paymentId) return { items: [], nextCursor: null };
     const payment = await getBillingPayment(tenantId, paymentId);
-    return { items: payment ? [payment] : [], nextCursor: null };
+    const matches = payment
+      && (!input.status || payment.status === input.status)
+      && (!input.tenantId || payment.tenantId === input.tenantId)
+      && (!input.from || payment.paidOn >= input.from)
+      && (!input.to || payment.paidOn <= input.to);
+    return { items: matches ? [payment] : [], nextCursor: null };
   }
   const status = input.status ?? "submitted";
   const items: BillingPayment[] = [];
@@ -184,9 +191,11 @@ export const refreshPlatformMetrics = async () => {
   do { const page = await listPlatformBusinessPage({ first: 100, after: cursor }); summaries.push(...page.items); cursor = page.nextCursor; } while (cursor);
   const [confirmed, submitted] = await Promise.all([queryAllPayments("confirmed"), queryAllPayments("submitted")]);
   const month = kenyaDate().slice(0, 7);
+  const expiry = new Date(`${kenyaDate()}T00:00:00Z`); expiry.setUTCDate(expiry.getUTCDate() + 7); const trialExpiryCutoff = expiry.toISOString().slice(0, 10);
   const metrics: PlatformMetrics = {
     activeBusinesses: summaries.filter((item) => item.subscriptionStatus === "active").length,
     trialingBusinesses: summaries.filter((item) => item.subscriptionStatus === "trialing").length,
+    expiringTrials: summaries.filter((item) => item.subscriptionStatus === "trialing" && item.trialEndsOn != null && item.trialEndsOn >= kenyaDate() && item.trialEndsOn <= trialExpiryCutoff).length,
     pastDueBusinesses: summaries.filter((item) => item.subscriptionStatus === "past_due").length,
     restrictedBusinesses: summaries.filter((item) => item.subscriptionStatus === "restricted" || item.subscriptionStatus === "cancelled").length,
     unconfiguredBusinesses: summaries.filter((item) => !item.billingConfigured).length,
@@ -207,6 +216,33 @@ export const getPlatformMetrics = async () => {
   return clean<PlatformMetrics>(response.Item) ?? refreshPlatformMetrics();
 };
 
+const metricContribution = (summary: PlatformBusinessSummary | null) => ({
+  activeBusinesses: summary?.subscriptionStatus === "active" ? 1 : 0,
+  trialingBusinesses: summary?.subscriptionStatus === "trialing" ? 1 : 0,
+  expiringTrials: summary?.subscriptionStatus === "trialing" && summary.trialEndsOn != null && summary.trialEndsOn >= kenyaDate() && summary.trialEndsOn <= (() => { const date = new Date(`${kenyaDate()}T00:00:00Z`); date.setUTCDate(date.getUTCDate() + 7); return date.toISOString().slice(0, 10); })() ? 1 : 0,
+  pastDueBusinesses: summary?.subscriptionStatus === "past_due" ? 1 : 0,
+  restrictedBusinesses: summary && (summary.subscriptionStatus === "restricted" || summary.subscriptionStatus === "cancelled") ? 1 : 0,
+  unconfiguredBusinesses: summary && !summary.billingConfigured ? 1 : 0,
+  projectedMrrKes: summary?.subscriptionStatus === "active" ? summary.monthlyPriceKes : 0,
+  trialPipelineKes: summary?.subscriptionStatus === "trialing" ? summary.monthlyPriceKes : 0,
+  pendingPayments: summary?.pendingPayments ?? 0,
+  pendingPaymentAmountKes: summary?.pendingPaymentAmountKes ?? 0,
+});
+
+export const syncPlatformBusinessMetrics = async (tenantId: string, confirmedCollectionKes = 0) => {
+  const previous = await getPlatformBusinessSummary(tenantId);
+  const next = await refreshPlatformBusinessSummary(tenantId);
+  const before = metricContribution(previous); const after = metricContribution(next);
+  const values: Record<string, number | string> = { ":calculatedAt": new Date().toISOString(), ":collectedAll": confirmedCollectionKes, ":collectedMonth": confirmedCollectionKes };
+  for (const key of Object.keys(after) as Array<keyof typeof after>) values[`:${key}`] = after[key] - before[key];
+  await dynamoDB.send(new UpdateCommand({
+    TableName: TABLE_NAME, Key: metricsKey,
+    UpdateExpression: "SET calculatedAt = :calculatedAt ADD activeBusinesses :activeBusinesses, trialingBusinesses :trialingBusinesses, expiringTrials :expiringTrials, pastDueBusinesses :pastDueBusinesses, restrictedBusinesses :restrictedBusinesses, unconfiguredBusinesses :unconfiguredBusinesses, projectedMrrKes :projectedMrrKes, trialPipelineKes :trialPipelineKes, pendingPayments :pendingPayments, pendingPaymentAmountKes :pendingPaymentAmountKes, collectedAllTimeKes :collectedAll, collectedThisMonthKes :collectedMonth",
+    ExpressionAttributeValues: values,
+  }));
+  return next;
+};
+
 export const platformBusinessMetadata = async (tenantId: string) => {
   const [summary, settings, memberships, stores] = await Promise.all([
     getPlatformBusinessSummary(tenantId), getBusinessSettings(tenantId), listTenantMemberships(tenantId), listStores(tenantId),
@@ -222,4 +258,14 @@ export const platformBusinessMetadata = async (tenantId: string) => {
     admins,
     stores: stores.map(({ id, code, name, address, status }) => ({ id, code, name, address, status })),
   };
+};
+
+export const recordPlatformAudit = async (input: { action: string; actorId: string; target: string; reason: string }) => {
+  const now = new Date().toISOString(); const id = randomUUID();
+  await dynamoDB.send(new PutCommand({
+    TableName: TABLE_NAME,
+    Item: { partitionKey: "PLATFORM#AUDIT", sortKey: `${now}#${id}`, entityType: "platform_audit", id, ...input, createdAt: now },
+    ConditionExpression: "attribute_not_exists(partitionKey)",
+  }));
+  return true;
 };

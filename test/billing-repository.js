@@ -29,6 +29,7 @@ async function main() {
   assert.equal(result.pendingPlanCode, null);
   assert.equal(result.override, null);
   assert.equal(result.paidThrough, "2026-09-30", "assigning a plan must preserve paid-through date");
+  assert.equal(result.billingContactEmail, "owner@example.com", "legacy accounts receive a safe billing-contact fallback");
   const transaction = commands.find((command) => command.constructor.name === "TransactWriteCommand").input.TransactItems;
   assert.equal(transaction[0].Put.ConditionExpression, "attribute_exists(partitionKey)");
   assert.equal(transaction[1].Put.Item.action, "billing_plan_assigned");

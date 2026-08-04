@@ -13,8 +13,13 @@ const account = (updates = {}) => ({
 
 assert.equal(PLANS.biashara.activeUserLimit, 5);
 assert.equal(PLANS.biashara.activeStoreLimit, 1);
-assert.equal(PLANS.biashara_plus.activeUserLimit, null);
-assert.equal(PLANS.biashara_plus.activeStoreLimit, null);
+assert.equal(PLANS.biashara_growth.monthlyPriceKes, 2500);
+assert.equal(PLANS.biashara_growth.activeUserLimit, 10);
+assert.equal(PLANS.biashara_growth.activeStoreLimit, 3);
+assert.deepEqual(PLANS.biashara_growth.capabilities, ["multi_store", "vat_accounting"]);
+assert.equal(PLANS.biashara_plus.monthlyPriceKes, 5000);
+assert.equal(PLANS.biashara_plus.activeUserLimit, 30);
+assert.equal(PLANS.biashara_plus.activeStoreLimit, 10);
 assert.equal(addBillingMonth("2026-01-31"), "2026-02-28");
 assert.equal(addBillingMonth("2028-01-31"), "2028-02-29");
 assert.equal(billingStatus(account(), "2026-08-14"), "trialing");
@@ -41,7 +46,7 @@ async function policyTests() {
   tenants.listTenantMemberships = async () => Array.from({ length: 5 }, (_, index) => ({ username: `user-${index}` }));
   cognito.getCognitoUser = async () => ({ status: "CONFIRMED" });
   const wrapped = applyBillingPolicies({
-    Query: { products: async () => ["ok"], platformBillingAccounts: async () => ["platform"] },
+    Query: { products: async () => ["ok"], platformBusinesses: async () => ["platform"] },
     Mutation: {
       createBusiness: async () => "created",
       completeSale: async () => "sold",
@@ -62,7 +67,7 @@ async function policyTests() {
   await assert.rejects(() => wrapped.Mutation.createStore(null, {}, admin), (error) => error.extensions?.code === "PLAN_LIMIT_REACHED");
   await assert.rejects(() => wrapped.Mutation.inviteUser(null, {}, admin), (error) => error.extensions?.code === "PLAN_LIMIT_REACHED");
   const platform = { auth: { id: "platform", username: "platform", roles: ["superadmin"], activeRole: "superadmin" } };
-  assert.deepEqual(await wrapped.Query.platformBillingAccounts(null, {}, platform), ["platform"]);
+  assert.deepEqual(await wrapped.Query.platformBusinesses(null, {}, platform), ["platform"]);
   assert.equal(await wrapped.Mutation.confirmBillingPayment(null, {}, platform), "confirmed");
   process.env.BILLING_ENFORCEMENT_ENABLED = "false";
 }

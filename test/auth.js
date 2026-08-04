@@ -22,6 +22,7 @@ const {
   requirePlatformAdmin,
   requireRole,
 } = require("../dist/auth.js");
+const { assertPlatformAdminCanDisable } = require("../dist/services/cognito.js");
 
 async function main() {
   const context = await contextFromApiGatewayEvent({
@@ -86,6 +87,9 @@ async function main() {
   assert.equal(platform.auth.activeRole, "superadmin");
   assert.equal(requirePlatformAdmin(platform).id, "platform-admin");
   assert.throws(() => requireRole(platform, ["admin"]), /permission/);
+  assert.throws(() => assertPlatformAdminCanDisable("platform@example.com", "platform@example.com", [{ username: "platform@example.com", status: "CONFIRMED" }]), /own platform/);
+  assert.throws(() => assertPlatformAdminCanDisable("only@example.com", "operator@example.com", [{ username: "only@example.com", status: "CONFIRMED" }]), /retain at least one/);
+  assert.doesNotThrow(() => assertPlatformAdminCanDisable("second@example.com", "first@example.com", [{ username: "first@example.com", status: "CONFIRMED" }, { username: "second@example.com", status: "CONFIRMED" }]));
 
   membershipItem = {
     partitionKey: "IDENTITY#user-1",

@@ -191,14 +191,20 @@ export const listPlatformAdmins = async () => {
 export const invitePlatformAdmin = (input: { email: string; firstName: string; lastName: string }) =>
   inviteCognitoUser({ ...input, roles: ["superadmin"] });
 
+export const assertPlatformAdminCanDisable = (username: string, actorUsername: string, admins: Array<{ username: string; status: string }>) => {
+  if (username === actorUsername) throw new Error("You cannot disable your own platform administrator account");
+  const target = admins.find((admin) => admin.username === username);
+  if (!target) throw new Error("Platform administrator was not found");
+  if (target.status !== "DISABLED" && admins.filter((admin) => admin.status !== "DISABLED").length <= 1) {
+    throw new Error("The platform must retain at least one active superadmin");
+  }
+};
+
 export const setPlatformAdminEnabled = async (username: string, enabled: boolean, actorUsername: string) => {
-  if (!enabled && username === actorUsername) throw new Error("You cannot disable your own platform administrator account");
   const admins = await listPlatformAdmins();
   const target = admins.find((admin) => admin.username === username);
   if (!target) throw new Error("Platform administrator was not found");
-  if (!enabled && target.status !== "DISABLED" && admins.filter((admin) => admin.status !== "DISABLED").length <= 1) {
-    throw new Error("The platform must retain at least one active superadmin");
-  }
+  if (!enabled) assertPlatformAdminCanDisable(username, actorUsername, admins);
   return setCognitoUserEnabled(username, enabled);
 };
 

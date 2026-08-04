@@ -4,6 +4,40 @@ This log records dated migrations, temporary rollout requirements, and
 remediation procedures. The README remains limited to evergreen setup and
 repeatable operations.
 
+## 2026-08-04 — Scalable platform administration and three-tier billing
+
+### What changed and why
+
+The platform list now reads cursor-paginated, indexed business projections
+instead of scanning tenants and loading every tenant's users, stores, and
+payments. Materialized platform metrics report active MRR, trial pipeline,
+confirmed collections, and pending reconciliation. Payments are indexed by
+review status, billing contacts are explicit, superadmins can invite and manage
+other superadmins, and new billing documents retain VAT-inclusive subtotal and
+VAT components when vendor VAT is enabled. The plan catalog is now Biashara
+(KES 1,000; 1 store/5 users), Growth (KES 2,500; 3/10), and Plus (KES 5,000;
+10/30).
+
+### Required rollout and verification
+
+Deploy infrastructure and this backward-compatible server first, with billing
+enforcement unchanged. Run `yarn migrate:platform-billing` once with operator
+AWS credentials; it idempotently initializes contacts, reindexes payments,
+backfills business projections, and calculates metrics. Deploy the matching
+client only after the migration succeeds. Configure
+`billing_vendor_vat_registered` and `billing_vendor_vat_rate` from verified tax
+advice. Verify cursor navigation, exact-ID/name-prefix search, payment review,
+metric totals, all plan boundaries, billing contact edits, and superadmin
+invitation/last-admin protection.
+
+### Recovery and status
+
+Rollback the client and server together if required. The migration is additive;
+do not remove payment indexes, projections, contacts, documents, or audits.
+Reverting the plan catalog restores prior future-payment amounts but must not
+rewrite submitted payments or historical documents. Status: implementation
+complete; production migration and tax-configuration review pending.
+
 ## 2026-08-03 — Tenant billing rollout
 
 ### What changed

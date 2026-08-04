@@ -232,7 +232,7 @@ export const typeDefs = `#graphql
   type BillingOverview { account: BillingAccount!, usage: BillingUsage!, payments: [BillingPayment!]!, documents: [BillingDocument!]!, audits: [BillingAudit!]!, configuration: BillingConfiguration! }
   type PlatformBusinessSummary { tenantId: ID!, tenantName: String!, billingConfigured: Boolean!, planCode: String, planName: String, subscriptionStatus: String!, monthlyPriceKes: Int!, activeUsers: Int!, activeStores: Int!, pendingPayments: Int!, pendingPaymentAmountKes: Int!, trialEndsOn: String, paidThrough: String, billingContactEmail: String!, createdAt: String!, updatedAt: String! }
   type PlatformBusinessConnection { items: [PlatformBusinessSummary!]!, nextCursor: String }
-  type PlatformMetrics { activeBusinesses: Int!, trialingBusinesses: Int!, pastDueBusinesses: Int!, restrictedBusinesses: Int!, unconfiguredBusinesses: Int!, projectedMrrKes: Int!, trialPipelineKes: Int!, collectedThisMonthKes: Int!, collectedAllTimeKes: Int!, pendingPayments: Int!, pendingPaymentAmountKes: Int!, calculatedAt: String! }
+  type PlatformMetrics { activeBusinesses: Int!, trialingBusinesses: Int!, expiringTrials: Int!, pastDueBusinesses: Int!, restrictedBusinesses: Int!, unconfiguredBusinesses: Int!, projectedMrrKes: Int!, trialPipelineKes: Int!, collectedThisMonthKes: Int!, collectedAllTimeKes: Int!, pendingPayments: Int!, pendingPaymentAmountKes: Int!, calculatedAt: String! }
   type PlatformContact { name: String!, email: String!, phone: String!, address: String! }
   type PlatformAdminContact { id: ID!, name: String!, email: String!, status: String! }
   type PlatformStore { id: ID!, code: String!, name: String!, address: String!, status: String! }
