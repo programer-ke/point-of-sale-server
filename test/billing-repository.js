@@ -51,10 +51,12 @@ async function main() {
     if (command.constructor.name === "TransactWriteCommand") return {};
     throw new Error(`Unexpected ${command.constructor.name}`);
   };
-  const payment = await repository.submitBillingPayment({ ...existing, paidThrough: "2099-09-30", override: null, offer: null }, { mpesaReference: "SAMPLE1234", paidOn: "2026-08-04", submittedBy: "owner" });
+  const payment = await repository.submitBillingPayment({ ...existing, paidThrough: "2099-09-30", pendingBillingInterval: "annual", override: null, offer: null }, { mpesaReference: "SAMPLE1234", paidOn: "2026-08-04", submittedBy: "owner" });
   assert.equal(payment.planCode, "biashara_plus", "the pending plan is charged without accepting a client-selected plan");
-  assert.equal(payment.amountKes, 5000, "the server calculates the exact upcoming amount");
+  assert.equal(payment.billingInterval, "annual");
+  assert.equal(payment.amountKes, 54000, "the server calculates the exact annual amount with a 10% discount");
   assert.equal(payment.periodStartsOn, "2099-10-01", "early payment starts after the paid-through date");
+  assert.equal(payment.periodEndsOn, "2100-09-30", "annual payment covers twelve calendar months");
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

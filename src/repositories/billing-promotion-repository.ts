@@ -125,6 +125,7 @@ export const setBillingPromotionEnabled = async (id: string, enabled: boolean, a
 
 export const applyBillingPromotion = async (tenantId: string, promotionId: string, audience: Exclude<BillingPromotionAudience, "all_accounts">, actorId: string) => {
   const [account, promotion] = await Promise.all([requireBillingAccount(tenantId), getBillingPromotion(promotionId)]);
+  if ((account.pendingBillingInterval ?? account.billingInterval ?? "monthly") === "annual") throw new Error("Promotional offers apply to monthly billing only");
   if (!promotion || !promotionIsEligible(promotion, audience, account.pendingPlanCode ?? account.planCode)) throw new Error("This promotion is no longer available for the selected plan");
   if (account.offer?.promotionId === promotion.id && account.offer.remainingPayments > 0) return account;
   if (account.offer?.remainingPayments) throw new Error("This workspace already has an active promotional offer");

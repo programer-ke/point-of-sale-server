@@ -81,7 +81,7 @@ export const refreshPlatformBusinessSummary = async (tenantId: string) => {
     planCode: account.planCode,
     planName: plan.name,
     subscriptionStatus: billingStatus(account),
-    monthlyPriceKes: upcomingPayment.amountKes,
+    monthlyPriceKes: Math.round(upcomingPayment.amountKes / upcomingPayment.billingMonths),
     activeUsers: users.filter((user) => user.status !== "DISABLED").length,
     activeStores: stores.filter((store) => store.status === "active").length,
     pendingPayments: pending.length,

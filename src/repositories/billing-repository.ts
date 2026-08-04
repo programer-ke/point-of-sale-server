@@ -10,6 +10,7 @@ import {
   nextBillingPayment,
   PLANS,
   type BillingAccount,
+  type BillingInterval,
   type BillingOffer,
   type BillingOverride,
   type PlanCode,
@@ -23,6 +24,8 @@ export interface BillingPayment {
   tenantId: string;
   tenantName: string;
   planCode: PlanCode;
+  billingInterval: BillingInterval;
+  billingMonths: number;
   amountKes: number;
   baseAmountKes: number;
   periodStartsOn: string;
@@ -46,6 +49,8 @@ export interface BillingDocument {
   kind: BillingDocumentKind;
   planCode: PlanCode;
   planName: string;
+  billingInterval: BillingInterval;
+  billingMonths: number;
   amountKes: number;
   subtotalKes: number;
   vatAmountKes: number;
@@ -142,6 +147,7 @@ export const createBillingAccount = async (input: {
   billingContactName?: string;
   billingContactEmail?: string;
   billingContactPhone?: string;
+  billingInterval?: BillingInterval;
   trialStartedOn?: string;
 }) => {
   const now = new Date().toISOString();
@@ -151,11 +157,13 @@ export const createBillingAccount = async (input: {
     billingContactName: input.billingContactName?.trim() || input.tenantName,
     billingContactEmail: input.billingContactEmail?.trim().toLowerCase() || input.ownerUsername,
     billingContactPhone: input.billingContactPhone?.trim() || "",
+    billingInterval: input.billingInterval ?? "monthly",
     trialStartedOn,
     trialEndsOn: addBillingDays(trialStartedOn, 13),
     paidThrough: null,
     cancelledAt: null,
     pendingPlanCode: null,
+    pendingBillingInterval: null,
     acceptedAt: now,
     override: null,
     offer: null,
@@ -196,6 +204,8 @@ export const assignPlatformBillingPlan = async (input: {
     billingContactPhone: current.billingContactPhone || "",
     planCode: input.planCode,
     pendingPlanCode: null,
+    billingInterval: current.billingInterval ?? "monthly",
+    pendingBillingInterval: null,
     override: null,
     updatedAt: now,
   } : {
@@ -207,11 +217,13 @@ export const assignPlatformBillingPlan = async (input: {
     billingContactEmail: input.ownerUsername,
     billingContactPhone: "",
     planCode: input.planCode,
+    billingInterval: "monthly",
     trialStartedOn,
     trialEndsOn: addBillingDays(trialStartedOn, 13),
     paidThrough: null,
     cancelledAt: null,
     pendingPlanCode: null,
+    pendingBillingInterval: null,
     termsVersion: input.termsVersion,
     privacyVersion: input.privacyVersion,
     acceptedBy: input.actorId,
@@ -286,6 +298,8 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     tenantId: account.tenantId,
     tenantName: account.tenantName,
     planCode: charge.planCode,
+    billingInterval: charge.billingInterval,
+    billingMonths: charge.billingMonths,
     amountKes: charge.amountKes,
     baseAmountKes: charge.baseAmountKes,
     periodStartsOn: charge.periodStartsOn,
@@ -309,6 +323,8 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     kind: "invoice",
     planCode: charge.planCode,
     planName: PLANS[charge.planCode].name,
+    billingInterval: charge.billingInterval,
+    billingMonths: charge.billingMonths,
     amountKes: charge.amountKes,
     ...taxBreakdown(charge.amountKes),
     issuedOn: kenyaDate(),
@@ -347,6 +363,8 @@ export const confirmBillingPayment = async (tenantId: string, paymentId: string,
     kind: "receipt",
     planCode: payment.planCode,
     planName: PLANS[payment.planCode].name,
+    billingInterval: payment.billingInterval ?? "monthly",
+    billingMonths: payment.billingMonths ?? 1,
     amountKes: payment.amountKes,
     ...taxBreakdown(payment.amountKes),
     issuedOn: today,
@@ -359,13 +377,13 @@ export const confirmBillingPayment = async (tenantId: string, paymentId: string,
     Update: {
       TableName: TABLE_NAME,
       Key: accountKey(tenantId),
-      UpdateExpression: "SET planCode = :plan, paidThrough = :paidThrough, pendingPlanCode = :none, cancelledAt = :none, updatedAt = :now, #offer.#remaining = #offer.#remaining - :one",
+      UpdateExpression: "SET planCode = :plan, billingInterval = :interval, paidThrough = :paidThrough, pendingPlanCode = :none, pendingBillingInterval = :none, cancelledAt = :none, updatedAt = :now, #offer.#remaining = #offer.#remaining - :one",
       ConditionExpression: "#offer.#id = :offerId AND #offer.#remaining > :zero",
       ExpressionAttributeNames: { "#offer": "offer", "#remaining": "remainingPayments", "#id": "id" },
-      ExpressionAttributeValues: { ":plan": payment.planCode, ":paidThrough": paidThrough, ":none": null, ":now": now, ":one": 1, ":zero": 0, ":offerId": payment.offerId },
+      ExpressionAttributeValues: { ":plan": payment.planCode, ":interval": payment.billingInterval ?? "monthly", ":paidThrough": paidThrough, ":none": null, ":now": now, ":one": 1, ":zero": 0, ":offerId": payment.offerId },
     },
   } : {
-    Update: { TableName: TABLE_NAME, Key: accountKey(tenantId), UpdateExpression: "SET planCode = :plan, paidThrough = :paidThrough, pendingPlanCode = :none, cancelledAt = :none, updatedAt = :now", ExpressionAttributeValues: { ":plan": payment.planCode, ":paidThrough": paidThrough, ":none": null, ":now": now } },
+    Update: { TableName: TABLE_NAME, Key: accountKey(tenantId), UpdateExpression: "SET planCode = :plan, billingInterval = :interval, paidThrough = :paidThrough, pendingPlanCode = :none, pendingBillingInterval = :none, cancelledAt = :none, updatedAt = :now", ExpressionAttributeValues: { ":plan": payment.planCode, ":interval": payment.billingInterval ?? "monthly", ":paidThrough": paidThrough, ":none": null, ":now": now } },
   };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
     { Put: { TableName: TABLE_NAME, Item: { ...paymentKey(tenantId, paymentId), accessPartition: "PLATFORM#BILLING_PAYMENT#confirmed", accessSort: `${payment.submittedAt}#${paymentId}`, entityType: "billing_payment", ...confirmed }, ConditionExpression: "#status = :submitted", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":submitted": "submitted" } } },
@@ -416,6 +434,27 @@ export const scheduleBillingPlan = async (tenantId: string, planCode: PlanCode) 
   return clean<BillingAccount>(response.Attributes)!;
 };
 
+export const scheduleBillingInterval = async (tenantId: string, billingInterval: BillingInterval) => {
+  const account = await requireBillingAccount(tenantId);
+  if ((await listBillingPayments(tenantId)).some(({ status }) => status === "submitted")) {
+    throw new Error("Wait for the submitted payment to be reviewed before changing billing frequency");
+  }
+  if (billingInterval === "annual" && account.offer?.remainingPayments) {
+    throw new Error("Annual billing is available after the current monthly promotion ends");
+  }
+  const currentInterval = account.billingInterval ?? "monthly";
+  const pendingBillingInterval = billingInterval === currentInterval ? null : billingInterval;
+  const now = new Date().toISOString();
+  const response = await dynamoDB.send(new UpdateCommand({
+    TableName: TABLE_NAME,
+    Key: accountKey(tenantId),
+    UpdateExpression: "SET pendingBillingInterval = :interval, updatedAt = :now",
+    ExpressionAttributeValues: { ":interval": pendingBillingInterval, ":now": now },
+    ReturnValues: "ALL_NEW",
+  }));
+  return clean<BillingAccount>(response.Attributes)!;
+};
+
 export const listPlatformBillingAccounts = async () => {
   const accounts: BillingAccount[] = [];
   let exclusiveStartKey: Record<string, unknown> | undefined;
@@ -453,6 +492,9 @@ export const setBillingOffer = async (tenantId: string, input: { label: string; 
   const now = new Date().toISOString();
   let offer: BillingOffer | null = null;
   if (input) {
+    if ((account.pendingBillingInterval ?? account.billingInterval ?? "monthly") === "annual") {
+      throw new Error("Switch this subscription to monthly billing before assigning a promotional offer");
+    }
     const label = input.label.trim().replace(/\s+/g, " ");
     const reason = input.reason.trim();
     if (label.length < 2 || label.length > 80) throw new Error("Offer label must be between 2 and 80 characters");
@@ -511,6 +553,8 @@ export const attachEtimsReference = async (tenantId: string, documentId: string,
 
 export const billingAccountView = (account: BillingAccount) => ({
   ...account,
+  billingInterval: account.billingInterval ?? "monthly",
+  pendingBillingInterval: account.pendingBillingInterval ?? null,
   offer: account.offer ?? null,
   billingContactName: account.billingContactName || account.tenantName,
   billingContactEmail: account.billingContactEmail || account.ownerUsername,

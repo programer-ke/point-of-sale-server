@@ -1,6 +1,7 @@
 import { GraphQLError } from "graphql";
 
 export type PlanCode = "biashara" | "biashara_growth" | "biashara_plus";
+export type BillingInterval = "monthly" | "annual";
 export type PlanCapability = "multi_store" | "vat_accounting";
 export type BillingStatus = "trialing" | "active" | "past_due" | "restricted" | "exempt" | "cancelled";
 
@@ -50,11 +51,13 @@ export interface BillingAccount {
   billingContactEmail: string;
   billingContactPhone: string;
   planCode: PlanCode;
+  billingInterval?: BillingInterval;
   trialStartedOn: string;
   trialEndsOn: string;
   paidThrough: string | null;
   cancelledAt: string | null;
   pendingPlanCode: PlanCode | null;
+  pendingBillingInterval?: BillingInterval | null;
   termsVersion: string;
   privacyVersion: string;
   acceptedAt: string;
@@ -127,6 +130,24 @@ export const addBillingMonth = (value: string) => {
   return new Date(Date.UTC(year, month + 1, Math.min(day, lastDay))).toISOString().slice(0, 10);
 };
 
+export const addBillingMonths = (value: string, months: number) => {
+  if (!Number.isInteger(months) || months < 1) throw new Error("Billing months must be a positive whole number");
+  const source = parseDate(value);
+  const year = source.getUTCFullYear();
+  const month = source.getUTCMonth();
+  const day = source.getUTCDate();
+  const targetMonth = month + months;
+  const lastDay = new Date(Date.UTC(year, targetMonth + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(year, targetMonth, Math.min(day, lastDay))).toISOString().slice(0, 10);
+};
+
+export const ANNUAL_DISCOUNT_PERCENT = 10;
+export const annualPriceKes = (monthlyPriceKes: number) => Math.round(monthlyPriceKes * 12 * (100 - ANNUAL_DISCOUNT_PERCENT) / 100);
+export const validateBillingInterval = (value: string): BillingInterval => {
+  if (value !== "monthly" && value !== "annual") throw new Error("Select monthly or annual billing");
+  return value;
+};
+
 export const overrideIsActive = (override: BillingOverride | null, today = kenyaDate()) =>
   Boolean(override && (!override.expiresOn || override.expiresOn >= today));
 
@@ -162,6 +183,9 @@ export interface NextBillingPayment {
   periodEndsOn: string;
   baseAmountKes: number;
   amountKes: number;
+  billingInterval: BillingInterval;
+  billingMonths: number;
+  savingsKes: number;
   offerId: string | null;
   offerLabel: string | null;
   offerPricePercent: number | null;
@@ -172,19 +196,27 @@ export const nextBillingPayment = (account: BillingAccount, today = kenyaDate())
   const accessEndsOn = account.paidThrough ?? account.trialEndsOn;
   const dueOn = addBillingDays(accessEndsOn, 1);
   const periodStartsOn = dueOn >= today ? dueOn : today;
-  const periodEndsOn = addBillingDays(addBillingMonth(periodStartsOn), -1);
   const planCode = account.pendingPlanCode ?? account.planCode;
   const plan = effectivePlan({ ...account, planCode }, periodStartsOn);
-  const offer = account.offer && account.offer.remainingPayments > 0 && periodStartsOn >= account.offer.startsOn ? account.offer : null;
-  const amountKes = offer ? Math.round(plan.monthlyPriceKes * offer.pricePercent / 100) : plan.monthlyPriceKes;
+  const billingInterval = account.pendingBillingInterval ?? account.billingInterval ?? "monthly";
+  const billingMonths = billingInterval === "annual" ? 12 : 1;
+  const periodEndsOn = addBillingDays(addBillingMonths(periodStartsOn, billingMonths), -1);
+  const offer = billingInterval === "monthly" && account.offer && account.offer.remainingPayments > 0 && periodStartsOn >= account.offer.startsOn ? account.offer : null;
+  const baseAmountKes = plan.monthlyPriceKes * billingMonths;
+  const amountKes = offer
+    ? Math.round(plan.monthlyPriceKes * offer.pricePercent / 100)
+    : billingInterval === "annual" ? annualPriceKes(plan.monthlyPriceKes) : plan.monthlyPriceKes;
   return {
     planCode,
     planName: plan.name,
     dueOn,
     periodStartsOn,
     periodEndsOn,
-    baseAmountKes: plan.monthlyPriceKes,
+    baseAmountKes,
     amountKes,
+    billingInterval,
+    billingMonths,
+    savingsKes: baseAmountKes - amountKes,
     offerId: offer?.id ?? null,
     offerLabel: offer?.label ?? null,
     offerPricePercent: offer?.pricePercent ?? null,

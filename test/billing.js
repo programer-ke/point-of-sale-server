@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { buildSchema } = require("graphql");
-const { addBillingMonth, billingStatus, effectivePlan, nextBillingPayment, PLANS } = require("../dist/domain/billing");
+const { addBillingMonth, addBillingMonths, billingStatus, effectivePlan, nextBillingPayment, PLANS } = require("../dist/domain/billing");
 const { MUTATION_POLICY, applyBillingPolicies } = require("../dist/domain/billing-policy");
 const { typeDefs } = require("../dist/graphql/schema");
 
@@ -23,6 +23,7 @@ assert.equal(PLANS.biashara_plus.activeUserLimit, 30);
 assert.equal(PLANS.biashara_plus.activeStoreLimit, 10);
 assert.equal(addBillingMonth("2026-01-31"), "2026-02-28");
 assert.equal(addBillingMonth("2028-01-31"), "2028-02-29");
+assert.equal(addBillingMonths("2028-02-29", 12), "2029-02-28");
 assert.equal(billingStatus(account(), "2026-08-14"), "trialing");
 assert.equal(billingStatus(account(), "2026-08-15"), "past_due");
 assert.equal(billingStatus(account(), "2026-08-16"), "restricted");
@@ -35,12 +36,22 @@ assert.equal(trialCharge.dueOn, "2026-08-15");
 assert.equal(trialCharge.periodStartsOn, "2026-08-15");
 assert.equal(trialCharge.periodEndsOn, "2026-09-14");
 assert.equal(trialCharge.amountKes, 2000);
+const annualCharge = nextBillingPayment(account({ planCode: "biashara_growth", pendingBillingInterval: "annual" }), "2026-08-04");
+assert.equal(annualCharge.billingInterval, "annual");
+assert.equal(annualCharge.billingMonths, 12);
+assert.equal(annualCharge.baseAmountKes, 24000);
+assert.equal(annualCharge.amountKes, 21600, "annual billing charges 90% of twelve monthly payments");
+assert.equal(annualCharge.savingsKes, 2400);
+assert.equal(annualCharge.periodEndsOn, "2027-08-14");
 const launchOffer = { id: "offer-1", label: "Launch offer", pricePercent: 70, durationMonths: 6, remainingPayments: 6, startsOn: "2026-08-15", reason: "Launch", assignedAt: "2026-08-04", assignedBy: "admin" };
 const offeredCharge = nextBillingPayment(account({ planCode: "biashara_growth", pendingPlanCode: "biashara_plus", offer: launchOffer }), "2026-08-04");
 assert.equal(offeredCharge.planCode, "biashara_plus", "the scheduled plan determines the upcoming payment");
 assert.equal(offeredCharge.baseAmountKes, 5000);
 assert.equal(offeredCharge.amountKes, 3500, "a 70% price offer charges 70% of the normal rate");
 assert.equal(offeredCharge.offerRemainingPayments, 6);
+const annualWithOffer = nextBillingPayment(account({ pendingBillingInterval: "annual", offer: launchOffer }), "2026-08-04");
+assert.equal(annualWithOffer.amountKes, 8640, "annual savings do not stack with monthly promotions");
+assert.equal(annualWithOffer.offerId, null);
 assert.equal(nextBillingPayment(account({ offer: { ...launchOffer, remainingPayments: 0 } }), "2026-08-04").amountKes, 800, "a consumed offer no longer changes the charge");
 
 const mutationFields = Object.keys(buildSchema(typeDefs).getMutationType().getFields()).sort();

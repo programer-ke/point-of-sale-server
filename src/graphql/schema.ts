@@ -220,17 +220,17 @@ export const typeDefs = `#graphql
   }
 
   type BillingUsage { activeUsers: Int!, activeStores: Int! }
-  type BillingPayment { id: ID!, tenantId: ID!, tenantName: String!, planCode: String!, amountKes: Int!, baseAmountKes: Int, periodStartsOn: String, periodEndsOn: String, offerId: ID, offerPricePercent: Int, mpesaReference: String!, paidOn: String!, status: String!, submittedBy: String!, submittedAt: String!, reviewedBy: String, reviewedAt: String, rejectionReason: String }
-  type BillingDocument { id: ID!, number: String!, tenantId: ID!, kind: String!, planCode: String!, planName: String!, amountKes: Int!, subtotalKes: Int, vatAmountKes: Int, issuedOn: String!, paymentId: ID!, externalEtimsReference: String, notice: String!, createdAt: String! }
+  type BillingPayment { id: ID!, tenantId: ID!, tenantName: String!, planCode: String!, billingInterval: String!, billingMonths: Int!, amountKes: Int!, baseAmountKes: Int, periodStartsOn: String, periodEndsOn: String, offerId: ID, offerPricePercent: Int, mpesaReference: String!, paidOn: String!, status: String!, submittedBy: String!, submittedAt: String!, reviewedBy: String, reviewedAt: String, rejectionReason: String }
+  type BillingDocument { id: ID!, number: String!, tenantId: ID!, kind: String!, planCode: String!, planName: String!, billingInterval: String!, billingMonths: Int!, amountKes: Int!, subtotalKes: Int, vatAmountKes: Int, issuedOn: String!, paymentId: ID!, externalEtimsReference: String, notice: String!, createdAt: String! }
   type BillingAudit { id: ID!, tenantId: ID!, action: String!, actorId: String!, reason: String!, before: String!, after: String!, createdAt: String! }
   type BillingAccount {
     tenantId: ID!, tenantName: String!, ownerUserId: ID!, ownerUsername: String!, billingContactName: String!, billingContactEmail: String!, billingContactPhone: String!, planCode: String!, status: String!, plan: BillingPlan!,
-    trialStartedOn: String!, trialEndsOn: String!, paidThrough: String, graceEndsOn: String!, cancelledAt: String, pendingPlanCode: String,
+    trialStartedOn: String!, trialEndsOn: String!, paidThrough: String, graceEndsOn: String!, cancelledAt: String, pendingPlanCode: String, billingInterval: String!, pendingBillingInterval: String,
     termsVersion: String!, privacyVersion: String!, acceptedAt: String!, createdAt: String!, updatedAt: String!, customTerms: Boolean!, offer: BillingOffer
   }
   type BillingOffer { id: ID!, promotionId: ID, label: String!, pricePercent: Int!, durationMonths: Int!, remainingPayments: Int!, startsOn: String!, reason: String!, assignedAt: String!, assignedBy: String! }
   type BillingPromotion { id: ID!, name: String!, description: String!, pricePercent: Int!, durationMonths: Int!, audience: String!, planCodes: [String!]!, startsOn: String!, endsOn: String!, enabled: Boolean!, createdAt: String!, createdBy: String!, updatedAt: String!, updatedBy: String! }
-  type NextBillingPayment { planCode: String!, planName: String!, dueOn: String!, periodStartsOn: String!, periodEndsOn: String!, baseAmountKes: Int!, amountKes: Int!, offerId: ID, offerLabel: String, offerPricePercent: Int, offerRemainingPayments: Int!, paymentPending: Boolean! }
+  type NextBillingPayment { planCode: String!, planName: String!, billingInterval: String!, billingMonths: Int!, dueOn: String!, periodStartsOn: String!, periodEndsOn: String!, baseAmountKes: Int!, amountKes: Int!, savingsKes: Int!, offerId: ID, offerLabel: String, offerPricePercent: Int, offerRemainingPayments: Int!, paymentPending: Boolean! }
   type BillingConfiguration { enforcementEnabled: Boolean!, vendorLegalName: String!, vendorKraPin: String!, vendorVatRegistered: Boolean!, vendorVatRate: Float!, billingAddress: String!, supportEmail: String!, supportPhone: String!, tillNumber: String!, paymentInstructions: String! }
   type BillingOverview { account: BillingAccount!, nextPayment: NextBillingPayment!, usage: BillingUsage!, payments: [BillingPayment!]!, documents: [BillingDocument!]!, audits: [BillingAudit!]!, configuration: BillingConfiguration!, availablePromotions: [BillingPromotion!]! }
   type PlatformBusinessSummary { tenantId: ID!, tenantName: String!, planCode: String!, planName: String!, subscriptionStatus: String!, monthlyPriceKes: Int!, activeUsers: Int!, activeStores: Int!, pendingPayments: Int!, pendingPaymentAmountKes: Int!, trialEndsOn: String, paidThrough: String, billingContactEmail: String!, createdAt: String!, updatedAt: String! }
@@ -691,7 +691,7 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
-    createBusiness(name: String!, planCode: String!, promotionId: ID, termsVersion: String!, privacyVersion: String!, vatRegistered: Boolean = false, kraPin: String = "", vatEffectiveFrom: String, withholdingVatAgent: Boolean = false): User!
+    createBusiness(name: String!, planCode: String!, billingInterval: String = "monthly", promotionId: ID, termsVersion: String!, privacyVersion: String!, vatRegistered: Boolean = false, kraPin: String = "", vatEffectiveFrom: String, withholdingVatAgent: Boolean = false): User!
     inviteUser(email: String!, firstName: String!, lastName: String!, roles: [String!]!, employeeCode: String = "", jobTitle: String = "", storeId: ID!, storeIds: [ID!] = [], phone: String = ""): User!
     resendUserInvitation(username: String!): User!
     updateUserRoles(username: String!, roles: [String!]!): User!
@@ -749,6 +749,7 @@ export const typeDefs = `#graphql
     voidSupplierPayment(invoiceId: ID!, paymentId: ID!, reason: String!, requestId: ID!): SupplierInvoice!
     submitBillingPayment(planCode: String, amountKes: Int, mpesaReference: String!, paidOn: String!): BillingPayment!
     scheduleBillingPlan(planCode: String!): BillingAccount!
+    scheduleBillingInterval(billingInterval: String!): BillingAccount!
     cancelBillingSubscription: BillingAccount!
     confirmBillingPayment(tenantId: ID!, paymentId: ID!): BillingPayment!
     rejectBillingPayment(tenantId: ID!, paymentId: ID!, reason: String!): BillingPayment!

@@ -127,7 +127,7 @@ import { accountingSummary } from "../repositories/accounting-repository";
 import { sendPurchaseOrderEmail } from "../services/purchase-order-email";
 import { sendBillingEmail } from "../services/billing-email";
 import { applyBillingPolicies, validatePlanChange } from "../domain/billing-policy";
-import { nextBillingPayment, PRIVACY_VERSION, TERMS_VERSION, validatePlanCode, type BillingOverride } from "../domain/billing";
+import { nextBillingPayment, PRIVACY_VERSION, TERMS_VERSION, validateBillingInterval, validatePlanCode, type BillingOverride } from "../domain/billing";
 import {
   attachEtimsReference,
   assignPlatformBillingPlan,
@@ -144,6 +144,7 @@ import {
   listPlatformBillingAccounts,
   rejectBillingPayment,
   requireBillingAccount,
+  scheduleBillingInterval,
   scheduleBillingPlan,
   setBillingOffer,
   setBillingOverride,
@@ -353,7 +354,8 @@ const billingOverview = async (tenantId: string) => {
   const [account, usage, payments, documents, audits] = await Promise.all([
     requireBillingAccount(tenantId), billingUsage(tenantId), listBillingPayments(tenantId), listBillingDocuments(tenantId), listBillingAudits(tenantId),
   ]);
-  const availablePromotions = account.offer?.remainingPayments ? [] : await listEligibleBillingPromotions("existing_accounts", account.pendingPlanCode ?? account.planCode);
+  const annual = (account.pendingBillingInterval ?? account.billingInterval ?? "monthly") === "annual";
+  const availablePromotions = account.offer?.remainingPayments || annual ? [] : await listEligibleBillingPromotions("existing_accounts", account.pendingPlanCode ?? account.planCode);
   return { account: billingAccountView(account), nextPayment: { ...nextBillingPayment(account), paymentPending: payments.some(({ status }) => status === "submitted") }, usage, payments, documents, audits, configuration: billingConfiguration(), availablePromotions };
 };
 
@@ -369,6 +371,14 @@ const sendPaymentReviewEmail = async (tenantId: string, approved: boolean, reaso
 };
 
 const baseResolvers = {
+  BillingPayment: {
+    billingInterval: (payment: { billingInterval?: string }) => payment.billingInterval ?? "monthly",
+    billingMonths: (payment: { billingMonths?: number }) => payment.billingMonths ?? 1,
+  },
+  BillingDocument: {
+    billingInterval: (document: { billingInterval?: string }) => document.billingInterval ?? "monthly",
+    billingMonths: (document: { billingMonths?: number }) => document.billingMonths ?? 1,
+  },
   BusinessSettings: {
     vatRegistered: (settings: { vatRegistered?: boolean }) => settings.vatRegistered ?? false,
     kraPin: (settings: { kraPin?: string }) => settings.kraPin ?? "",
@@ -583,10 +593,12 @@ const baseResolvers = {
   },
 
   Mutation: {
-    createBusiness: async (_: unknown, setup: { name: string; planCode: string; promotionId?: string | null; termsVersion: string; privacyVersion: string; vatRegistered: boolean; kraPin: string; vatEffectiveFrom?: string | null; withholdingVatAgent: boolean }, context: GraphQLContext) => {
+    createBusiness: async (_: unknown, setup: { name: string; planCode: string; billingInterval: string; promotionId?: string | null; termsVersion: string; privacyVersion: string; vatRegistered: boolean; kraPin: string; vatEffectiveFrom?: string | null; withholdingVatAgent: boolean }, context: GraphQLContext) => {
       const { name } = setup;
       const identity = requireIdentity(context);
       const planCode = validatePlanCode(setup.planCode);
+      const billingInterval = validateBillingInterval(setup.billingInterval);
+      if (billingInterval === "annual" && setup.promotionId) throw new Error("Promotional offers apply to monthly billing only");
       if (setup.termsVersion !== TERMS_VERSION || setup.privacyVersion !== PRIVACY_VERSION) throw new Error("Review and accept the current Terms and Privacy Policy");
       if (setup.vatRegistered && planCode === "biashara") throw new Error("VAT and accounting require Biashara Growth or Plus");
       if (identity.tenantId) {
@@ -596,14 +608,14 @@ const baseResolvers = {
           await upsertStaffProfile(identity.tenantId, identity.id, { employeeCode: "OWNER", jobTitle: "Owner", storeId: store.id, storeName: store.name, phone: "" });
         }
         const current = await ensureBusinessSettings(identity.tenantId, identity.tenantName ?? name, user.email);
-        if (!(await getBillingAccount(identity.tenantId))) await createBillingAccount({ tenantId: identity.tenantId, tenantName: identity.tenantName ?? name, ownerUserId: identity.id, ownerUsername: identity.username, planCode, termsVersion: setup.termsVersion, privacyVersion: setup.privacyVersion, acceptedBy: identity.id });
+        if (!(await getBillingAccount(identity.tenantId))) await createBillingAccount({ tenantId: identity.tenantId, tenantName: identity.tenantName ?? name, ownerUserId: identity.id, ownerUsername: identity.username, planCode, billingInterval, termsVersion: setup.termsVersion, privacyVersion: setup.privacyVersion, acceptedBy: identity.id });
         if (setup.promotionId) await applyBillingPromotion(identity.tenantId, setup.promotionId, "new_accounts", identity.id);
         if (setup.vatRegistered) await updateBusinessSettings(identity.tenantId, { ...current, vatRegistered: true, kraPin: setup.kraPin, vatEffectiveFrom: setup.vatEffectiveFrom ?? new Date().toISOString().slice(0, 10), withholdingVatAgent: setup.withholdingVatAgent }, { id: identity.id, name: identity.username });
         await syncPlatformBusinessMetrics(identity.tenantId);
         return mergeProfile(identity.tenantId, { ...user, roles: identity.roles });
       }
       const { membership } = await createTenant({ name, ownerUserId: identity.id, ownerUsername: identity.username });
-      await createBillingAccount({ tenantId: membership.tenantId, tenantName: name, ownerUserId: identity.id, ownerUsername: identity.username, planCode, termsVersion: setup.termsVersion, privacyVersion: setup.privacyVersion, acceptedBy: identity.id });
+      await createBillingAccount({ tenantId: membership.tenantId, tenantName: name, ownerUserId: identity.id, ownerUsername: identity.username, planCode, billingInterval, termsVersion: setup.termsVersion, privacyVersion: setup.privacyVersion, acceptedBy: identity.id });
       if (setup.promotionId) await applyBillingPromotion(membership.tenantId, setup.promotionId, "new_accounts", identity.id);
       const store = await ensureMainStore(membership.tenantId);
       await upsertStaffProfile(membership.tenantId, identity.id, { employeeCode: "OWNER", jobTitle: "Owner", storeId: store.id, storeName: store.name, phone: "" });
@@ -907,6 +919,12 @@ const baseResolvers = {
     scheduleBillingPlan: async (_: unknown, { planCode: value }: { planCode: string }, context: GraphQLContext) => {
       requireAdmin(context); const planCode = validatePlanCode(value); await validatePlanChange(tenant(context), planCode);
       return billingAccountView(await scheduleBillingPlan(tenant(context), planCode));
+    },
+    scheduleBillingInterval: async (_: unknown, { billingInterval: value }: { billingInterval: string }, context: GraphQLContext) => {
+      requireAdmin(context); const tenantId = tenant(context); const billingInterval = validateBillingInterval(value);
+      const result = billingAccountView(await scheduleBillingInterval(tenantId, billingInterval));
+      await syncPlatformBusinessMetrics(tenantId);
+      return result;
     },
     cancelBillingSubscription: async (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); const result = billingAccountView(await cancelBillingSubscription(tenantId)); await syncPlatformBusinessMetrics(tenantId); return result; },
     confirmBillingPayment: async (_: unknown, { tenantId, paymentId }: { tenantId: string; paymentId: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const submitted = await getBillingPayment(tenantId, paymentId); const current = await requireBillingAccount(tenantId); if (submitted && submitted.planCode !== current.planCode) await validatePlanChange(tenantId, submitted.planCode); const payment = await confirmBillingPayment(tenantId, paymentId, admin.id); await sendPaymentReviewEmail(tenantId, true).catch((error) => console.error(JSON.stringify({ event: "billing_confirmation_email_failed", tenantId, errorName: error instanceof Error ? error.name : "UnknownError" }))); await syncPlatformBusinessMetrics(tenantId, submitted?.status === "submitted" ? submitted.amountKes : 0); return payment; },
