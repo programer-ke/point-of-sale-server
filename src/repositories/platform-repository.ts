@@ -101,7 +101,9 @@ export const refreshPlatformBusinessSummary = async (tenantId: string) => {
   return summary;
 };
 
-export const listPlatformBusinessPage = async (input: { first?: number; after?: string | null; search?: string | null; planCode?: PlanCode | null; status?: string | null; billingConfigured?: boolean | null }) => {
+type PlatformBusinessPageInput = { first?: number; after?: string | null; search?: string | null; planCode?: PlanCode | null; status?: string | null; billingConfigured?: boolean | null };
+
+export const listPlatformBusinessPage = async (input: PlatformBusinessPageInput) => {
   const first = Math.min(Math.max(input.first ?? 25, 1), 100);
   const search = input.search?.trim() ?? "";
   if (/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(search)) {

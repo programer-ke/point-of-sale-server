@@ -82,8 +82,8 @@ guide](https://www.apollographql.com/docs/apollo-server/deployment/lambda).
 ## Subscription billing
 
 Billing belongs to the tenant workspace. Biashara provides one active store
-and five active users; Biashara Plus removes plan-level store/user caps and
-enables VAT/accounting and multi-store workflows. The API computes trial,
+and five active users, Growth provides three stores and ten users, and Plus
+provides ten stores and thirty users. The API computes trial,
 grace, paid, restricted, cancellation, and exemption status on each request,
 so the scheduled reminder worker is not an authorization dependency.
 
