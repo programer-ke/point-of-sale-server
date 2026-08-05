@@ -1,6 +1,7 @@
 import { GraphQLError } from "graphql";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { getTenantMembership } from "./repositories/tenant-repository";
+import type { ObservabilityContext } from "./observability";
 
 export type UserRole = "admin" | "staff" | "superadmin";
 
@@ -15,6 +16,7 @@ export interface AuthenticatedUser {
 
 export interface GraphQLContext {
   auth: AuthenticatedUser;
+  observability: ObservabilityContext;
 }
 
 let verifier: ReturnType<typeof CognitoJwtVerifier.create> | undefined;
@@ -94,13 +96,14 @@ export const forbiddenError = () =>
 export const contextFromAuthorization = async (
   authorization: string | undefined,
   requestedRole?: string,
+  observability: ObservabilityContext = {},
 ): Promise<GraphQLContext> => {
   const match = authorization?.match(/^Bearer\s+(.+)$/i);
   if (!match) throw unauthenticatedError();
 
   try {
     const claims = await configuredVerifier().verify(match[1]);
-    return { auth: await attachTenantMembership(authenticatedUserFromClaims(claims, requestedRole)) };
+    return { auth: await attachTenantMembership(authenticatedUserFromClaims(claims, requestedRole)), observability };
   } catch (error) {
     if (error instanceof GraphQLError) throw error;
     throw unauthenticatedError();
@@ -109,23 +112,29 @@ export const contextFromAuthorization = async (
 
 export const contextFromApiGatewayEvent = async (
   event: unknown,
+  invocation: ObservabilityContext = {},
 ): Promise<GraphQLContext> => {
   const request = event as {
     headers?: Record<string, string | undefined>;
     requestContext?: {
+      requestId?: string;
       authorizer?: { jwt?: { claims?: Record<string, unknown> } };
     };
+  };
+  const observability = {
+    requestId: request.requestContext?.requestId,
+    ...invocation,
   };
   const claims = request.requestContext?.authorizer?.jwt?.claims;
   const requestedRole = request.headers?.["x-biasharakit-role"]
     ?? request.headers?.["X-BiasharaKit-Role"];
   if (process.env.TRUST_API_GATEWAY_JWT_AUTHORIZER === "true" && claims) {
-    return { auth: await attachTenantMembership(authenticatedUserFromClaims(claims, requestedRole)) };
+    return { auth: await attachTenantMembership(authenticatedUserFromClaims(claims, requestedRole)), observability };
   }
 
   const authorization =
     request.headers?.authorization ?? request.headers?.Authorization;
-  return contextFromAuthorization(authorization, requestedRole);
+  return contextFromAuthorization(authorization, requestedRole, observability);
 };
 
 export const requireRole = (

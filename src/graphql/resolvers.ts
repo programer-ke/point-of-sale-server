@@ -67,6 +67,7 @@ import {
   type SaleRecord,
 } from "../repositories/pos-repository";
 import { nextTenantCode } from "../repositories/code-generator";
+import { logEvent, observeCriticalOperation } from "../observability";
 import { measurementUnit } from "../domain/measurements";
 import {
   createNotification,
@@ -214,6 +215,13 @@ const ensureMainStore = async (tenantId: string) => {
 const activeRole = (user: GraphQLContext["auth"]) =>
   (user.activeRole === "admin" ? "admin" : "staff") as "admin" | "staff";
 
+const operationContext = (context: GraphQLContext, idempotencyKey?: string, tenantId = context.auth.tenantId) => ({
+  ...context.observability,
+  idempotencyKey,
+  tenantId,
+  userId: context.auth.id,
+});
+
 const mpesaCapabilities = async (context: GraphQLContext) => {
   const account = await getBillingAccount(tenant(context));
   if (!account) return { eligible: true, storeOverridesAllowed: true };
@@ -236,11 +244,10 @@ const parseRoles = (roles: string[]): UserRole[] => {
 };
 
 const logNotificationFailure = (event: string, error: unknown) => {
-  console.error(JSON.stringify({
-    event: "notification_creation_failed",
+  logEvent("error", "notification_creation_failed", {
     notificationEvent: event,
     errorName: error instanceof Error ? error.name : "UnknownError",
-  }));
+  });
 };
 
 export const notifyAdminsOfRequisition = async (
@@ -288,7 +295,7 @@ const deliverPurchaseOrder = async (tenantId: string, id: string) => {
   try {
     return await recordPurchaseOrderEmailResult(tenantId, order.id, result);
   } catch (error) {
-    console.error(JSON.stringify({ event: "purchase_order_email_result_persist_failed", orderId: order.id, errorName: error instanceof Error ? error.name : "UnknownError" }));
+    logEvent("error", "purchase_order_email_result_persist_failed", { entityId: order.id, errorName: error instanceof Error ? error.name : "UnknownError" });
     return { ...order, ...result };
   }
 };
@@ -894,10 +901,10 @@ const baseResolvers = {
     regenerateMpesaCallbackToken: async (_: unknown, { scope, storeId }: { scope: "business" | "store"; storeId?: string | null }, context: GraphQLContext) => { requireAdmin(context); const capabilities = await mpesaCapabilities(context); if (!capabilities.eligible || (scope === "store" && !capabilities.storeOverridesAllowed)) throw new Error("This M-Pesa configuration is not available on the current plan"); return regenerateMpesaCallbackToken(tenant(context), scope, storeId); },
     initiateMpesaStk: async (_: unknown, input: { storeId: string; phone: string; customerName?: string | null; items: MpesaSaleInput["items"]; requestId: string }, context: GraphQLContext) => {
       const capabilities = await mpesaCapabilities(context); if (!capabilities.eligible) throw new Error("STK Push requires Biashara Growth or Plus"); const identity = await checkoutIdentity(context, input.storeId);
-      return initiateMpesaStk(identity.tenantId, capabilities.storeOverridesAllowed, { ...input, storeId: identity.store.id }, identity.actor);
+      return observeCriticalOperation("mpesa_stk_initiation", operationContext(context, input.requestId, identity.tenantId), () => initiateMpesaStk(identity.tenantId, capabilities.storeOverridesAllowed, { ...input, storeId: identity.store.id }, identity.actor));
     },
     refreshMpesaStkStatus: async (_: unknown, { intentId }: { intentId: string }, context: GraphQLContext) => { requireStaff(context); return refreshMpesaStk(tenant(context), intentId); },
-    attachMpesaPayment: async (_: unknown, input: { storeId: string; receiptNumber: string; customerName?: string | null; items: MpesaSaleInput["items"]; requestId: string }, context: GraphQLContext) => { const [identity, capabilities] = await Promise.all([checkoutIdentity(context, input.storeId), mpesaCapabilities(context)]); if (!capabilities.eligible) throw new Error("Verified M-Pesa requires Biashara Growth or Plus"); return attachMpesaPayment(identity.tenantId, capabilities.storeOverridesAllowed, input.receiptNumber, { storeId: identity.store.id, customerName: input.customerName, items: input.items, requestId: input.requestId }, identity.actor); },
+    attachMpesaPayment: async (_: unknown, input: { storeId: string; receiptNumber: string; customerName?: string | null; items: MpesaSaleInput["items"]; requestId: string }, context: GraphQLContext) => { const [identity, capabilities] = await Promise.all([checkoutIdentity(context, input.storeId), mpesaCapabilities(context)]); if (!capabilities.eligible) throw new Error("Verified M-Pesa requires Biashara Growth or Plus"); return observeCriticalOperation("mpesa_sale_finalization", operationContext(context, input.requestId, identity.tenantId), () => attachMpesaPayment(identity.tenantId, capabilities.storeOverridesAllowed, input.receiptNumber, { storeId: identity.store.id, customerName: input.customerName, items: input.items, requestId: input.requestId }, identity.actor)); },
     resolveMpesaPayment: (_: unknown, { receiptNumber, resolution, reason }: { receiptNumber: string; resolution: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return resolveMpesaPayment(tenant(context), receiptNumber, resolution, reason); },
     completeSale: async (
       _: unknown,
@@ -914,7 +921,7 @@ const baseResolvers = {
     ) => {
       if (!(args.paymentMethod === "cash" || args.paymentMethod === "mpesa")) throw new Error("Payment method must be cash or M-Pesa");
       const identity = await checkoutIdentity(context, args.storeId);
-      return completeSale(identity.tenantId, { ...args, storeId: identity.store.id }, identity.actor);
+      return observeCriticalOperation("sale_completion", operationContext(context, args.requestId, identity.tenantId), () => completeSale(identity.tenantId, { ...args, storeId: identity.store.id }, identity.actor));
     },
     createStore: async (_: unknown, input: Parameters<typeof createStore>[1], context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); const result = await createStore(tenantId, input, actor(context)); await refreshPlatformBusinessSummary(tenantId); return result; },
     updateStore: async (_: unknown, { id, ...input }: { id: string } & Parameters<typeof updateStore>[2], context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); if (input.status === "inactive") { const memberships = await listTenantMemberships(tenantId); const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId)); if ([...profiles.values()].some((profile) => profile.storeIds?.includes(id) || profile.storeId === id)) throw new Error("Reassign staff before deactivating this store"); } const result = await updateStore(tenantId, id, input); await refreshPlatformBusinessSummary(tenantId); return result; },
@@ -933,7 +940,7 @@ const baseResolvers = {
       try {
         return await deliverPurchaseOrder(tenantId, id);
       } catch (error) {
-        console.error(JSON.stringify({ event: "purchase_order_email_attempt_failed", orderId: id, errorName: error instanceof Error ? error.name : "UnknownError" }));
+        logEvent("error", "purchase_order_email_attempt_failed", { entityId: id, errorName: error instanceof Error ? error.name : "UnknownError" });
         return {
           ...issued,
           emailStatus: "failed",
@@ -948,7 +955,7 @@ const baseResolvers = {
     },
     closePurchaseOrder: (_: unknown, { id, reason }: { id: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return setPurchaseOrderStatus(tenant(context), id, "close", reason); },
     cancelPurchaseOrder: (_: unknown, { id, reason }: { id: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return setPurchaseOrderStatus(tenant(context), id, "cancel", reason); },
-    receivePurchaseOrder: (_: unknown, { purchaseOrderId, deliveryNote, invoiceNumber, invoiceDate, paymentTermsDays, lines, requestId }: { purchaseOrderId: string; deliveryNote: string; invoiceNumber: string; invoiceDate?: string | null; paymentTermsDays?: number | null; lines: ReceiptLineInput[]; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return receivePurchaseOrder(tenant(context), purchaseOrderId, deliveryNote, invoiceNumber, lines, actor(context), requestId, invoiceDate, paymentTermsDays); },
+    receivePurchaseOrder: (_: unknown, { purchaseOrderId, deliveryNote, invoiceNumber, invoiceDate, paymentTermsDays, lines, requestId }: { purchaseOrderId: string; deliveryNote: string; invoiceNumber: string; invoiceDate?: string | null; paymentTermsDays?: number | null; lines: ReceiptLineInput[]; requestId: string }, context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); const work = () => receivePurchaseOrder(tenantId, purchaseOrderId, deliveryNote, invoiceNumber, lines, actor(context), requestId, invoiceDate, paymentTermsDays); return invoiceNumber.trim() ? observeCriticalOperation("supplier_invoice_creation", operationContext(context, requestId, tenantId), work) : work(); },
     writeOffLot: (_: unknown, { lotId, quantity, type, reason, requestId }: { lotId: string; quantity: number; type: "damage" | "expiry"; reason: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); if (!(type === "damage" || type === "expiry")) throw new Error("Write-off type must be damage or expiry"); return writeOffLot(tenant(context), lotId, quantity, type, reason, actor(context), requestId); },
     countInventoryLot: (_: unknown, { lotId, physicalQuantity, reason, requestId }: { lotId: string; physicalQuantity: number; reason: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return countLot(tenant(context), lotId, physicalQuantity, reason, actor(context), requestId); },
     createStockTransfer: (_: unknown, input: { fromStoreId: string; toStoreId: string; notes: string; lines: Array<{ productId: string; quantity: number }>; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createTransfer(tenant(context), input, actor(context), input.requestId); },
@@ -986,14 +993,14 @@ const baseResolvers = {
       const user = requireStaff(context);
       return markAllNotificationsRead(tenant(context), user.id);
     },
-    createSupplierInvoice: (_: unknown, { receiptId, invoiceNumber, invoiceDate, paymentTermsDays, requestId }: { receiptId: string; invoiceNumber: string; invoiceDate?: string | null; paymentTermsDays?: number | null; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return createSupplierInvoiceForReceipt(tenant(context), receiptId, { invoiceNumber, invoiceDate, paymentTermsDays }, actor(context), requestId); },
+    createSupplierInvoice: (_: unknown, { receiptId, invoiceNumber, invoiceDate, paymentTermsDays, requestId }: { receiptId: string; invoiceNumber: string; invoiceDate?: string | null; paymentTermsDays?: number | null; requestId: string }, context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); return observeCriticalOperation("supplier_invoice_creation", operationContext(context, requestId, tenantId), () => createSupplierInvoiceForReceipt(tenantId, receiptId, { invoiceNumber, invoiceDate, paymentTermsDays }, actor(context), requestId)); },
     recordSupplierPayment: (_: unknown, { invoiceId, amount, method, reference, paidAt, requestId }: { invoiceId: string; amount: number; method: "cash" | "bank_transfer" | "mobile_money" | "cheque" | "other"; reference?: string; paidAt: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return recordSupplierPayment(tenant(context), invoiceId, { amount, method, reference, paidAt }, actor(context), requestId); },
     voidSupplierPayment: (_: unknown, { invoiceId, paymentId, reason, requestId }: { invoiceId: string; paymentId: string; reason: string; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return voidSupplierPayment(tenant(context), invoiceId, paymentId, reason, actor(context), requestId); },
     submitBillingPayment: async (_: unknown, input: { mpesaReference: string; paidOn: string }, context: GraphQLContext) => {
       const admin = requireAdmin(context); const account = await requireBillingAccount(tenant(context));
-      const payment = await submitBillingPayment(account, { ...input, submittedBy: admin.id });
+      const payment = await observeCriticalOperation("billing_invoice_creation", operationContext(context, undefined, account.tenantId), () => submitBillingPayment(account, { ...input, submittedBy: admin.id }));
       const supportEmail = process.env.BILLING_SUPPORT_EMAIL;
-      if (supportEmail) await sendBillingEmail({ to: supportEmail, subject: `Payment review: ${account.tenantName}`, heading: "New M-Pesa payment submission", message: `${account.tenantName} submitted ${payment.mpesaReference} for KES ${payment.amountKes.toLocaleString("en-KE")}. Review it in Platform Billing.` }).catch((error) => console.error(JSON.stringify({ event: "billing_review_email_failed", tenantId: account.tenantId, errorName: error instanceof Error ? error.name : "UnknownError" })));
+      if (supportEmail) await sendBillingEmail({ to: supportEmail, subject: `Payment review: ${account.tenantName}`, heading: "New M-Pesa payment submission", message: `${account.tenantName} submitted ${payment.mpesaReference} for KES ${payment.amountKes.toLocaleString("en-KE")}. Review it in Platform Billing.` }).catch((error) => logEvent("error", "billing_review_email_failed", { tenantId: account.tenantId, errorName: error instanceof Error ? error.name : "UnknownError" }));
       await syncPlatformBusinessMetrics(account.tenantId);
       return payment;
     },
@@ -1008,8 +1015,8 @@ const baseResolvers = {
       return result;
     },
     cancelBillingSubscription: async (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); const result = billingAccountView(await cancelBillingSubscription(tenantId)); await syncPlatformBusinessMetrics(tenantId); return result; },
-    confirmBillingPayment: async (_: unknown, { tenantId, paymentId }: { tenantId: string; paymentId: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const submitted = await getBillingPayment(tenantId, paymentId); const current = await requireBillingAccount(tenantId); if (submitted && submitted.planCode !== current.planCode) await validatePlanChange(tenantId, submitted.planCode); const payment = await confirmBillingPayment(tenantId, paymentId, admin.id); await sendPaymentReviewEmail(tenantId, true).catch((error) => console.error(JSON.stringify({ event: "billing_confirmation_email_failed", tenantId, errorName: error instanceof Error ? error.name : "UnknownError" }))); await syncPlatformBusinessMetrics(tenantId, submitted?.status === "submitted" ? submitted.amountKes : 0); return payment; },
-    rejectBillingPayment: async (_: unknown, { tenantId, paymentId, reason }: { tenantId: string; paymentId: string; reason: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const payment = await rejectBillingPayment(tenantId, paymentId, admin.id, reason); await sendPaymentReviewEmail(tenantId, false, reason).catch((error) => console.error(JSON.stringify({ event: "billing_rejection_email_failed", tenantId, errorName: error instanceof Error ? error.name : "UnknownError" }))); await syncPlatformBusinessMetrics(tenantId); return payment; },
+    confirmBillingPayment: async (_: unknown, { tenantId, paymentId }: { tenantId: string; paymentId: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const submitted = await getBillingPayment(tenantId, paymentId); const current = await requireBillingAccount(tenantId); if (submitted && submitted.planCode !== current.planCode) await validatePlanChange(tenantId, submitted.planCode); const payment = await observeCriticalOperation("billing_receipt_creation", operationContext(context, undefined, tenantId), () => confirmBillingPayment(tenantId, paymentId, admin.id)); await sendPaymentReviewEmail(tenantId, true).catch((error) => logEvent("error", "billing_confirmation_email_failed", { tenantId, errorName: error instanceof Error ? error.name : "UnknownError" })); await syncPlatformBusinessMetrics(tenantId, submitted?.status === "submitted" ? submitted.amountKes : 0); return payment; },
+    rejectBillingPayment: async (_: unknown, { tenantId, paymentId, reason }: { tenantId: string; paymentId: string; reason: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const payment = await rejectBillingPayment(tenantId, paymentId, admin.id, reason); await sendPaymentReviewEmail(tenantId, false, reason).catch((error) => logEvent("error", "billing_rejection_email_failed", { tenantId, errorName: error instanceof Error ? error.name : "UnknownError" })); await syncPlatformBusinessMetrics(tenantId); return payment; },
     assignPlatformBillingPlan: async (_: unknown, { tenantId, planCode: value, reason }: { tenantId: string; planCode: string; reason: string }, context: GraphQLContext) => {
       const admin = requirePlatformAdmin(context);
       const planCode = validatePlanCode(value);

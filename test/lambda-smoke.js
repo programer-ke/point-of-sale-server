@@ -75,6 +75,7 @@ async function main() {
     body: undefined,
   }, {}, () => {});
   assert.equal(preflight.statusCode, 204);
+  assert.equal(preflight.headers["x-request-id"], "test");
 
   const publicPromotions = await handler({
     ...event,
@@ -90,6 +91,7 @@ async function main() {
     body: undefined,
   }, {}, () => {});
   assert.equal(publicPromotions.statusCode, 200, "signup promotion reads must not require Cognito");
+  assert.equal(publicPromotions.headers["x-request-id"], "test");
   assert.deepEqual(JSON.parse(publicPromotions.body), []);
 
   const callbackToken = "A".repeat(48);
@@ -106,14 +108,21 @@ async function main() {
     body: JSON.stringify({ TransID: "TEST123456" }),
   }, {}, () => {});
   assert.equal(mpesaCallback.statusCode, 200, "only the explicit high-entropy M-Pesa callback route may bypass Cognito");
+  assert.equal(mpesaCallback.headers["x-request-id"], "test");
   assert.deepEqual(JSON.parse(mpesaCallback.body), { ResultCode: 0, ResultDesc: "Received" });
 
   const result = await handler(event, {}, () => {});
 
   assert.equal(result.statusCode, 200);
+  assert.equal(result.headers["x-request-id"], "test");
   assert.deepEqual(JSON.parse(result.body), {
     data: { __typename: "Query" },
   });
+
+  const invalid = await handler({ ...event, body: JSON.stringify({ query: "query Broken { missingField }" }) }, { awsRequestId: "lambda-test" }, () => {});
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(invalid.headers["x-request-id"], "test");
+  assert.equal(JSON.parse(invalid.body).errors[0].extensions.requestId, "test");
 }
 
 main().catch((error) => {

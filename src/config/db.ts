@@ -4,6 +4,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import dotenv from "dotenv";
+import { logEvent } from "../observability";
 
 dotenv.config({ quiet: true });
 
@@ -30,16 +31,12 @@ export const verifyAwsConnection = async () => {
       new DescribeTableCommand({ TableName: TABLE_NAME }),
     );
 
-    console.log(
-      `AWS DynamoDB connected: table "${TABLE_NAME}" is ${result.Table?.TableStatus} in ${region}`,
-    );
+    logEvent("info", "dynamodb_connection_ready", { resource: TABLE_NAME, region, kind: result.Table?.TableStatus });
 
     return true;
   } catch (error: any) {
     if (error.name === "ResourceNotFoundException") {
-      console.warn(
-        `AWS credentials worked, but DynamoDB table "${TABLE_NAME}" was not found in ${region}`,
-      );
+      logEvent("warn", "dynamodb_table_not_found", { resource: TABLE_NAME, region, errorName: error.name });
       return false;
     }
 
@@ -48,20 +45,16 @@ export const verifyAwsConnection = async () => {
       error.name === "InvalidSignatureException" ||
       error.name === "CredentialsProviderError"
     ) {
-      console.error(
-        "AWS credentials are invalid or missing. Check the configured AWS credential provider.",
-      );
+      logEvent("error", "dynamodb_credentials_invalid", { resource: TABLE_NAME, region, errorName: error.name });
       return false;
     }
 
     if (error.name === "AccessDeniedException") {
-      console.error(
-        `AWS credentials were accepted, but they do not have permission to describe DynamoDB table "${TABLE_NAME}"`,
-      );
+      logEvent("error", "dynamodb_access_denied", { resource: TABLE_NAME, region, errorName: error.name });
       return false;
     }
 
-    console.error("AWS DynamoDB connection check failed:", error);
+    logEvent("error", "dynamodb_connection_failed", { resource: TABLE_NAME, region, errorName: error instanceof Error ? error.name : "UnknownError" });
     return false;
   }
 };

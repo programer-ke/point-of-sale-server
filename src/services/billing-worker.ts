@@ -7,6 +7,7 @@ import { createNotification } from "../repositories/notification-repository";
 import { getCognitoUser } from "./cognito";
 import { sendBillingEmail } from "./billing-email";
 import { refreshPlatformBusinessSummary, refreshPlatformMetrics } from "../repositories/platform-repository";
+import { logOperationFailure } from "../observability";
 
 const reminderFor = (endOn: string, today: string, status: string, graceDays: number) => {
   const dueOn = addBillingDays(endOn, 1);
@@ -22,6 +23,7 @@ export const processBillingReminders = async (today = kenyaDate()) => {
   const accounts = await listPlatformBillingAccounts();
   await Promise.all(accounts.map((account) => refreshPlatformBusinessSummary(account.tenantId)));
   let sent = 0;
+  let failed = 0;
   for (const account of accounts) {
     const payments = await listBillingPayments(account.tenantId);
     if (payments.some((payment) => payment.status === "submitted")) continue;
@@ -47,9 +49,15 @@ export const processBillingReminders = async (today = kenyaDate()) => {
       sent += 1;
     } catch (error) {
       await dynamoDB.send(new DeleteCommand({ TableName: TABLE_NAME, Key: markerKey })).catch(() => undefined);
-      console.error(JSON.stringify({ event: "billing_reminder_failed", tenantId: account.tenantId, reminder: reminder.key, errorName: error instanceof Error ? error.name : "UnknownError" }));
+      logOperationFailure("billing_reminder_delivery", error, { tenantId: account.tenantId, kind: reminder.key });
+      failed += 1;
     }
   }
   await refreshPlatformMetrics();
+  if (failed > 0) {
+    const error = new Error(`${failed} billing reminder delivery attempt${failed === 1 ? "" : "s"} failed`);
+    error.name = "BillingReminderDeliveryError";
+    throw error;
+  }
   return { checked: accounts.length, sent };
 };

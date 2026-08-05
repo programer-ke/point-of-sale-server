@@ -6,6 +6,7 @@ import {
 import { createHash } from "node:crypto";
 import type { BusinessSettingsRecord } from "../repositories/pos-repository";
 import type { PurchaseOrderRecord, SupplierRecord } from "../repositories/supply-chain-repository";
+import { logEvent } from "../observability";
 
 export type PurchaseOrderEmailStatus = "sent" | "not_configured" | "suppressed" | "failed";
 export interface PurchaseOrderEmailResult {
@@ -101,7 +102,7 @@ export const sendPurchaseOrderEmail = async (
   } catch (error) {
     if (!(error instanceof Error) || error.name !== "NotFoundException") {
       const result = { emailStatus: "failed" as const, emailRecipient: recipient, emailMessageId: null, emailAttemptedAt, emailError: safeError(error) };
-      console.error(JSON.stringify({ event: "purchase_order_email_suppression_check_failed", orderId: order.id, recipientRef, errorName: error instanceof Error ? error.name : "UnknownError" }));
+      logEvent("error", "purchase_order_email_suppression_check_failed", { entityId: order.id, recipientRef, errorName: error instanceof Error ? error.name : "UnknownError" });
       return result;
     }
   }
@@ -120,10 +121,10 @@ export const sendPurchaseOrderEmail = async (
         },
       } },
     }));
-    console.info(JSON.stringify({ event: "purchase_order_email_accepted", orderId: order.id, recipientRef, messageId: response.MessageId }));
+    logEvent("info", "purchase_order_email_accepted", { entityId: order.id, recipientRef, providerMessageId: response.MessageId });
     return { emailStatus: "sent", emailRecipient: recipient, emailMessageId: response.MessageId ?? null, emailAttemptedAt, emailError: null };
   } catch (error) {
-    console.error(JSON.stringify({ event: "purchase_order_email_failed", orderId: order.id, recipientRef, errorName: error instanceof Error ? error.name : "UnknownError" }));
+    logEvent("error", "purchase_order_email_failed", { entityId: order.id, recipientRef, errorName: error instanceof Error ? error.name : "UnknownError" });
     return { emailStatus: "failed", emailRecipient: recipient, emailMessageId: null, emailAttemptedAt, emailError: safeError(error) };
   }
 };

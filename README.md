@@ -60,6 +60,7 @@ integration. Terraform configures the deployed handler as
 - `COGNITO_USER_POOL_CLIENT_ID`
 - `TRUST_API_GATEWAY_JWT_AUTHORIZER=true`
 - `NODE_ENV=production`
+- `SERVICE_NAME` (stable API or billing-worker name included in JSON logs)
 - `SES_FROM_EMAIL=BiasharaKit Orders <orders@biasharakit.com>`
 - `SES_REPLY_TO_EMAIL=support@biasharakit.com`
 - `MPESA_KMS_KEY_ID` (the dedicated rotating KMS key ARN)
@@ -83,6 +84,17 @@ cross-business API access.
 
 See Apollo's [AWS Lambda deployment
 guide](https://www.apollographql.com/docs/apollo-server/deployment/lambda).
+
+## Observability
+
+API Gateway and both Lambdas retain logs for 14 days. The API emits one
+structured lifecycle record per GraphQL request and focused outcome records for
+sales, M-Pesa finalization, subscription documents, supplier invoices, and the
+billing worker. Responses expose `x-request-id`, and GraphQL errors repeat it in
+`extensions.requestId`, so an operator can correlate a report without logging
+the request body or sensitive payment/customer fields. Durable DynamoDB sales,
+billing records, and audits remain the business audit trail; CloudWatch logs are
+diagnostic only.
 
 ## Subscription billing
 
