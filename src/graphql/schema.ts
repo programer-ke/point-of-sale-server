@@ -113,6 +113,11 @@ export const typeDefs = `#graphql
     amountTendered: Float
     changeDue: Float
     paymentReference: String
+    paymentEvidence: String
+    paymentAmountKes: Float
+    paymentRoundingAdjustment: Float
+    mpesaPaymentId: ID
+    payerPhoneLast4: String
     cashShiftId: ID
     createdBy: String!
     createdByName: String!
@@ -203,8 +208,19 @@ export const typeDefs = `#graphql
     requireCustomerName: Boolean!
     allowStaffPriceOverrides: Boolean!
     maxStaffPriceDiscountPercent: Float!
+    mpesaConfirmationMode: String!
     updatedAt: String!
   }
+
+  type MpesaCallbackUrls { stk: String!, validation: String!, confirmation: String! }
+  type MpesaConfiguration {
+    id: ID!, scope: String!, storeId: ID, environment: String!, shortcode: String!, transactionType: String!, stkEnabled: Boolean!, c2bEnabled: Boolean!, enabled: Boolean!,
+    credentialsSaved: Boolean!, passkeySaved: Boolean!, consumerKeyLast4: String!, connectionStatus: String!, connectionTestedAt: String, connectionMessage: String!,
+    c2bRegistrationStatus: String!, c2bRegistrationAttemptedAt: String, c2bRegistrationMessage: String!, providerRequestId: String, providerResponseCode: String, callbackUrls: MpesaCallbackUrls!, createdAt: String!, updatedAt: String!
+  }
+  type EffectiveMpesaConfiguration { eligible: Boolean!, storeOverridesAllowed: Boolean!, configuration: MpesaConfiguration }
+  type MpesaCheckoutIntent { id: ID!, storeId: ID!, saleTotal: Float!, amountKes: Float!, phoneLast4: String!, status: String!, checkoutRequestId: String, merchantRequestId: String, resultCode: String, resultDescription: String, paymentId: ID, saleId: ID, orderNumber: String, createdAt: String!, updatedAt: String! }
+  type MpesaPayment { id: ID!, configurationId: ID!, scope: String!, storeId: ID, environment: String!, shortcode: String!, receiptNumber: String!, amountKes: Float!, transactionAt: String!, receivedAt: String!, phoneLast4: String, evidenceSources: [String!]!, status: String!, conflictReasons: [String!]!, saleId: ID, orderNumber: String, resolution: String, resolutionReason: String, resolvedAt: String, updatedAt: String! }
 
   type Business {
     id: ID!
@@ -693,6 +709,11 @@ export const typeDefs = `#graphql
     platformBillingConfiguration: BillingConfiguration!
     platformBillingAccount(tenantId: ID!): BillingOverview!
     subscriptionAccess: SubscriptionAccess!
+    mpesaConfiguration(scope: String!, storeId: ID): MpesaConfiguration
+    effectiveMpesaConfiguration(storeId: ID!): EffectiveMpesaConfiguration!
+    mpesaCheckoutIntent(id: ID!): MpesaCheckoutIntent
+    recentUnassignedMpesaPayments(storeId: ID!, amountKes: Float): [MpesaPayment!]!
+    mpesaPayments(limit: Int = 100): [MpesaPayment!]!
   }
 
   type Mutation {
@@ -708,7 +729,7 @@ export const typeDefs = `#graphql
     updateBusinessSettings(businessName: String!, address: String!, phone: String = "", email: String = "", thankYouMessage: String!, returnPolicy: String!, vatRegistered: Boolean, kraPin: String, vatEffectiveFrom: String, withholdingVatAgent: Boolean): BusinessSettings!
     updateBusinessDetails(businessName: String!, address: String!, phone: String = "", email: String = "", vatRegistered: Boolean!, kraPin: String = "", vatEffectiveFrom: String, withholdingVatAgent: Boolean = false): BusinessSettings!
     updateBusinessReceiptSettings(thankYouMessage: String!, returnPolicy: String!): BusinessSettings!
-    updateBusinessCheckoutSettings(enabledPaymentMethods: [String!]!, defaultPaymentMethod: String!, requireCustomerName: Boolean!, allowStaffPriceOverrides: Boolean!, maxStaffPriceDiscountPercent: Float!): BusinessCheckoutSettings!
+    updateBusinessCheckoutSettings(enabledPaymentMethods: [String!]!, defaultPaymentMethod: String!, requireCustomerName: Boolean!, allowStaffPriceOverrides: Boolean!, maxStaffPriceDiscountPercent: Float!, mpesaConfirmationMode: String = "manual_or_verified"): BusinessCheckoutSettings!
     updateBusinessMeasurementSettings(packageLabels: [PackageUnitLabelInput!]!): BusinessMeasurementSettings!
 
     createCategory(code: String = "", name: String!, description: String = "", parentId: ID): Category!
@@ -720,6 +741,15 @@ export const typeDefs = `#graphql
     cancelProductPriceAdjustment(productId: ID!, reason: String!, requestId: ID!): Product!
     archiveProduct(id: ID!): Product!
     completeSale(storeId: ID, customerName: String, paymentMethod: String!, amountTendered: Float, mpesaReference: String, items: [SaleItemInput!]!, requestId: ID!): Sale!
+    saveMpesaConfiguration(scope: String!, storeId: ID, environment: String!, shortcode: String!, transactionType: String!, stkEnabled: Boolean!, c2bEnabled: Boolean!, consumerKey: String!, consumerSecret: String!, passkey: String): MpesaConfiguration!
+    testMpesaConfiguration(scope: String!, storeId: ID): MpesaConfiguration!
+    registerMpesaCallbacks(scope: String!, storeId: ID): MpesaConfiguration!
+    disableMpesaConfiguration(scope: String!, storeId: ID): MpesaConfiguration!
+    regenerateMpesaCallbackToken(scope: String!, storeId: ID): MpesaConfiguration!
+    initiateMpesaStk(storeId: ID!, phone: String!, customerName: String, items: [SaleItemInput!]!, requestId: ID!): MpesaCheckoutIntent!
+    refreshMpesaStkStatus(intentId: ID!): MpesaCheckoutIntent!
+    attachMpesaPayment(storeId: ID!, receiptNumber: String!, customerName: String, items: [SaleItemInput!]!, requestId: ID!): Sale!
+    resolveMpesaPayment(receiptNumber: String!, resolution: String!, reason: String!): MpesaPayment!
     createStore(code: String = "", name: String!, address: String = "", receiptBusinessName: String = "", receiptAddress: String = "", receiptPhone: String = "", receiptEmail: String = "", receiptFooter: String = "", receiptReturnPolicy: String = ""): Store!
     updateStore(id: ID!, name: String, address: String, receiptBusinessName: String, receiptAddress: String, receiptPhone: String, receiptEmail: String, receiptFooter: String, receiptReturnPolicy: String, status: String): Store!
     createSupplier(code: String = "", name: String!, contactName: String = "", phone: String = "", email: String = "", address: String = "", vatRegistered: Boolean = false, defaultPaymentTermsDays: Int = 0): Supplier!

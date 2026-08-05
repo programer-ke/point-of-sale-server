@@ -62,11 +62,14 @@ integration. Terraform configures the deployed handler as
 - `NODE_ENV=production`
 - `SES_FROM_EMAIL=BiasharaKit Orders <orders@biasharakit.com>`
 - `SES_REPLY_TO_EMAIL=support@biasharakit.com`
+- `MPESA_KMS_KEY_ID` (the dedicated rotating KMS key ARN)
+- `MPESA_CALLBACK_BASE_URL` (the public API origin used to generate callbacks)
 - AWS-generated region and temporary execution-role credentials
 
-No application secret is currently required. GitHub Actions assumes only the
-deployment role through OIDC; the running function uses its separate,
-least-privilege Lambda execution role.
+Daraja credentials are entered per business configuration, encrypted with KMS
+using a configuration-specific encryption context, and stored only as
+ciphertext. GitHub Actions assumes only the deployment role through OIDC; the
+running function uses its separate, least-privilege Lambda execution role.
 
 API Gateway validates Cognito access tokens before Lambda invocation. The
 server also builds an authenticated GraphQL context from the signed authorizer
@@ -96,6 +99,25 @@ vendor identity, contact, Till, payment instructions, and enforcement settings
 come from Terraform environment variables. See `docs/CHANGELOG.md` for the
 one-time rollout migration rather than enabling billing against missing tenant
 records.
+
+## Safaricom Daraja M-Pesa
+
+Biashara records M-Pesa manually. Growth can configure one business-wide Till
+or Paybill shared by its stores. Plus may additionally replace the business
+fallback with a complete independent configuration per store. Saving encrypts
+the submitted consumer key, consumer secret, and optional passkey before an
+OAuth test; when C2B is enabled, the server then attempts `Register URL` with
+`ResponseType=Completed`. Authentication and callback-registration outcomes
+remain separate and safe to retry.
+
+The only unauthenticated application routes are the existing browser preflight,
+public promotion read, and `POST /public/mpesa/callback/{token}/{kind}` where
+`kind` is `stk`, `validation`, or `confirmation`. The high-entropy token and
+configured shortcode resolve ownership; callback bodies never supply tenant or
+store scope. Unknown callback fields, payer names, and raw bodies are not
+stored. Test OAuth, C2B registration, STK Push, STK Query, callback ordering,
+Growth shared pools, and Plus overrides in the Daraja sandbox before switching
+a configuration to production.
 
 ## Data model
 

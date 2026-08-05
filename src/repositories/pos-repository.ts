@@ -103,6 +103,11 @@ export interface SaleRecord {
   amountTendered?: number | null;
   changeDue?: number | null;
   paymentReference?: string | null;
+  paymentEvidence?: "manual" | "stk" | "c2b" | "stk_c2b" | null;
+  paymentAmountKes?: number | null;
+  paymentRoundingAdjustment?: number | null;
+  mpesaPaymentId?: string | null;
+  payerPhoneLast4?: string | null;
   cashShiftId?: string | null;
   createdBy: string;
   createdByName: string;
@@ -183,6 +188,7 @@ export interface BusinessCheckoutSettingsRecord {
   requireCustomerName: boolean;
   allowStaffPriceOverrides: boolean;
   maxStaffPriceDiscountPercent: number;
+  mpesaConfirmationMode: "manual_or_verified" | "verified_only";
   updatedAt: string;
 }
 
@@ -252,6 +258,7 @@ const lookupKey = (tenantId: string, kind: "SKU" | "BARCODE" | "CATEGORY", value
 });
 const profileKey = (tenantId: string, userId: string) => ({ partitionKey: tenantKey(tenantId, `USER#${userId}`), sortKey: "PROFILE" });
 const mpesaPaymentKey = (tenantId: string, reference: string) => ({ partitionKey: tenantKey(tenantId, `PAYMENT#MPESA#${reference}`), sortKey: "SALE" });
+const mpesaReceiptClaimKey = (reference: string) => ({ partitionKey: `MPESA_RECEIPT_CLAIM#${reference}`, sortKey: "CLAIM" });
 const cashShiftKey = (tenantId: string, id: string) => ({ partitionKey: tenantKey(tenantId, `CASH_SHIFT#${id}`), sortKey: "PROFILE" });
 const openCashShiftKey = (tenantId: string, storeId: string, cashierId: string) => ({ partitionKey: tenantKey(tenantId, `CASH_SHIFT_OPEN#${storeId}#${cashierId}`), sortKey: "PROFILE" });
 const businessSettingsKey = (tenantId: string) => ({ partitionKey: tenantKey(tenantId, "SETTINGS#BUSINESS"), sortKey: "PROFILE" });
@@ -278,6 +285,7 @@ const defaultCheckoutSettings: BusinessCheckoutSettingsRecord = {
   requireCustomerName: false,
   allowStaffPriceOverrides: false,
   maxStaffPriceDiscountPercent: 10,
+  mpesaConfirmationMode: "manual_or_verified",
   updatedAt: new Date(0).toISOString(),
 };
 
@@ -541,6 +549,7 @@ export const updateBusinessCheckoutSettings = async (
     requireCustomerName: Boolean(input.requireCustomerName),
     allowStaffPriceOverrides: Boolean(input.allowStaffPriceOverrides),
     maxStaffPriceDiscountPercent: Math.round(input.maxStaffPriceDiscountPercent * 100) / 100,
+    mpesaConfirmationMode: input.mpesaConfirmationMode === "verified_only" ? "verified_only" : "manual_or_verified",
     updatedAt: now,
   };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
@@ -1050,6 +1059,7 @@ export const completeSale = async (
     paymentMethod: "cash" | "mpesa";
     amountTendered?: number | null;
     mpesaReference?: string | null;
+    verifiedMpesa?: { paymentId: string; receiptNumber: string; amountKes: number; evidenceSources: Array<"stk" | "c2b">; phoneLast4?: string | null } | null;
     items: Array<{ productId: string; variantId?: string | null; quantity: number; expectedCatalogPrice?: number | null; unitPriceOverride?: number | null; priceOverrideReason?: string | null }>;
     requestId: string;
   },
@@ -1143,7 +1153,8 @@ export const completeSale = async (
     amountTendered = roundMoney(input.amountTendered!);
     changeDue = roundMoney(amountTendered - totalAmount);
   } else {
-    paymentReference = input.mpesaReference?.trim().toUpperCase() ?? "";
+    if (checkoutSettings.mpesaConfirmationMode === "verified_only" && !input.verifiedMpesa) throw new Error("This business requires a verified M-Pesa payment");
+    paymentReference = input.verifiedMpesa?.receiptNumber ?? input.mpesaReference?.trim().toUpperCase() ?? "";
     if (!/^[A-Z0-9]{8,12}$/.test(paymentReference)) {
       throw new Error("Enter a valid M-Pesa transaction code (8 to 12 letters or numbers)");
     }
@@ -1165,6 +1176,13 @@ export const completeSale = async (
     amountTendered,
     changeDue,
     paymentReference,
+    paymentEvidence: input.paymentMethod === "mpesa" ? input.verifiedMpesa
+      ? input.verifiedMpesa.evidenceSources.includes("stk") && input.verifiedMpesa.evidenceSources.includes("c2b") ? "stk_c2b" : input.verifiedMpesa.evidenceSources[0]
+      : "manual" : null,
+    paymentAmountKes: input.paymentMethod === "mpesa" ? input.verifiedMpesa?.amountKes ?? Math.ceil(totalAmount) : null,
+    paymentRoundingAdjustment: input.paymentMethod === "mpesa" ? roundMoney((input.verifiedMpesa?.amountKes ?? Math.ceil(totalAmount)) - totalAmount) : null,
+    mpesaPaymentId: input.verifiedMpesa?.paymentId ?? null,
+    payerPhoneLast4: input.verifiedMpesa?.phoneLast4 ?? null,
     cashShiftId: cashShift?.id ?? null,
     createdBy: actor.id,
     createdByName: actor.name,
@@ -1183,7 +1201,9 @@ export const completeSale = async (
   transaction.push({ Put: { TableName: TABLE_NAME, Item: { partitionKey: tenantKey(tenantId, `SALE#${id}`), sortKey: "RECEIPT", accessPartition: tenantKey(tenantId, "SALE"), accessSort: `${now}#${id}`, entityType: "sale", tenantId, ...sale }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
   if (paymentReference) {
     transaction.push({ Put: { TableName: TABLE_NAME, Item: { ...mpesaPaymentKey(tenantId, paymentReference), entityType: "payment_lookup", tenantId, saleId: id, orderNumber: sale.orderNumber, createdAt: now }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
+    if (!input.verifiedMpesa) transaction.push({ Put: { TableName: TABLE_NAME, Item: { ...mpesaReceiptClaimKey(paymentReference), entityType: "mpesa_receipt_claim", tenantId, saleId: id, evidence: "manual", createdAt: now }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
   }
+  if (input.verifiedMpesa) transaction.push({ Update: { TableName: TABLE_NAME, Key: { partitionKey: `MPESA_PAYMENT#${input.verifiedMpesa.receiptNumber}`, sortKey: "PAYMENT" }, UpdateExpression: "SET #status = :assigned, saleId = :saleId, orderNumber = :orderNumber, updatedAt = :now", ConditionExpression: "tenantId = :tenantId AND #status = :processing AND id = :paymentId", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":assigned": "assigned", ":saleId": id, ":orderNumber": sale.orderNumber, ":now": now, ":tenantId": tenantId, ":processing": "processing", ":paymentId": input.verifiedMpesa.paymentId } } });
   if (cashShift) transaction.push({ Update: { TableName: TABLE_NAME, Key: cashShiftKey(tenantId, cashShift.id), UpdateExpression: "SET cashSalesTotal = cashSalesTotal + :amount, updatedAt = :now", ConditionExpression: "#status = :open", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":amount": totalAmount, ":now": now, ":open": "open" } } });
   const overriddenItems = saleItems.filter((item) => item.priceBeforeOverride !== undefined);
   if (overriddenItems.length) transaction.push(auditPut(tenantId, { action: "checkout.price_overrides.applied", entityType: "sale", entityId: id, reason: overriddenItems.map((item) => `${item.productName}: ${item.priceBeforeOverride!.toFixed(2)} to ${item.price.toFixed(2)} (${item.priceOverrideReason})`).join("; ").slice(0, 1000), actorId: actor.id, actorName: actor.name }, now));

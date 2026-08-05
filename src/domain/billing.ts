@@ -2,7 +2,7 @@ import { GraphQLError } from "graphql";
 
 export type PlanCode = "biashara" | "biashara_growth" | "biashara_plus";
 export type BillingInterval = "monthly" | "annual";
-export type PlanCapability = "multi_store" | "vat_accounting";
+export type PlanCapability = "multi_store" | "vat_accounting" | "mpesa_api" | "mpesa_store_overrides";
 export type BillingStatus = "trialing" | "active" | "past_due" | "restricted" | "exempt" | "cancelled";
 
 export interface PlanDefinition {
@@ -71,7 +71,7 @@ export interface BillingAccount {
 }
 
 export const TERMS_VERSION = "2026-08-03";
-export const PRIVACY_VERSION = "2026-08-03";
+export const PRIVACY_VERSION = "2026-08-04";
 
 export const PLANS: Record<PlanCode, PlanDefinition> = {
   biashara: {
@@ -92,7 +92,7 @@ export const PLANS: Record<PlanCode, PlanDefinition> = {
     activeStoreLimit: 3,
     vatAccounting: true,
     multiStore: true,
-    capabilities: ["multi_store", "vat_accounting"],
+    capabilities: ["multi_store", "vat_accounting", "mpesa_api"],
   },
   biashara_plus: {
     code: "biashara_plus",
@@ -102,7 +102,7 @@ export const PLANS: Record<PlanCode, PlanDefinition> = {
     activeStoreLimit: 10,
     vatAccounting: true,
     multiStore: true,
-    capabilities: ["multi_store", "vat_accounting"],
+    capabilities: ["multi_store", "vat_accounting", "mpesa_api", "mpesa_store_overrides"],
   },
 };
 
@@ -168,7 +168,12 @@ export const effectivePlan = (account: BillingAccount, today = kenyaDate()): Pla
     activeStoreLimit: override?.activeStoreLimit === undefined ? base.activeStoreLimit : override.activeStoreLimit,
     vatAccounting,
     multiStore,
-    capabilities: [multiStore ? "multi_store" : null, vatAccounting ? "vat_accounting" : null].filter((value): value is PlanCapability => Boolean(value)),
+    capabilities: [
+      multiStore ? "multi_store" : null,
+      vatAccounting ? "vat_accounting" : null,
+      base.capabilities.includes("mpesa_api") ? "mpesa_api" : null,
+      base.capabilities.includes("mpesa_store_overrides") ? "mpesa_store_overrides" : null,
+    ].filter((value): value is PlanCapability => Boolean(value)),
   };
 };
 

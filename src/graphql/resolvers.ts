@@ -131,7 +131,13 @@ import { accountingSummary } from "../repositories/accounting-repository";
 import { sendPurchaseOrderEmail } from "../services/purchase-order-email";
 import { sendBillingEmail } from "../services/billing-email";
 import { applyBillingPolicies, validatePlanChange } from "../domain/billing-policy";
-import { nextBillingPayment, PRIVACY_VERSION, TERMS_VERSION, validateBillingInterval, validatePlanCode, type BillingOverride } from "../domain/billing";
+import { effectivePlan, nextBillingPayment, PRIVACY_VERSION, TERMS_VERSION, validateBillingInterval, validatePlanCode, type BillingOverride } from "../domain/billing";
+import {
+  disableMpesaConfiguration, getEffectiveMpesaConfiguration, getMpesaConfigurationView, getMpesaIntent,
+  listMpesaPayments, listRecentMpesaPayments, regenerateMpesaCallbackToken, registerMpesaCallbacks, resolveMpesaPayment,
+  saveMpesaConfiguration, testMpesaConfiguration,
+} from "../repositories/mpesa-repository";
+import { attachMpesaPayment, initiateMpesaStk, refreshMpesaStk, type MpesaSaleInput } from "../services/mpesa-checkout";
 import {
   attachEtimsReference,
   assignPlatformBillingPlan,
@@ -207,6 +213,19 @@ const ensureMainStore = async (tenantId: string) => {
 };
 const activeRole = (user: GraphQLContext["auth"]) =>
   (user.activeRole === "admin" ? "admin" : "staff") as "admin" | "staff";
+
+const mpesaCapabilities = async (context: GraphQLContext) => {
+  const account = await getBillingAccount(tenant(context));
+  if (!account) return { eligible: true, storeOverridesAllowed: true };
+  const capabilities = effectivePlan(account).capabilities;
+  return { eligible: capabilities.includes("mpesa_api"), storeOverridesAllowed: capabilities.includes("mpesa_store_overrides") };
+};
+
+const checkoutIdentity = async (context: GraphQLContext, requestedStoreId?: string | null) => {
+  const authenticated = requireStaff(context); const tenantId = tenant(context);
+  const [user, profile, store] = await Promise.all([getCognitoUser(authenticated.username), getStaffProfile(tenantId, authenticated.id), selectedStore(context, requestedStoreId)]);
+  return { tenantId, store, actor: { id: authenticated.id, name: user.name, employeeCode: profile?.employeeCode, role: activeRole(authenticated) } };
+};
 
 const parseRoles = (roles: string[]): UserRole[] => {
   const normalized = [...new Set(roles)];
@@ -514,6 +533,25 @@ const baseResolvers = {
       requireStaff(context);
       return getBusinessCheckoutSettings(tenant(context));
     },
+    mpesaConfiguration: async (_: unknown, { scope, storeId }: { scope: string; storeId?: string | null }, context: GraphQLContext) => {
+      requireAdmin(context); const capabilities = await mpesaCapabilities(context); if (!capabilities.eligible) return null;
+      if (scope !== "business" && scope !== "store") throw new Error("Select a valid M-Pesa configuration scope");
+      if (scope === "store" && !capabilities.storeOverridesAllowed) throw new Error("Store-level M-Pesa configurations require Biashara Plus");
+      return getMpesaConfigurationView(tenant(context), scope, storeId);
+    },
+    effectiveMpesaConfiguration: async (_: unknown, { storeId }: { storeId: string }, context: GraphQLContext) => {
+      requireStaff(context); const store = await selectedStore(context, storeId); const capabilities = await mpesaCapabilities(context);
+      if (!capabilities.eligible) return { ...capabilities, configuration: null };
+      const configuration = await getEffectiveMpesaConfiguration(tenant(context), store.id, capabilities.storeOverridesAllowed);
+      return { ...capabilities, configuration: configuration ? await getMpesaConfigurationView(tenant(context), configuration.scope, configuration.storeId) : null };
+    },
+    mpesaCheckoutIntent: async (_: unknown, { id }: { id: string }, context: GraphQLContext) => { requireStaff(context); return getMpesaIntent(tenant(context), id); },
+    recentUnassignedMpesaPayments: async (_: unknown, { storeId, amountKes }: { storeId: string; amountKes?: number | null }, context: GraphQLContext) => {
+      requireStaff(context); const store = await selectedStore(context, storeId); const capabilities = await mpesaCapabilities(context); if (!capabilities.eligible) return [];
+      const configuration = await getEffectiveMpesaConfiguration(tenant(context), store.id, capabilities.storeOverridesAllowed); if (!configuration) return [];
+      return listRecentMpesaPayments(tenant(context), configuration.id, amountKes);
+    },
+    mpesaPayments: (_: unknown, { limit }: { limit: number }, context: GraphQLContext) => { requireAdmin(context); return listMpesaPayments(tenant(context), limit); },
     business: async (_: unknown, _args: unknown, context: GraphQLContext) => {
       const admin = requireAdmin(context);
       const settings = await getBusinessSettings(tenant(context));
@@ -769,8 +807,9 @@ const baseResolvers = {
       if (input.returnPolicy.trim().length < 3) throw new Error("Return policy is required");
       return updateBusinessReceiptSettings(tenant(context), input, actor(context));
     },
-    updateBusinessCheckoutSettings: (_: unknown, input: { enabledPaymentMethods: Array<"cash" | "mpesa">; defaultPaymentMethod: "cash" | "mpesa"; requireCustomerName: boolean; allowStaffPriceOverrides: boolean; maxStaffPriceDiscountPercent: number }, context: GraphQLContext) => {
+    updateBusinessCheckoutSettings: async (_: unknown, input: { enabledPaymentMethods: Array<"cash" | "mpesa">; defaultPaymentMethod: "cash" | "mpesa"; requireCustomerName: boolean; allowStaffPriceOverrides: boolean; maxStaffPriceDiscountPercent: number; mpesaConfirmationMode: "manual_or_verified" | "verified_only" }, context: GraphQLContext) => {
       requireAdmin(context);
+      if (input.mpesaConfirmationMode === "verified_only" && !(await mpesaCapabilities(context)).eligible) throw new Error("Verified-only M-Pesa requires Biashara Growth or Plus");
       return updateBusinessCheckoutSettings(tenant(context), input, actor(context));
     },
     updateBusinessMeasurementSettings: (_: unknown, { packageLabels }: { packageLabels: Array<{ code: string; name: string; pluralName: string; symbol: string; status: "active" | "inactive" }> }, context: GraphQLContext) => {
@@ -841,6 +880,25 @@ const baseResolvers = {
         return updateProduct(tenantId, id, { status: "inactive" }, actor(context));
       });
     },
+    saveMpesaConfiguration: async (_: unknown, input: { scope: "business" | "store"; storeId?: string | null; environment: "sandbox" | "production"; shortcode: string; transactionType: "CustomerPayBillOnline" | "CustomerBuyGoodsOnline"; stkEnabled: boolean; c2bEnabled: boolean; consumerKey: string; consumerSecret: string; passkey?: string | null }, context: GraphQLContext) => {
+      requireAdmin(context); const capabilities = await mpesaCapabilities(context); if (!capabilities.eligible) throw new Error("M-Pesa integration requires Biashara Growth or Plus");
+      if (input.scope !== "business" && input.scope !== "store") throw new Error("Select a valid M-Pesa configuration scope");
+      if (input.environment !== "sandbox" && input.environment !== "production") throw new Error("Select sandbox or production");
+      if (input.transactionType !== "CustomerPayBillOnline" && input.transactionType !== "CustomerBuyGoodsOnline") throw new Error("Select Till or Paybill");
+      if (input.scope === "store") await selectedStore(context, input.storeId);
+      return saveMpesaConfiguration(tenant(context), input, capabilities.storeOverridesAllowed);
+    },
+    testMpesaConfiguration: async (_: unknown, { scope, storeId }: { scope: "business" | "store"; storeId?: string | null }, context: GraphQLContext) => { requireAdmin(context); const capabilities = await mpesaCapabilities(context); if (!capabilities.eligible || (scope === "store" && !capabilities.storeOverridesAllowed)) throw new Error("This M-Pesa configuration is not available on the current plan"); return testMpesaConfiguration(tenant(context), scope, storeId); },
+    registerMpesaCallbacks: async (_: unknown, { scope, storeId }: { scope: "business" | "store"; storeId?: string | null }, context: GraphQLContext) => { requireAdmin(context); const capabilities = await mpesaCapabilities(context); if (!capabilities.eligible || (scope === "store" && !capabilities.storeOverridesAllowed)) throw new Error("This M-Pesa configuration is not available on the current plan"); return registerMpesaCallbacks(tenant(context), scope, storeId); },
+    disableMpesaConfiguration: async (_: unknown, { scope, storeId }: { scope: "business" | "store"; storeId?: string | null }, context: GraphQLContext) => { requireAdmin(context); return disableMpesaConfiguration(tenant(context), scope, storeId); },
+    regenerateMpesaCallbackToken: async (_: unknown, { scope, storeId }: { scope: "business" | "store"; storeId?: string | null }, context: GraphQLContext) => { requireAdmin(context); const capabilities = await mpesaCapabilities(context); if (!capabilities.eligible || (scope === "store" && !capabilities.storeOverridesAllowed)) throw new Error("This M-Pesa configuration is not available on the current plan"); return regenerateMpesaCallbackToken(tenant(context), scope, storeId); },
+    initiateMpesaStk: async (_: unknown, input: { storeId: string; phone: string; customerName?: string | null; items: MpesaSaleInput["items"]; requestId: string }, context: GraphQLContext) => {
+      const capabilities = await mpesaCapabilities(context); if (!capabilities.eligible) throw new Error("STK Push requires Biashara Growth or Plus"); const identity = await checkoutIdentity(context, input.storeId);
+      return initiateMpesaStk(identity.tenantId, capabilities.storeOverridesAllowed, { ...input, storeId: identity.store.id }, identity.actor);
+    },
+    refreshMpesaStkStatus: async (_: unknown, { intentId }: { intentId: string }, context: GraphQLContext) => { requireStaff(context); return refreshMpesaStk(tenant(context), intentId); },
+    attachMpesaPayment: async (_: unknown, input: { storeId: string; receiptNumber: string; customerName?: string | null; items: MpesaSaleInput["items"]; requestId: string }, context: GraphQLContext) => { const [identity, capabilities] = await Promise.all([checkoutIdentity(context, input.storeId), mpesaCapabilities(context)]); if (!capabilities.eligible) throw new Error("Verified M-Pesa requires Biashara Growth or Plus"); return attachMpesaPayment(identity.tenantId, capabilities.storeOverridesAllowed, input.receiptNumber, { storeId: identity.store.id, customerName: input.customerName, items: input.items, requestId: input.requestId }, identity.actor); },
+    resolveMpesaPayment: (_: unknown, { receiptNumber, resolution, reason }: { receiptNumber: string; resolution: string; reason: string }, context: GraphQLContext) => { requireAdmin(context); return resolveMpesaPayment(tenant(context), receiptNumber, resolution, reason); },
     completeSale: async (
       _: unknown,
       args: {
@@ -854,11 +912,9 @@ const baseResolvers = {
       },
       context: GraphQLContext,
     ) => {
-      const authenticated = requireStaff(context);
       if (!(args.paymentMethod === "cash" || args.paymentMethod === "mpesa")) throw new Error("Payment method must be cash or M-Pesa");
-      const tenantId = tenant(context);
-      const [user, profile, store] = await Promise.all([getCognitoUser(authenticated.username), getStaffProfile(tenantId, authenticated.id), selectedStore(context, args.storeId)]);
-      return completeSale(tenantId, { ...args, storeId: store.id }, { id: authenticated.id, name: user.name, employeeCode: profile?.employeeCode, storeName: store.name, role: activeRole(authenticated) });
+      const identity = await checkoutIdentity(context, args.storeId);
+      return completeSale(identity.tenantId, { ...args, storeId: identity.store.id }, identity.actor);
     },
     createStore: async (_: unknown, input: Parameters<typeof createStore>[1], context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); const result = await createStore(tenantId, input, actor(context)); await refreshPlatformBusinessSummary(tenantId); return result; },
     updateStore: async (_: unknown, { id, ...input }: { id: string } & Parameters<typeof updateStore>[2], context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); if (input.status === "inactive") { const memberships = await listTenantMemberships(tenantId); const profiles = await getStaffProfiles(tenantId, memberships.map(({ userId }) => userId)); if ([...profiles.values()].some((profile) => profile.storeIds?.includes(id) || profile.storeId === id)) throw new Error("Reassign staff before deactivating this store"); } const result = await updateStore(tenantId, id, input); await refreshPlatformBusinessSummary(tenantId); return result; },

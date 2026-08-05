@@ -16,6 +16,9 @@ database.dynamoDB.send = async () => ({ Item: {
   roles: ["staff"],
 } });
 
+const mpesaRepository = require("../dist/repositories/mpesa-repository.js");
+mpesaRepository.handleMpesaCallback = async () => ({ accepted: true, payment: null, intent: null });
+
 const { handler } = require("../dist/lambda.js");
 
 const event = {
@@ -88,6 +91,22 @@ async function main() {
   }, {}, () => {});
   assert.equal(publicPromotions.statusCode, 200, "signup promotion reads must not require Cognito");
   assert.deepEqual(JSON.parse(publicPromotions.body), []);
+
+  const callbackToken = "A".repeat(48);
+  const mpesaCallback = await handler({
+    ...event,
+    routeKey: "POST /public/mpesa/callback/{token}/{kind}",
+    rawPath: `/public/mpesa/callback/${callbackToken}/confirmation`,
+    requestContext: {
+      ...event.requestContext,
+      routeKey: "POST /public/mpesa/callback/{token}/{kind}",
+      http: { ...event.requestContext.http, method: "POST", path: `/public/mpesa/callback/${callbackToken}/confirmation` },
+      authorizer: undefined,
+    },
+    body: JSON.stringify({ TransID: "TEST123456" }),
+  }, {}, () => {});
+  assert.equal(mpesaCallback.statusCode, 200, "only the explicit high-entropy M-Pesa callback route may bypass Cognito");
+  assert.deepEqual(JSON.parse(mpesaCallback.body), { ResultCode: 0, ResultDesc: "Received" });
 
   const result = await handler(event, {}, () => {});
 

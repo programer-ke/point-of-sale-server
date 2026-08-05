@@ -10,6 +10,8 @@ import { validateBillingEnvironment } from "./repositories/billing-repository";
 import { validatePlanCode } from "./domain/billing";
 import { listEligibleBillingPromotions } from "./repositories/billing-promotion-repository";
 import { validateBillingInterval } from "./domain/billing";
+import { handleMpesaCallback } from "./repositories/mpesa-repository";
+import { finalizeIntentPayment } from "./services/mpesa-checkout";
 
 let databaseReady: Promise<void> | undefined;
 const ensureDatabaseReady = () => {
@@ -39,6 +41,19 @@ export const handler = async (...args: Parameters<typeof apolloHandler>) => {
     return { statusCode: 204, body: "" };
   }
   await ensureDatabaseReady();
+  const callbackMatch = event.requestContext.http.method === "POST" ? event.rawPath.match(/^\/public\/mpesa\/callback\/([A-Za-z0-9_-]{40,64})\/(stk|validation|confirmation)$/) : null;
+  if (callbackMatch) {
+    const headers = { "content-type": "application/json", "cache-control": "no-store" };
+    try {
+      const payload = event.body ? JSON.parse(event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf8") : event.body) : {};
+      const result = await handleMpesaCallback(callbackMatch[1], callbackMatch[2] as "stk" | "validation" | "confirmation", payload);
+      if (result.payment && result.intent?.status === "paid" && result.payment.status === "unassigned") await finalizeIntentPayment(result.intent, result.payment);
+      return { statusCode: 200, headers, body: JSON.stringify(callbackMatch[2] === "validation" ? { ResultCode: 0, ResultDesc: "Accepted" } : { ResultCode: 0, ResultDesc: "Received" }) };
+    } catch (error) {
+      console.error(JSON.stringify({ event: "mpesa_callback_failed", kind: callbackMatch[2], errorName: error instanceof Error ? error.name : "UnknownError" }));
+      return { statusCode: error instanceof SyntaxError ? 400 : 404, headers, body: JSON.stringify({ ResultCode: 1, ResultDesc: "Unable to process callback" }) };
+    }
+  }
   if (event.requestContext.http.method === "GET" && event.rawPath === "/public/billing-promotions") {
     let planCode; let billingInterval;
     try {

@@ -233,7 +233,8 @@ async function main() {
   assert.equal(mpesaSale.totalAmount, 200);
   assert.equal(mpesaSale.paymentReference, "QGH1234567");
   assert.equal(mpesaSale.createdByName, "Cashier Name");
-  assert.equal(transaction[transaction.length - 2].Put.Item.partitionKey, "TENANT#tenant-1#PAYMENT#MPESA#QGH1234567");
+  assert(transaction.some((item) => item.Put?.Item?.partitionKey === "TENANT#tenant-1#PAYMENT#MPESA#QGH1234567"));
+  assert(transaction.some((item) => item.Put?.Item?.partitionKey === "MPESA_RECEIPT_CLAIM#QGH1234567"), "manual M-Pesa must claim the receipt globally");
 
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") {
