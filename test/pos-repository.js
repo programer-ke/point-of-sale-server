@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 process.env.AWS_DYNAMODB_TABLE = "test-table";
 const { dynamoDB } = require("../dist/config/db.js");
 const repository = require("../dist/repositories/pos-repository.js");
+const { previewCatalogImport } = require("../dist/graphql/resolvers.js");
 const tenantId = "tenant-1";
 
 const assertExpressionBindingsMatch = (operation, label) => {
@@ -274,6 +275,38 @@ async function main() {
   assert.equal(weighedSale.items[0].inventoryQuantity, 1000, "two 500 g variants must consume 1,000 gram inventory units");
   assert.equal(transaction[0].Update.ExpressionAttributeValues[":quantity"], 1000);
 
+  const service = { ...product, id: "service-1", itemType: "service", name: "Bandaging", sku: "SVC-1", barcode: "", buyingPrice: 0, sellingPrice: 250, saleVariants: [{ id: "service-1-default", name: "Service", sku: "SVC-1", barcode: "", quantityInBaseUnits: 1, sellingPrice: 250, status: "active" }], serviceComponents: [{ productId: product.id, productName: product.name, quantity: 2, stockUnit: "each" }] };
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") {
+      const key = command.input.Key.partitionKey;
+      if (key.includes("IDEMPOTENCY#") || key.endsWith("SETTINGS#BUSINESS")) return {};
+      if (key.includes("CASH_SHIFT_OPEN#")) return { Item: { shiftId: cashShift.id } };
+      if (key.endsWith(`CASH_SHIFT#${cashShift.id}`)) return { Item: cashShift };
+      if (key.includes("STORE#")) return { Item: store };
+      return { Item: key.endsWith("PRODUCT#service-1") ? service : product };
+    }
+    if (command.constructor.name === "QueryCommand") return { Items: [lot] };
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  const serviceSale = await repository.completeSale(tenantId, { storeId: store.id, paymentMethod: "cash", amountTendered: 500, items: [{ productId: service.id, quantity: 2 }], requestId: "sale-service" }, { id: "cashier-1", name: "Cashier" });
+  assert.equal(serviceSale.items[0].inventoryQuantity, 0, "a service has no stock of its own");
+  assert.equal(serviceSale.items[0].consumedComponents[0].quantity, 4, "service materials scale with the sold quantity");
+  assert.equal(serviceSale.items[0].cost, 160, "service COGS comes from consumed product lots");
+  assert.equal(transaction.find((item) => item.Put?.Item?.entityType === "stock_movement").Put.Item.type, "service_consumption");
+  assert.equal(transaction[0].Update.ExpressionAttributeValues[":quantity"], 4);
+
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") {
+      const key = command.input.Key.partitionKey;
+      if (key.includes("IDEMPOTENCY#") || key.endsWith("SETTINGS#BUSINESS")) return {};
+      if (key.endsWith("PRODUCT#service-1")) return { Item: service };
+      return { Item: { ...product, status: "inactive" } };
+    }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  await assert.rejects(() => repository.completeSale(tenantId, { storeId: store.id, paymentMethod: "cash", amountTendered: 500, items: [{ productId: service.id, quantity: 1 }], requestId: "sale-service-archived-component" }, { id: "cashier-1", name: "Cashier" }), /service materials are unavailable/);
+
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "GetCommand") return {};
     if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
@@ -458,6 +491,42 @@ async function main() {
   const manyProfiles = await repository.getStaffProfiles(tenantId, Array.from({ length: 101 }, (_, index) => `staff-${index}`));
   assert.equal(manyProfiles.size, 101);
   assert.equal(batchCount, 2, "staff profile reads must be chunked across DynamoDB batch limits");
+
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") return {};
+    if (command.constructor.name === "QueryCommand") {
+      const partition = command.input.ExpressionAttributeValues[":pk"];
+      if (partition.endsWith("CATALOG#PRODUCT")) return { Items: [product] };
+      if (partition.endsWith("CATALOG#CATEGORY")) return { Items: [{ id: "health", name: "Health", code: "HEALTH", description: "", parentId: null, status: "active", createdAt: "2026-01-01", updatedAt: "2026-01-01" }] };
+    }
+    throw new Error(`Unexpected command ${command.constructor.name}`);
+  };
+  const importPreview = await previewCatalogImport(tenantId, [
+    { rowNumber: 2, itemType: "product", name: "Bandage", categoryPath: "Health > First Aid", sku: "BANDAGE", barcode: "", sellingPrice: 50, description: "", stockUnit: "each", buyingPrice: 20, tracksExpiry: false },
+    { rowNumber: 3, itemType: "service", name: "Bandaging", categoryPath: "Health > First Aid", sku: "SERVICE-1", barcode: "", sellingPrice: 250, description: "", stockUnit: "each" },
+    { rowNumber: 4, itemType: "product", name: "Duplicate tea", categoryPath: "Health", sku: "TEA-1", barcode: "", sellingPrice: 100, description: "", stockUnit: "each" },
+  ]);
+  assert.deepEqual(importPreview.categoriesToCreate, ["Health > First Aid"]);
+  assert.equal(importPreview.importableRows, 1);
+  assert.match(importPreview.rows[1].errors.join(" "), /stock fields blank/);
+  assert.match(importPreview.rows[2].errors.join(" "), /already exists/);
+
+  const reportService = { ...product, id: "service-report", itemType: "service", name: "Consultation", sku: "CONSULT", barcode: "", buyingPrice: 0, stockUnit: "each", baseUnit: "each", saleVariants: [{ id: "service-report-default", name: "Service", sku: "CONSULT", barcode: "", quantityInBaseUnits: 1, sellingPrice: 300, status: "active" }], serviceComponents: [] };
+  const serviceReportSale = { id: "sale-service-report", orderNumber: "SALE-SERVICE", customerName: "Cash customer", items: [{ productId: reportService.id, productName: reportService.name, sku: reportService.sku, barcode: "", variantId: reportService.saleVariants[0].id, variantName: "Service", quantityInBaseUnits: 1, inventoryQuantity: 0, quantity: 2, price: 300, cost: 50, total: 600 }], subtotal: 600, tax: 0, discount: 0, totalAmount: 600, status: "completed", paymentMethod: "cash", paymentStatus: "paid", createdBy: "cashier-1", createdByName: "Cashier", storeId: store.id, storeName: store.name, createdAt: "2026-08-01T10:00:00.000Z", updatedAt: "2026-08-01T10:00:00.000Z" };
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name !== "QueryCommand") throw new Error(`Unexpected command ${command.constructor.name}`);
+    const partition = command.input.ExpressionAttributeValues[":pk"];
+    if (partition.endsWith("CATALOG#PRODUCT")) return { Items: [product, reportService] };
+    if (partition.endsWith("SALE")) return { Items: [serviceReportSale] };
+    if (partition.endsWith("AUDIT")) return { Items: [] };
+    if (partition.endsWith("STORE")) return { Items: [store] };
+    if (partition.includes("INVENTORY#ACTIVE")) return { Items: [lot] };
+    if (partition.includes("#POLICY")) return { Items: [] };
+    throw new Error(`Unexpected query ${partition}`);
+  };
+  const reportWithService = await repository.businessReport(tenantId, { from: "2026-08-01", to: "2026-08-31", storeId: store.id });
+  assert.equal(reportWithService.topProducts.find(({ productId }) => productId === reportService.id).units, 2, "services must contribute sold units to sales reports");
+  assert.equal(reportWithService.stockProducts.some(({ productId }) => productId === reportService.id), false, "services must stay out of stock reports");
 
   const saleFor = (cashierId, amount) => ({
     id: `sale-${cashierId}`,

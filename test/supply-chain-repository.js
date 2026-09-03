@@ -169,8 +169,8 @@ async function main() {
   assert.equal(voidedPayment.payments[0].status, "voided");
   assert.equal(voidedPayment.payments[0].voidReason, "Incorrect bank entry");
 
-  const activeLot = { id: "lot-early", storeId: store.id, productId: "product-1", productName: "Tea", batchNumber: "B-1", expiryDate: "2026-09-01", receivedQuantity: 10, remainingQuantity: 10, unitCost: 80, origin: "supplier_receipt", status: "active", receivedAt: "2026-07-01T00:00:00.000Z", updatedAt: now };
-  const laterLot = { ...activeLot, id: "lot-later", batchNumber: "B-2", expiryDate: "2026-12-01", remainingQuantity: 10, receivedAt: "2026-07-02T00:00:00.000Z" };
+  const activeLot = { id: "lot-early", storeId: store.id, productId: "product-1", productName: "Tea", batchNumber: "B-1", expiryDate: "2027-09-01", receivedQuantity: 10, remainingQuantity: 10, unitCost: 80, origin: "supplier_receipt", status: "active", receivedAt: "2026-07-01T00:00:00.000Z", updatedAt: now };
+  const laterLot = { ...activeLot, id: "lot-later", batchNumber: "B-2", expiryDate: "2027-12-01", remainingQuantity: 10, receivedAt: "2026-07-02T00:00:00.000Z" };
   dynamoDB.send = async (command) => {
     if (command.constructor.name === "QueryCommand") return { Items: [laterLot, activeLot] };
     throw new Error(`Unexpected ${command.constructor.name}`);
@@ -190,6 +190,26 @@ async function main() {
   assert.equal(movement.quantity, -2);
   assert.equal(transaction.length, 3, "lot decrement, movement, and idempotency record must be atomic");
   assert.match(transaction[0].Update.ConditionExpression, /remainingQuantity/);
+
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "GetCommand") {
+      const key = command.input.Key.partitionKey;
+      if (key.includes("IDEMPOTENCY#")) return {};
+      if (key.includes("STORE#")) return { Item: store };
+      if (key.includes("PRODUCT#")) return { Item: product };
+      return {};
+    }
+    if (command.constructor.name === "TransactWriteCommand") { transaction = command.input.TransactItems; return {}; }
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  await assert.rejects(() => supply.recordOpeningStock(tenantId, { storeId: store.id, effectiveDate: "2026-02-31", lines: [{ productId: product.id, quantity: 4, unitCost: 25, expiryDate: "2027-01-01" }] }, { id: "admin", name: "Admin" }, "opening-invalid-date"), /date is invalid/);
+  await assert.rejects(() => supply.recordOpeningStock(tenantId, { storeId: store.id, effectiveDate: "2026-08-01", lines: [{ productId: product.id, quantity: 4, unitCost: 25 }] }, { id: "admin", name: "Admin" }, "opening-missing-expiry"), /requires an expiry date/);
+  const opening = await supply.recordOpeningStock(tenantId, { storeId: store.id, effectiveDate: "2026-08-01", notes: "Existing stock", lines: [{ productId: product.id, quantity: 4, unitCost: 25, batchNumber: "OPEN-TEA", expiryDate: "2027-01-01" }] }, { id: "admin", name: "Admin" }, "opening-1");
+  assert.equal(opening.lines[0].quantity, 4);
+  assert.equal(transaction.find((item) => item.Put?.Item?.entityType === "inventory_lot").Put.Item.origin, "opening_stock");
+  assert.equal(transaction.find((item) => item.Put?.Item?.entityType === "stock_movement").Put.Item.type, "opening_stock");
+  assert.equal(transaction.some((item) => item.Put?.Item?.entityType === "supplier_invoice"), false, "opening stock must not create a payable");
+  assert.equal(transaction.length, 5, "opening record, lot, movement, audit, and idempotency must be atomic");
 
   const destination = { ...store, id: "store-2", code: "WEST", name: "West Store" };
   dynamoDB.send = async (command) => {

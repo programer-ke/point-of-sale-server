@@ -62,9 +62,42 @@ export const typeDefs = `#graphql
     status: String!
     createdAt: String!
     updatedAt: String!
+    itemType: String!
+    serviceComponents: [ServiceComponent!]!
   }
 
-  type SaleVariant { id: ID!, name: String!, sku: String!, barcode: String!, quantityInBaseUnits: Int!, sellingPrice: Float!, status: String! }
+  type CatalogItem {
+    id: ID!
+    name: String!
+    description: String!
+    sku: String!
+    barcode: String!
+    categoryId: ID!
+    categoryName: String!
+    sellingPrice: Float!
+    buyingPrice: Float!
+    vatClass: String
+    baseUnit: String!
+    stockUnit: String!
+    tracksExpiry: Boolean!
+    saleVariants: [SaleVariant!]!
+    productUnits: [ProductUnit!]!
+    promotionPrice: Float
+    promotionStartsAt: String
+    promotionEndsAt: String
+    pendingPriceAdjustment: ProductPriceAdjustment
+    effectivePrice: Float!
+    onPromotion: Boolean!
+    storeStock: StoreProductStock
+    status: String!
+    createdAt: String!
+    updatedAt: String!
+    itemType: String!
+    serviceComponents: [ServiceComponent!]!
+  }
+
+  type ServiceComponent { productId: ID!, productName: String!, quantity: Int!, stockUnit: String! }
+  type SaleVariant { id: ID!, name: String!, sku: String!, barcode: String!, quantityInBaseUnits: Int!, sellingPrice: Float!, status: String!, availableQuantity: Int }
   type ProductUnit { id: ID!, labelCode: String!, name: String!, parentUnitId: ID, multiplier: Int!, quantityInBaseUnits: Int!, sellable: Boolean!, purchasable: Boolean!, sellingPrice: Float, unitRate: Float, estimatedCost: Float, marginAmount: Float, marginPercent: Float, belowCost: Boolean!, sku: String!, barcode: String!, status: String! }
   type ProductPriceAdjustmentLine { productUnitId: ID!, productUnitName: String!, previousPrice: Float!, newPrice: Float! }
   type ProductPriceAdjustment { id: ID!, effectiveAt: String!, reason: String!, lines: [ProductPriceAdjustmentLine!]!, createdBy: ID!, createdByName: String!, createdAt: String! }
@@ -74,6 +107,7 @@ export const typeDefs = `#graphql
     totalCount: Int!
     nextCursor: String
   }
+  type CatalogItemPage { items: [CatalogItem!]!, totalCount: Int!, nextCursor: String }
 
   type SaleItem {
     productId: ID!
@@ -96,7 +130,9 @@ export const typeDefs = `#graphql
     vatRateBasisPoints: Int
     taxableAmount: Float
     vatAmount: Float
+    consumedComponents: [ConsumedComponent!]!
   }
+  type ConsumedComponent { productId: ID!, productName: String!, quantity: Int!, unitCost: Float!, totalCost: Float! }
 
   type Sale {
     id: ID!
@@ -317,6 +353,14 @@ export const typeDefs = `#graphql
   input SaleVariantInput { id: ID, name: String!, sku: String = "", barcode: String = "", quantityInBaseUnits: Int!, sellingPrice: Float!, status: String = "active" }
   input ProductUnitInput { id: ID, labelCode: String!, name: String!, parentUnitId: ID, multiplier: Int!, quantityInBaseUnits: Int, sellable: Boolean!, purchasable: Boolean!, sellingPrice: Float, sku: String = "", barcode: String = "", status: String = "active" }
   input ProductPriceAdjustmentLineInput { productUnitId: ID!, newPrice: Float! }
+  input ServiceComponentInput { productId: ID!, quantity: Int! }
+  input OpeningStockLineInput { productId: ID!, quantity: Int!, unitCost: Float, batchNumber: String, expiryDate: String }
+  type OpeningStockLine { lotId: ID!, productId: ID!, productName: String!, quantity: Int!, unitCost: Float!, batchNumber: String!, expiryDate: String }
+  type OpeningStock { id: ID!, openingStockNumber: String!, storeId: ID!, storeName: String!, effectiveDate: String!, notes: String!, lines: [OpeningStockLine!]!, createdBy: ID!, createdByName: String!, createdAt: String! }
+  input CatalogImportRowInput { rowNumber: Int!, itemType: String!, name: String!, categoryPath: String!, sku: String = "", barcode: String = "", sellingPrice: Float!, vatClass: String, description: String = "", stockUnit: String, buyingPrice: Float, tracksExpiry: Boolean, openingQuantity: Float, openingUnitCost: Float, batchNumber: String, expiryDate: String }
+  type CatalogImportRowResult { rowNumber: Int!, itemType: String!, name: String!, categoryPath: String!, valid: Boolean!, status: String!, itemId: ID, errors: [String!]! }
+  type CatalogImportPreview { rows: [CatalogImportRowResult!]!, categoriesToCreate: [String!]!, importableRows: Int!, hasOpeningStock: Boolean! }
+  type CatalogImportResult { requestId: ID!, importedCount: Int!, failedCount: Int!, categoriesCreated: [String!]!, rows: [CatalogImportRowResult!]! }
 
   type Store {
     id: ID!
@@ -660,6 +704,8 @@ export const typeDefs = `#graphql
     users: [User!]!
     user(username: String!): User
     categories: [Category!]!
+    catalogItems(storeId: ID): [CatalogItem!]!
+    catalogItemPage(search: String = "", limit: Int = 20, cursor: String, activeOnly: Boolean = false, storeId: ID): CatalogItemPage!
     products(storeId: ID): [Product!]!
     productPage(search: String = "", limit: Int = 20, cursor: String, activeOnly: Boolean = false, storeId: ID): ProductPage!
     product(id: ID!): Product
@@ -735,11 +781,16 @@ export const typeDefs = `#graphql
     createCategory(code: String = "", name: String!, description: String = "", parentId: ID): Category!
     updateCategory(id: ID!, code: String!, name: String!, description: String = "", parentId: ID): Category!
     deleteCategory(id: ID!): Boolean!
-    createProduct(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, vatClass: String, stockUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!, productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false): Product!
+    createProduct(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, buyingPrice: Float!, vatClass: String, stockUnit: String!, tracksExpiry: Boolean!, saleVariants: [SaleVariantInput!]!, productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false, requestId: ID): Product!
+    createService(name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, vatClass: String, serviceComponents: [ServiceComponentInput!] = []): Product!
+    updateService(id: ID!, name: String!, description: String = "", sku: String = "", barcode: String = "", categoryId: ID!, sellingPrice: Float!, vatClass: String, serviceComponents: [ServiceComponentInput!] = [], status: String!): Product!
     updateProduct(id: ID!, name: String, description: String, sku: String, barcode: String, categoryId: ID, sellingPrice: Float, buyingPrice: Float, vatClass: String, stockUnit: String, tracksExpiry: Boolean, saleVariants: [SaleVariantInput!], productUnits: [ProductUnitInput!], acknowledgeBelowCost: Boolean = false, promotionPrice: Float, promotionStartsAt: String, promotionEndsAt: String, status: String): Product!
     adjustProductPrices(productId: ID!, lines: [ProductPriceAdjustmentLineInput!]!, effectiveAt: String!, reason: String!, requestId: ID!): Product!
     cancelProductPriceAdjustment(productId: ID!, reason: String!, requestId: ID!): Product!
     archiveProduct(id: ID!): Product!
+    recordOpeningStock(storeId: ID!, effectiveDate: String, notes: String = "", lines: [OpeningStockLineInput!]!, requestId: ID!): OpeningStock!
+    validateCatalogImport(rows: [CatalogImportRowInput!]!, storeId: ID, effectiveDate: String): CatalogImportPreview!
+    executeCatalogImport(rows: [CatalogImportRowInput!]!, storeId: ID, effectiveDate: String, requestId: ID!): CatalogImportResult!
     completeSale(storeId: ID, customerName: String, paymentMethod: String!, amountTendered: Float, mpesaReference: String, items: [SaleItemInput!]!, requestId: ID!): Sale!
     saveMpesaConfiguration(scope: String!, storeId: ID, environment: String!, shortcode: String!, transactionType: String!, stkEnabled: Boolean!, c2bEnabled: Boolean!, consumerKey: String!, consumerSecret: String!, passkey: String): MpesaConfiguration!
     testMpesaConfiguration(scope: String!, storeId: ID): MpesaConfiguration!

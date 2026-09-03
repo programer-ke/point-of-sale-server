@@ -9,4 +9,5 @@ into one compact `YYYY-MM-DD` entry.
 
 ## 2026
 
+- [September 2026](changelog/2026-09.md)
 - [August 2026](changelog/2026-08.md)

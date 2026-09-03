@@ -63,6 +63,15 @@ export interface ProductRecord {
   status: "active" | "inactive";
   createdAt: string;
   updatedAt: string;
+  itemType?: "product" | "service";
+  serviceComponents?: ServiceComponentRecord[];
+}
+
+export interface ServiceComponentRecord {
+  productId: string;
+  productName: string;
+  quantity: number;
+  stockUnit: string;
 }
 
 export interface SaleItemRecord {
@@ -86,6 +95,7 @@ export interface SaleItemRecord {
   vatRateBasisPoints?: number;
   taxableAmount?: number;
   vatAmount?: number;
+  consumedComponents?: Array<{ productId: string; productName: string; quantity: number; unitCost: number; totalCost: number }>;
 }
 
 export interface SaleRecord {
@@ -302,7 +312,8 @@ const measurementSettings = (packageLabels = defaultPackageLabels, updatedAt = n
   updatedAt,
 });
 
-const defaultVariant = (product: Pick<ProductRecord, "id" | "name" | "sku" | "barcode" | "sellingPrice" | "stockUnit">): SaleVariantRecord => ({ id: `${product.id}-default`, name: `1 ${product.stockUnit}`, sku: product.sku, barcode: product.barcode, quantityInBaseUnits: measurementUnit(product.stockUnit).baseUnits, sellingPrice: product.sellingPrice, status: "active" });
+const itemTypeOf = (product: ProductRecord) => product.itemType ?? "product";
+const defaultVariant = (product: Pick<ProductRecord, "id" | "name" | "sku" | "barcode" | "sellingPrice" | "stockUnit" | "itemType">): SaleVariantRecord => ({ id: `${product.id}-default`, name: product.itemType === "service" ? "Service" : `1 ${product.stockUnit}`, sku: product.sku, barcode: product.barcode, quantityInBaseUnits: product.itemType === "service" ? 1 : measurementUnit(product.stockUnit).baseUnits, sellingPrice: product.sellingPrice, status: "active" });
 const variantsOf = (product: ProductRecord) => product.saleVariants?.length ? product.saleVariants : [defaultVariant(product)];
 const legacyProductUnits = (product: ProductRecord): ProductUnitRecord[] => variantsOf(product).map((variant) => ({
   id: variant.id,
@@ -409,7 +420,8 @@ const queryCollection = async <T>(tenantId: string, partition: string, options?:
 };
 
 export const listCategories = (tenantId: string) => queryCollection<CategoryRecord>(tenantId, "CATALOG#CATEGORY");
-export const listProducts = (tenantId: string) => queryCollection<ProductRecord>(tenantId, "CATALOG#PRODUCT").then((products) => products.map((product) => materializeEffectiveAdjustment({ ...product, saleVariants: variantsOf(product) })));
+export const listCatalogItems = (tenantId: string) => queryCollection<ProductRecord>(tenantId, "CATALOG#PRODUCT").then((products) => products.map((product) => materializeEffectiveAdjustment({ ...product, itemType: itemTypeOf(product), saleVariants: variantsOf(product) })));
+export const listProducts = (tenantId: string) => listCatalogItems(tenantId).then((products) => products.filter((product) => itemTypeOf(product) === "product"));
 export const listSales = (tenantId: string, limit = 50, range?: { from?: string; to?: string }) => queryCollection<SaleRecord>(tenantId, "SALE", { limit, ...range });
 export const listSalesByStaff = async (tenantId: string, staffId: string, limit = 50, range?: { from?: string; to?: string }) => {
   const sales: SaleRecord[] = [];
@@ -447,6 +459,7 @@ export const getProductPage = async (tenantId: string, options: {
   limit?: number;
   cursor?: string;
   activeOnly?: boolean;
+  includeServices?: boolean;
 }) => {
   const limit = Math.min(Math.max(options.limit ?? 20, 1), 50);
   const search = options.search?.trim().toLowerCase() ?? "";
@@ -466,7 +479,8 @@ export const getProductPage = async (tenantId: string, options: {
       ExclusiveStartKey: exclusiveStartKey,
       Limit: limit - products.length,
     }));
-    products.push(...(response.Items ?? []).map((item) => { const product = stripKeys<ProductRecord>(item)!; return { ...product, saleVariants: variantsOf(product) }; }).filter((product) => {
+    products.push(...(response.Items ?? []).map((item) => { const product = stripKeys<ProductRecord>(item)!; return { ...product, itemType: itemTypeOf(product), saleVariants: variantsOf(product) }; }).filter((product) => {
+      if (!options.includeServices && itemTypeOf(product) === "service") return false;
       if (options.activeOnly && product.status !== "active") return false;
       return !search || [product.name, product.sku, product.barcode, product.categoryName]
         .some((value) => value.toLowerCase().includes(search));
@@ -494,7 +508,7 @@ export const getCategory = async (tenantId: string, id: string) => {
 export const getProduct = async (tenantId: string, id: string) => {
   const response = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: productKey(tenantId, id) }));
   const product = stripKeys<ProductRecord>(response.Item);
-  return product ? { ...product, saleVariants: variantsOf(product) } : null;
+  return product ? { ...product, itemType: itemTypeOf(product), saleVariants: variantsOf(product) } : null;
 };
 
 export const getSale = async (tenantId: string, id: string) => {
@@ -778,7 +792,7 @@ export const updateCategory = async (
   };
   const products = next.name === current.name
     ? []
-    : (await listProducts(tenantId)).filter((product) => product.categoryId === id);
+    : (await listCatalogItems(tenantId)).filter((product) => product.categoryId === id);
   const children = next.name === current.name ? [] : categories.filter((category) => category.parentId === id);
   const codeChanged = next.code !== current.code;
   if (codeChanged) {
@@ -825,8 +839,8 @@ export const deleteCategory = async (
 ) => {
   const current = await getCategory(tenantId, id);
   if (!current) throw new Error("Category not found");
-  if ((await listProducts(tenantId)).some((product) => product.categoryId === id)) {
-    throw new Error("Move this category's products before deleting it");
+  if ((await listCatalogItems(tenantId)).some((product) => product.categoryId === id)) {
+    throw new Error("Move this category's products or services before deleting it");
   }
   if ((await listCategories(tenantId)).some((category) => category.parentId === id)) {
     throw new Error("Move or delete this category's child categories first");
@@ -841,9 +855,14 @@ export const deleteCategory = async (
 
 export const createProduct = async (
   tenantId: string,
-  input: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "vatClass"> & { saleVariants?: SaleVariantRecord[]; productUnits?: ProductUnitInput[]; acknowledgeBelowCost?: boolean; promotionPrice?: number | null; promotionStartsAt?: string | null; promotionEndsAt?: string | null },
+  input: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "vatClass"> & { itemType?: "product" | "service"; serviceComponents?: Array<{ productId: string; quantity: number }>; saleVariants?: SaleVariantRecord[]; productUnits?: ProductUnitInput[]; acknowledgeBelowCost?: boolean; promotionPrice?: number | null; promotionStartsAt?: string | null; promotionEndsAt?: string | null },
   actor: { id: string; name: string },
+  requestId?: string,
 ) => {
+  if (requestId) {
+    const previous = await existingIdempotentResult<ProductRecord>(tenantId, "create_catalog_item", requestId, input);
+    if (previous) return previous;
+  }
   const businessSettings = await getBusinessSettings(tenantId);
   if (businessSettings.vatRegistered && !isVatClass(input.vatClass)) throw new Error("Select a VAT class for this product");
   if (input.vatClass != null && !isVatClass(input.vatClass)) throw new Error("Invalid VAT class");
@@ -851,13 +870,26 @@ export const createProduct = async (
   if (!category || category.status !== "active") throw new Error("Select an active category");
   const id = randomUUID();
   const now = new Date().toISOString();
-  const unit = measurementUnit(input.stockUnit);
+  const itemType = input.itemType ?? "product";
+  const unit = measurementUnit(itemType === "service" ? "each" : input.stockUnit);
   const sku = normalizeLookup(input.sku) || await nextTenantCode(tenantId, "PRODUCT");
-  const provisional = { id, name: input.name.trim(), description: input.description.trim(), categoryId: input.categoryId, sellingPrice: input.sellingPrice, buyingPrice: input.buyingPrice, vatClass: input.vatClass ?? null, tracksExpiry: input.tracksExpiry, promotionPrice: input.promotionPrice, promotionStartsAt: input.promotionStartsAt, promotionEndsAt: input.promotionEndsAt, baseUnit: unit.baseUnit, stockUnit: unit.code, sku, barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active" as const, createdAt: now, updatedAt: now };
+  const serviceComponents: ServiceComponentRecord[] = [];
+  if (itemType === "service") {
+    const seen = new Set<string>();
+    for (const component of input.serviceComponents ?? []) {
+      if (seen.has(component.productId)) throw new Error("A service component can only be added once");
+      seen.add(component.productId);
+      if (!Number.isSafeInteger(component.quantity) || component.quantity < 1) throw new Error("Service component quantities must be positive whole base quantities");
+      const product = await getProduct(tenantId, component.productId);
+      if (!product || itemTypeOf(product) !== "product" || product.status !== "active") throw new Error("Service components must be active physical products");
+      serviceComponents.push({ productId: product.id, productName: product.name, quantity: component.quantity, stockUnit: product.stockUnit });
+    }
+  }
+  const provisional = { id, itemType, name: input.name.trim(), description: input.description.trim(), categoryId: input.categoryId, sellingPrice: input.sellingPrice, buyingPrice: itemType === "service" ? 0 : input.buyingPrice, vatClass: input.vatClass ?? null, tracksExpiry: itemType === "service" ? false : input.tracksExpiry, serviceComponents, promotionPrice: input.promotionPrice, promotionStartsAt: input.promotionStartsAt, promotionEndsAt: input.promotionEndsAt, baseUnit: unit.baseUnit, stockUnit: unit.code, sku, barcode: normalizeLookup(input.barcode), categoryName: category.name, status: "active" as const, createdAt: now, updatedAt: now };
   if (!provisional.name) throw new Error("Product name is required");
-  const settings = input.productUnits?.length ? await getBusinessMeasurementSettings(tenantId) : null;
+  const settings = itemType === "product" && input.productUnits?.length ? await getBusinessMeasurementSettings(tenantId) : null;
   const allowedLabels = new Set([...(settings?.standardUnits.filter(({ baseUnit }) => baseUnit === unit.baseUnit).map(({ code }) => code) ?? []), ...(settings?.packageLabels.filter(({ status }) => status === "active").map(({ code }) => code) ?? [])]);
-  const validatedProductUnits = input.productUnits?.length ? validateProductUnits(input.productUnits, allowedLabels) : undefined;
+  const validatedProductUnits = itemType === "product" && input.productUnits?.length ? validateProductUnits(input.productUnits, allowedLabels) : undefined;
   const usedUnitSkus = new Set([sku, ...(validatedProductUnits ?? []).map(({ sku: unitSku }) => unitSku).filter(Boolean)]);
   let generatedUnitSequence = 1;
   const productUnits = validatedProductUnits?.map((productUnit) => {
@@ -869,7 +901,7 @@ export const createProduct = async (
     usedUnitSkus.add(unitSku);
     return { ...productUnit, sku: unitSku };
   });
-  const saleVariants = validateVariants(productUnits ? productUnitsToSaleVariants(productUnits) : input.saleVariants?.length ? input.saleVariants : [defaultVariant(provisional)]);
+  const saleVariants = validateVariants(itemType === "service" ? [defaultVariant(provisional)] : productUnits ? productUnitsToSaleVariants(productUnits) : input.saleVariants?.length ? input.saleVariants : [defaultVariant(provisional)]);
   if (productUnits) {
     const baseCost = input.buyingPrice / unit.baseUnits;
     const belowCost = productUnits.some((productUnit) => productUnit.sellable && (productUnit.sellingPrice ?? 0) < baseCost * productUnit.quantityInBaseUnits);
@@ -879,33 +911,54 @@ export const createProduct = async (
   const item = { ...productKey(tenantId, id), accessPartition: tenantKey(tenantId, "CATALOG#PRODUCT"), accessSort: `${product.name.toLowerCase()}#${id}`, entityType: "product", tenantId, ...product };
   const lookupItems = [...productAliases(product).values()].map((alias) => ({ ...lookupKey(tenantId, alias.kind, alias.value), entityType: "product_lookup", tenantId, productId: id, variantId: alias.variantId }));
   for (const lookup of lookupItems) if ((await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: { partitionKey: lookup.partitionKey, sortKey: lookup.sortKey } }))).Item) throw new Error(`${lookup.partitionKey.includes("#SKU#") ? "SKU" : "Barcode"} is already used by another product or sale variant`);
-  await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
+  const transaction = [
     { Put: { TableName: TABLE_NAME, Item: item, ConditionExpression: "attribute_not_exists(partitionKey)" } },
     ...lookupItems.map((lookup) => ({ Put: { TableName: TABLE_NAME, Item: lookup, ConditionExpression: "attribute_not_exists(partitionKey)" } })),
-    auditPut(tenantId, { action: "product.created", entityType: "product", entityId: id, productName: product.name, quantityBefore: 0, quantityAfter: 0, quantityDelta: 0, reason: "Product created without stock", actorId: actor.id, actorName: actor.name }, now),
-  ] }));
+    auditPut(tenantId, { action: itemType === "service" ? "service.created" : "product.created", entityType: itemType, entityId: id, productName: product.name, quantityBefore: 0, quantityAfter: 0, quantityDelta: 0, reason: itemType === "service" ? "Service created" : "Product created without stock", actorId: actor.id, actorName: actor.name }, now),
+  ];
+  if (requestId) return commitIdempotent(tenantId, "create_catalog_item", requestId, input, product, transaction);
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: transaction }));
   return product;
 };
 
 export const updateProduct = async (
   tenantId: string,
   id: string,
-  updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "saleVariants" | "promotionPrice" | "promotionStartsAt" | "promotionEndsAt" | "status" | "vatClass">> & { productUnits?: ProductUnitInput[]; acknowledgeBelowCost?: boolean },
+  updates: Partial<Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "stockUnit" | "tracksExpiry" | "saleVariants" | "promotionPrice" | "promotionStartsAt" | "promotionEndsAt" | "status" | "vatClass">> & { serviceComponents?: Array<{ productId: string; quantity: number }>; productUnits?: ProductUnitInput[]; acknowledgeBelowCost?: boolean },
   actor: { id: string; name: string },
 ) => {
   const storedCurrent = await getProduct(tenantId, id);
   if (!storedCurrent) throw new Error("Product not found");
   const current = materializeEffectiveAdjustment(storedCurrent);
+  if (updates.status === "inactive" && itemTypeOf(current) === "product" && (await listCatalogItems(tenantId)).some((item) => itemTypeOf(item) === "service" && item.status === "active" && (item.serviceComponents ?? []).some((component) => component.productId === id))) {
+    throw new Error("Remove this product from active services before archiving it");
+  }
+  let serviceComponents = current.serviceComponents;
+  if (itemTypeOf(current) === "service") {
+    if (updates.stockUnit !== undefined || updates.tracksExpiry !== undefined || updates.productUnits !== undefined) throw new Error("Services do not have stock settings");
+    if (updates.serviceComponents) {
+      const seen = new Set<string>(); const resolved: ServiceComponentRecord[] = [];
+      for (const component of updates.serviceComponents) {
+        if (seen.has(component.productId)) throw new Error("A service component can only be added once");
+        seen.add(component.productId);
+        if (!Number.isSafeInteger(component.quantity) || component.quantity < 1) throw new Error("Service component quantities must be positive whole base quantities");
+        const product = await getProduct(tenantId, component.productId);
+        if (!product || itemTypeOf(product) !== "product" || product.status !== "active") throw new Error("Service components must be active physical products");
+        resolved.push({ productId: product.id, productName: product.name, quantity: component.quantity, stockUnit: product.stockUnit });
+      }
+      serviceComponents = resolved;
+    }
+  }
   if (updates.productUnits?.length) {
     const currentPrices = new Map(productUnitsOf(current).filter((unit) => unit.sellable && unit.sellingPrice != null).map((unit) => [unit.id, regularVariantPrice(current, unit.id)]));
     const changedExistingPrice = updates.productUnits.some((unit) => currentPrices.has(unit.id ?? "") && unit.sellingPrice !== currentPrices.get(unit.id ?? ""));
     if (changedExistingPrice) throw new Error("Use Adjust prices to change an existing selling unit price");
   }
-  if (updates.saleVariants?.length && updates.productUnits === undefined) {
+  if (itemTypeOf(current) !== "service" && updates.saleVariants?.length && updates.productUnits === undefined) {
     const currentPrices = new Map(variantsOf(current).map((variant) => [variant.id, regularVariantPrice(current, variant.id)]));
     if (updates.saleVariants.some((variant) => currentPrices.has(variant.id) && variant.sellingPrice !== currentPrices.get(variant.id))) throw new Error("Use Adjust prices to change an existing selling unit price");
   }
-  if (updates.sellingPrice !== undefined && updates.productUnits === undefined && updates.saleVariants === undefined && updates.sellingPrice !== regularVariantPrice(current, variantsOf(current)[0].id)) {
+  if (itemTypeOf(current) !== "service" && updates.sellingPrice !== undefined && updates.productUnits === undefined && updates.saleVariants === undefined && updates.sellingPrice !== regularVariantPrice(current, variantsOf(current)[0].id)) {
     throw new Error("Use Adjust prices to change an existing selling unit price");
   }
   const businessSettings = await getBusinessSettings(tenantId);
@@ -930,8 +983,8 @@ export const updateProduct = async (
     const belowCost = productUnits.some((productUnit) => productUnit.sellable && (productUnit.sellingPrice ?? 0) < baseCost * productUnit.quantityInBaseUnits);
     if (belowCost && !updates.acknowledgeBelowCost) throw new Error("Acknowledge the below-cost product unit before saving");
   }
-  const { acknowledgeBelowCost: _acknowledgeBelowCost, ...storedUpdates } = updates;
-  const next: ProductRecord = { ...current, ...storedUpdates, productUnits, saleVariants, sellingPrice, buyingPrice, baseUnit: unit.baseUnit, stockUnit: unit.code, tracksExpiry: updates.tracksExpiry ?? current.tracksExpiry, sku: normalizeLookup(updates.sku ?? current.sku), barcode: normalizeLookup(updates.barcode ?? current.barcode), categoryId, categoryName: category.name, updatedAt: now };
+  const { acknowledgeBelowCost: _acknowledgeBelowCost, serviceComponents: _requestedServiceComponents, ...storedUpdates } = updates;
+  const next: ProductRecord = { ...current, ...storedUpdates, serviceComponents, productUnits, saleVariants, sellingPrice, buyingPrice, baseUnit: unit.baseUnit, stockUnit: unit.code, tracksExpiry: updates.tracksExpiry ?? current.tracksExpiry, sku: normalizeLookup(updates.sku ?? current.sku), barcode: normalizeLookup(updates.barcode ?? current.barcode), categoryId, categoryName: category.name, updatedAt: now };
   const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
   const oldAliases = productAliases(current); const newAliases = productAliases(next);
   for (const [aliasKey, alias] of newAliases) if (!oldAliases.has(aliasKey) && (await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: lookupKey(tenantId, alias.kind, alias.value) }))).Item) throw new Error(`${alias.kind === "SKU" ? "SKU" : "Barcode"} is already used by another product or sale variant`);
@@ -1075,7 +1128,10 @@ export const completeSale = async (
   const products = await Promise.all(productIds.map((productId) => getProduct(tenantId, productId)));
   if (products.some((product) => !product || product.status !== "active")) throw new Error("One or more products are unavailable");
   const byProduct = new Map(products.map((product) => [product!.id, product!]));
-  const resolvedItems = [...grouped.values()].map((item) => { const product = byProduct.get(item.productId)!; const variants = variantsOf(product).filter((variant) => variant.status === "active"); const variant = variants.find((candidate) => candidate.id === item.variantId) ?? (!item.variantId ? variants[0] : undefined); if (!variant) throw new Error(`${product.name} sale variant is unavailable`); return { ...item, product, variant, inventoryQuantity: item.quantity * variant.quantityInBaseUnits }; });
+  const resolvedItems = [...grouped.values()].map((item) => { const product = byProduct.get(item.productId)!; const variants = variantsOf(product).filter((variant) => variant.status === "active"); const variant = variants.find((candidate) => candidate.id === item.variantId) ?? (!item.variantId ? variants[0] : undefined); if (!variant) throw new Error(`${product.name} sale variant is unavailable`); return { ...item, product, variant, inventoryQuantity: itemTypeOf(product) === "service" ? 0 : item.quantity * variant.quantityInBaseUnits }; });
+  const componentIds = [...new Set(resolvedItems.flatMap((item) => itemTypeOf(item.product) === "service" ? (item.product.serviceComponents ?? []).map((component) => component.productId) : []))];
+  const componentProducts = await Promise.all(componentIds.map((productId) => getProduct(tenantId, productId)));
+  if (componentProducts.some((product) => !product || itemTypeOf(product) !== "product" || product.status !== "active")) throw new Error("One or more service materials are unavailable");
   const pricingAt = new Date();
   const priceChanges = resolvedItems.flatMap(({ product, variant, expectedCatalogPrice }) => {
     if (expectedCatalogPrice === undefined || expectedCatalogPrice === null) return [];
@@ -1084,7 +1140,21 @@ export const completeSale = async (
     return currentPrice === expectedCatalogPrice ? [] : [{ productId: product.id, productName: product.name, variantId: variant.id, variantName: variant.name, previousPrice: expectedCatalogPrice, currentPrice }];
   });
   if (priceChanges.length) throw new GraphQLError("One or more basket prices changed. Review the updated totals before completing the sale.", { extensions: { code: "PRICE_CHANGED", priceChanges } });
-  const inventoryByProduct = new Map<string, number>(); for (const item of resolvedItems) inventoryByProduct.set(item.productId, (inventoryByProduct.get(item.productId) ?? 0) + item.inventoryQuantity);
+  const inventoryByProduct = new Map<string, number>();
+  const directlySoldProducts = new Set<string>();
+  const inventoryNames = new Map<string, string>();
+  for (const item of resolvedItems) {
+    if (itemTypeOf(item.product) === "service") {
+      for (const component of item.product.serviceComponents ?? []) {
+        const quantity = component.quantity * item.quantity;
+        inventoryByProduct.set(component.productId, (inventoryByProduct.get(component.productId) ?? 0) + quantity);
+        inventoryNames.set(component.productId, component.productName);
+      }
+    } else {
+      directlySoldProducts.add(item.productId); inventoryNames.set(item.productId, item.product.name);
+      inventoryByProduct.set(item.productId, (inventoryByProduct.get(item.productId) ?? 0) + item.inventoryQuantity);
+    }
+  }
   const now = new Date().toISOString();
   const id = randomUUID();
   const [allocations, cashShift, store, globalBranding, checkoutSettings] = await Promise.all([allocateLots(tenantId, input.storeId, [...inventoryByProduct].map(([productId, quantity]) => ({ productId, quantity }))), input.paymentMethod === "cash" ? getOpenCashShift(tenantId, input.storeId, actor.id) : Promise.resolve(null), getStore(tenantId, input.storeId), getBusinessSettings(tenantId), getBusinessCheckoutSettings(tenantId)]);
@@ -1093,6 +1163,7 @@ export const completeSale = async (
   if (checkoutSettings.requireCustomerName && !input.customerName?.trim()) throw new Error("Customer name is required for checkout");
   if (input.paymentMethod === "cash" && !cashShift) throw new Error("Open a cash shift before accepting cash sales");
   const remainingCostByProduct = new Map([...inventoryByProduct].map(([productId, inventoryQuantity]) => [productId, { quantity: inventoryQuantity, costMinor: (allocations.get(productId) ?? []).reduce((sum, allocation) => sum + allocation.costMinor, 0) }]));
+  const consumeCost = (productId: string, quantity: number) => { const remaining = remainingCostByProduct.get(productId); if (!remaining || quantity < 1 || quantity > remaining.quantity) throw new Error("Unable to allocate inventory cost"); const costMinor = quantity === remaining.quantity ? remaining.costMinor : Math.round(remaining.costMinor * quantity / remaining.quantity); remaining.quantity -= quantity; remaining.costMinor -= costMinor; return costMinor; };
   const saleItems: SaleItemRecord[] = resolvedItems.map(({ product, variant, quantity, inventoryQuantity, unitPriceOverride, priceOverrideReason }) => {
     const regularPrice = regularVariantPrice(product, variant.id, new Date(now));
     const defaultSale = variantsOf(product)[0]?.id === variant.id; const authoritativePrice = defaultSale ? effectiveProductPrice(product, new Date(now)) : regularPrice;
@@ -1109,9 +1180,8 @@ export const completeSale = async (
       }
     }
     const price = overrideRequested ? unitPriceOverride! : authoritativePrice;
-    const remainingCost = remainingCostByProduct.get(product.id)!;
-    const lineCostMinor = inventoryQuantity === remainingCost.quantity ? remainingCost.costMinor : Math.round(remainingCost.costMinor * inventoryQuantity / remainingCost.quantity);
-    remainingCost.quantity -= inventoryQuantity; remainingCost.costMinor -= lineCostMinor;
+    const consumedComponents = itemTypeOf(product) === "service" ? (product.serviceComponents ?? []).map((component) => { const componentQuantity = component.quantity * quantity; const totalCostMinor = consumeCost(component.productId, componentQuantity); return { productId: component.productId, productName: component.productName, quantity: componentQuantity, unitCost: totalCostMinor / 100 / componentQuantity, totalCost: totalCostMinor / 100 }; }) : undefined;
+    const lineCostMinor = itemTypeOf(product) === "service" ? (consumedComponents ?? []).reduce((sum, component) => sum + Math.round(component.totalCost * 100), 0) : consumeCost(product.id, inventoryQuantity);
     const cost = lineCostMinor / 100 / quantity;
     const total = roundMoney(price * quantity);
     const activeVat = vatApplies(globalBranding, now) && isVatClass(product.vatClass);
@@ -1137,6 +1207,7 @@ export const completeSale = async (
       vatRateBasisPoints: breakdown.rateBasisPoints,
       taxableAmount: breakdown.taxableMinor / 100,
       vatAmount: breakdown.vatMinor / 100,
+      ...(consumedComponents?.length ? { consumedComponents } : {}),
     };
   });
   const subtotal = roundMoney(saleItems.reduce((sum, item) => sum + Math.max(item.regularPrice ?? item.price, item.priceBeforeOverride ?? item.price, item.price) * item.quantity, 0));
@@ -1196,7 +1267,7 @@ export const completeSale = async (
   const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
   for (const [productId] of inventoryByProduct) for (const allocation of allocations.get(productId) ?? []) transaction.push(
     lotDecrement(tenantId, allocation.lot, allocation.quantity, now),
-    stockMovementPut(tenantId, { type: "sale", storeId: input.storeId, productId, productName: byProduct.get(productId)!.name, lotId: allocation.lot.id, quantity: -allocation.quantity, unitCost: allocation.lot.unitCost, reason: `Sale ${sale.orderNumber}`, referenceId: id, actorId: actor.id, actorName: actor.name }, now),
+    stockMovementPut(tenantId, { type: directlySoldProducts.has(productId) ? "sale" : "service_consumption", storeId: input.storeId, productId, productName: inventoryNames.get(productId) ?? allocation.lot.productName, lotId: allocation.lot.id, quantity: -allocation.quantity, unitCost: allocation.lot.unitCost, reason: `${directlySoldProducts.has(productId) ? "Sale" : "Service materials for"} ${sale.orderNumber}`, referenceId: id, actorId: actor.id, actorName: actor.name }, now),
   );
   transaction.push({ Put: { TableName: TABLE_NAME, Item: { partitionKey: tenantKey(tenantId, `SALE#${id}`), sortKey: "RECEIPT", accessPartition: tenantKey(tenantId, "SALE"), accessSort: `${now}#${id}`, entityType: "sale", tenantId, ...sale }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
   if (paymentReference) {
@@ -1217,7 +1288,7 @@ export const dashboardSummary = async (tenantId: string, requestedDays = 1, staf
   startDate.setUTCDate(startDate.getUTCDate() - (days - 1));
   const start = startDate.toISOString();
   const [catalogProducts, allSales, audits, stock] = await Promise.all([
-    listProducts(tenantId),
+    listCatalogItems(tenantId),
     queryCollection<SaleRecord>(tenantId, "SALE", { from: start }),
     includeDetails ? listAudits(tenantId, 8) : Promise.resolve([]),
     storeId ? getStoreStock(tenantId, storeId) : Promise.resolve([]),
@@ -1264,7 +1335,7 @@ export const dashboardSummary = async (tenantId: string, requestedDays = 1, staf
 
 export const businessReport = async (tenantId: string, range: { from: string; to: string; storeId?: string }): Promise<BusinessReportRecord> => {
   const [catalogProducts, sales, audits, stores] = await Promise.all([
-    listProducts(tenantId),
+    listCatalogItems(tenantId),
     queryCollection<SaleRecord>(tenantId, "SALE", range),
     queryCollection<AuditRecord>(tenantId, "AUDIT", range),
     listInventoryStores(tenantId),
@@ -1280,8 +1351,9 @@ export const businessReport = async (tenantId: string, range: { from: string; to
   for (const lot of lots) { quantityByProduct.set(lot.productId, (quantityByProduct.get(lot.productId) ?? 0) + lot.remainingQuantity); valueByProduct.set(lot.productId, roundMoney((valueByProduct.get(lot.productId) ?? 0) + lotRemainingCostMinor(lot) / 100)); }
   const reorderByProduct = new Map<string, number>();
   for (const position of storePositions) reorderByProduct.set(position.productId, (reorderByProduct.get(position.productId) ?? 0) + position.reorderPoint);
-  const products = catalogProducts.map((product) => ({ ...product, quantity: quantityByProduct.get(product.id) ?? 0, reorderPoint: reorderByProduct.get(product.id) }));
-  const productById = new Map(products.map((product) => [product.id, product]));
+  const catalogItems = catalogProducts.map((product) => ({ ...product, quantity: quantityByProduct.get(product.id) ?? 0, reorderPoint: reorderByProduct.get(product.id) }));
+  const products = catalogItems.filter((product) => itemTypeOf(product) === "product");
+  const productById = new Map(catalogItems.map((product) => [product.id, product]));
   const productTotals = new Map<string, ReportProductRecord>();
   const promotionTotals = new Map<string, ReportProductRecord>();
   let promotionUnitsSold = 0;
@@ -1291,7 +1363,9 @@ export const businessReport = async (tenantId: string, range: { from: string; to
     for (const item of sale.items) {
       const product = productById.get(item.productId);
       const current = productTotals.get(item.productId) ?? { productId: item.productId, productName: item.productName, baseUnit: product?.baseUnit ?? "each", stockUnit: product?.stockUnit ?? "each", units: 0, revenue: 0, grossProfit: 0, savings: 0 };
-      current.units += item.inventoryQuantity / measurementUnit(current.stockUnit).baseUnits;
+      current.units += product?.itemType === "service"
+        ? item.quantity
+        : item.inventoryQuantity / measurementUnit(current.stockUnit).baseUnits;
       current.revenue = roundMoney(current.revenue + item.total);
       current.grossProfit = roundMoney(current.grossProfit + item.total - (item.vatAmount ?? 0) - item.cost * item.quantity);
       productTotals.set(item.productId, current);
@@ -1301,7 +1375,9 @@ export const businessReport = async (tenantId: string, range: { from: string; to
         promotionRevenue = roundMoney(promotionRevenue + item.total);
         promotionSavings = roundMoney(promotionSavings + saving);
         const promotional = promotionTotals.get(item.productId) ?? { productId: item.productId, productName: item.productName, baseUnit: product?.baseUnit ?? "each", stockUnit: product?.stockUnit ?? "each", units: 0, revenue: 0, grossProfit: 0, savings: 0 };
-        promotional.units += item.inventoryQuantity / measurementUnit(promotional.stockUnit).baseUnits;
+        promotional.units += product?.itemType === "service"
+          ? item.quantity
+          : item.inventoryQuantity / measurementUnit(promotional.stockUnit).baseUnits;
         promotional.revenue = roundMoney(promotional.revenue + item.total);
         promotional.grossProfit = roundMoney(promotional.grossProfit + item.total - (item.vatAmount ?? 0) - item.cost * item.quantity);
         promotional.savings = roundMoney(promotional.savings + saving);

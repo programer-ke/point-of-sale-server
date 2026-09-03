@@ -46,6 +46,7 @@ import {
   getStaffProfiles,
   listAudits,
   listCategories,
+  listCatalogItems,
   listProducts,
   listSales,
   listSalesByStaff,
@@ -69,6 +70,7 @@ import {
 import { nextTenantCode } from "../repositories/code-generator";
 import { logEvent, observeCriticalOperation } from "../observability";
 import { measurementUnit } from "../domain/measurements";
+import { isVatClass } from "../domain/vat";
 import {
   createNotification,
   listNotifications,
@@ -126,6 +128,9 @@ import {
   upsertStorePolicy,
   upsertSupplierProduct,
   writeOffLot,
+  recordOpeningStock,
+  existingIdempotentResult,
+  commitIdempotent,
   type ReceiptLineInput,
 } from "../repositories/supply-chain-repository";
 import { accountingSummary } from "../repositories/accounting-repository";
@@ -206,6 +211,17 @@ const selectedStore = async (context: GraphQLContext, requested?: string | null)
   const fallback = (await listStores(tenantId)).find((store) => store.status === "active");
   if (!fallback) throw new Error("No active store is configured");
   return fallback;
+};
+const withStoreAvailability = async (tenantId: string, storeId: string, items: ProductRecord[]) => {
+  const stock = await storeStock(tenantId, storeId); const byProduct = new Map(stock.map((item) => [item.productId, item]));
+  return items.map((item) => {
+    if ((item.itemType ?? "product") === "service") {
+      const components = item.serviceComponents ?? [];
+      const serviceAvailableQuantity = components.length ? Math.min(...components.map((component) => Math.floor((byProduct.get(component.productId)?.quantity ?? 0) / component.quantity))) : null;
+      return { ...item, storeStock: null, serviceAvailableQuantity };
+    }
+    return { ...item, storeStock: byProduct.get(item.id) ?? { storeId, productId: item.id, quantity: 0, inventoryValue: 0, reorderPoint: 0, targetQuantity: 0, lowStock: false }, serviceAvailableQuantity: null };
+  });
 };
 const ensureMainStore = async (tenantId: string) => {
   const existing = (await listStores(tenantId)).find((store) => store.code === "MAIN");
@@ -304,6 +320,168 @@ const validateMoney = (value: number, name: string) => {
   if (!Number.isFinite(value) || value < 0) throw new Error(`${name} must be zero or greater`);
 };
 
+type CatalogImportRowInput = {
+  rowNumber: number;
+  itemType: string;
+  name: string;
+  categoryPath: string;
+  sku: string;
+  barcode: string;
+  sellingPrice: number;
+  vatClass?: string | null;
+  description: string;
+  stockUnit?: string | null;
+  buyingPrice?: number | null;
+  tracksExpiry?: boolean | null;
+  openingQuantity?: number | null;
+  openingUnitCost?: number | null;
+  batchNumber?: string | null;
+  expiryDate?: string | null;
+};
+
+type CatalogImportRowResult = {
+  rowNumber: number;
+  itemType: string;
+  name: string;
+  categoryPath: string;
+  valid: boolean;
+  status: string;
+  itemId?: string;
+  errors: string[];
+};
+
+const normalizedImportValue = (value: string | null | undefined) => (value ?? "").trim().toLowerCase();
+const importPathParts = (path: string) => path.split(">").map((part) => part.trim()).filter(Boolean);
+const validImportDate = (value: string) => { const timestamp = Date.parse(`${value}T00:00:00.000Z`); return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === value; };
+
+export const previewCatalogImport = async (tenantId: string, rows: CatalogImportRowInput[], storeId?: string | null, effectiveDate?: string | null) => {
+  if (rows.length < 1 || rows.length > 500) throw new Error("Catalog imports must contain 1 to 500 rows");
+  const [items, categories, settings] = await Promise.all([listCatalogItems(tenantId), listCategories(tenantId), getBusinessSettings(tenantId)]);
+  const existingCodes = new Set(items.flatMap((item) => [item.sku, item.barcode, ...item.saleVariants.flatMap((variant) => [variant.sku, variant.barcode])]).filter(Boolean).map(normalizedImportValue));
+  const fileCodeCounts = new Map<string, number>();
+  const rowNumberCounts = new Map<number, number>();
+  for (const row of rows) for (const code of [row.sku, row.barcode].map(normalizedImportValue).filter(Boolean)) fileCodeCounts.set(code, (fileCodeCounts.get(code) ?? 0) + 1);
+  for (const row of rows) rowNumberCounts.set(row.rowNumber, (rowNumberCounts.get(row.rowNumber) ?? 0) + 1);
+  const hasOpeningStock = rows.some((row) => row.openingQuantity != null);
+  let openingSetupError = "";
+  if (hasOpeningStock) {
+    if (!storeId) openingSetupError = "Select a store for opening stock";
+    else { const store = await getStore(tenantId, storeId); if (!store || store.status !== "active") openingSetupError = "Select an active store for opening stock"; }
+    if (!effectiveDate || !validImportDate(effectiveDate)) openingSetupError = "Select a valid effective date for opening stock";
+    else if (effectiveDate > new Date().toISOString().slice(0, 10)) openingSetupError = "Opening stock cannot be dated in the future";
+  }
+  const results: CatalogImportRowResult[] = rows.map((row) => {
+    const errors: string[] = [];
+    const itemType = normalizedImportValue(row.itemType || "product");
+    if (!Number.isSafeInteger(row.rowNumber) || row.rowNumber < 2 || (rowNumberCounts.get(row.rowNumber) ?? 0) > 1) errors.push("Row number must be unique and at least 2");
+    if (itemType !== "product" && itemType !== "service") errors.push("itemType must be product or service");
+    if (!row.name.trim()) errors.push("Name is required");
+    const pathParts = importPathParts(row.categoryPath);
+    if (!pathParts.length) errors.push("Category path is required");
+    if (!Number.isFinite(row.sellingPrice) || row.sellingPrice < 0) errors.push("Selling price must be zero or greater");
+    if (settings.vatRegistered && !isVatClass(row.vatClass)) errors.push("VAT class is required");
+    if (row.vatClass != null && row.vatClass !== "" && !isVatClass(row.vatClass)) errors.push("VAT class is invalid");
+    for (const code of [row.sku, row.barcode].map(normalizedImportValue).filter(Boolean)) {
+      if (existingCodes.has(code)) errors.push(`${code.toUpperCase()} already exists`);
+      if ((fileCodeCounts.get(code) ?? 0) > 1) errors.push(`${code.toUpperCase()} is repeated in this file`);
+    }
+    if (itemType === "service") {
+      if (row.stockUnit || row.buyingPrice != null || row.tracksExpiry != null || row.openingQuantity != null || row.openingUnitCost != null || row.batchNumber || row.expiryDate) errors.push("Service rows must leave stock fields blank");
+    } else {
+      let unit;
+      try { unit = measurementUnit(row.stockUnit || "each"); } catch { errors.push("Stock unit is invalid"); }
+      if (row.buyingPrice != null && (!Number.isFinite(row.buyingPrice) || row.buyingPrice < 0)) errors.push("Buying price must be zero or greater");
+      if (row.openingUnitCost != null && (!Number.isFinite(row.openingUnitCost) || row.openingUnitCost < 0)) errors.push("Opening unit cost must be zero or greater");
+      if (row.expiryDate && !validImportDate(row.expiryDate)) errors.push("Expiry date is invalid");
+      if (row.openingQuantity != null) {
+        if (!Number.isFinite(row.openingQuantity) || row.openingQuantity <= 0) errors.push("Opening quantity must be positive");
+        else if (unit && !Number.isSafeInteger(row.openingQuantity * unit.baseUnits)) errors.push("Opening quantity must convert to whole base units");
+        if (row.tracksExpiry && !row.expiryDate) errors.push("Expiry date is required for expiry-tracked products");
+        if (openingSetupError) errors.push(openingSetupError);
+      }
+    }
+    return { rowNumber: row.rowNumber, itemType, name: row.name.trim(), categoryPath: row.categoryPath.trim(), valid: errors.length === 0, status: errors.length ? "invalid" : "ready", errors };
+  });
+  const categoriesToCreate: string[] = [];
+  const known = new Map(categories.filter((category) => category.status === "active").map((category) => [`${category.parentId ?? "root"}:${normalizedImportValue(category.name)}`, category.id]));
+  for (const result of results.filter((row) => row.valid)) {
+    let parent = "root"; let rendered = "";
+    for (const part of importPathParts(result.categoryPath)) {
+      rendered = rendered ? `${rendered} > ${part}` : part;
+      const key = `${parent}:${normalizedImportValue(part)}`;
+      const found = known.get(key);
+      if (found) parent = found;
+      else { const token = `new:${normalizedImportValue(rendered)}`; known.set(key, token); parent = token; categoriesToCreate.push(rendered); }
+    }
+  }
+  return { rows: results, categoriesToCreate: [...new Set(categoriesToCreate)], importableRows: results.filter((row) => row.valid).length, hasOpeningStock };
+};
+
+const runCatalogImport = async (tenantId: string, rows: CatalogImportRowInput[], storeId: string | null | undefined, effectiveDate: string | null | undefined, requestId: string, importedBy: { id: string; name: string }) => {
+  if (rows.length > 40) throw new Error("Submit catalog imports in batches of at most 40 rows");
+  const payload = { rows, storeId: storeId ?? null, effectiveDate: effectiveDate ?? null };
+  const previous = await existingIdempotentResult<{ requestId: string; importedCount: number; failedCount: number; categoriesCreated: string[]; rows: CatalogImportRowResult[] }>(tenantId, "catalog_import", requestId, payload);
+  if (previous) return previous;
+  const preview = await previewCatalogImport(tenantId, rows, storeId, effectiveDate);
+  const workingCategories = await listCategories(tenantId);
+  const categoriesCreated: string[] = [];
+  const ensureCategoryPath = async (path: string) => {
+    let parentId: string | null = null; let rendered = "";
+    for (const name of importPathParts(path)) {
+      rendered = rendered ? `${rendered} > ${name}` : name;
+      let category = workingCategories.find((candidate) => candidate.status === "active" && normalizedImportValue(candidate.name) === normalizedImportValue(name) && (candidate.parentId ?? null) === parentId);
+      if (!category) {
+        category = await createCategory(tenantId, { code: "", name, description: "", parentId, status: "active" }, importedBy);
+        workingCategories.push(category); categoriesCreated.push(rendered);
+      }
+      parentId = category.id;
+    }
+    if (!parentId) throw new Error("Category path is required");
+    return parentId;
+  };
+  const output = preview.rows.map((row) => ({ ...row }));
+  const openingLines: Array<{ rowNumber: number; productId: string; quantity: number; unitCost: number; batchNumber?: string | null; expiryDate?: string | null }> = [];
+  for (const row of rows) {
+    const result = output.find((candidate) => candidate.rowNumber === row.rowNumber)!;
+    if (!result.valid) continue;
+    try {
+      const itemType = normalizedImportValue(row.itemType) as "product" | "service";
+      const categoryId = await ensureCategoryPath(row.categoryPath);
+      const stockUnit = row.stockUnit || "each";
+      const item = await createProduct(tenantId, {
+        itemType,
+        name: row.name,
+        description: row.description ?? "",
+        sku: row.sku ?? "",
+        barcode: row.barcode ?? "",
+        categoryId,
+        sellingPrice: row.sellingPrice,
+        buyingPrice: itemType === "service" ? 0 : row.buyingPrice ?? 0,
+        vatClass: (row.vatClass || null) as ProductRecord["vatClass"],
+        stockUnit: itemType === "service" ? "each" : stockUnit,
+        tracksExpiry: itemType === "product" && Boolean(row.tracksExpiry),
+      }, importedBy, `${requestId}:${row.rowNumber}`);
+      result.itemId = item.id; result.status = "imported";
+      if (itemType === "product" && row.openingQuantity != null) {
+        const unit = measurementUnit(stockUnit); const quantity = row.openingQuantity * unit.baseUnits;
+        openingLines.push({ rowNumber: row.rowNumber, productId: item.id, quantity, unitCost: (row.openingUnitCost ?? row.buyingPrice ?? 0) / unit.baseUnits, batchNumber: row.batchNumber, expiryDate: row.expiryDate });
+      }
+    } catch (error) {
+      result.valid = false; result.status = "failed"; result.errors = [error instanceof Error ? error.message : "Import failed"];
+    }
+  }
+  if (openingLines.length) {
+    try {
+      await recordOpeningStock(tenantId, { storeId: storeId!, effectiveDate, notes: "Catalog import opening stock", lines: openingLines.map(({ rowNumber: _rowNumber, ...line }) => line) }, importedBy, `${requestId}:opening`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Opening stock posting failed";
+      for (const line of openingLines) { const result = output.find((candidate) => candidate.rowNumber === line.rowNumber)!; result.valid = false; result.status = "stock_failed"; result.errors = [message]; }
+    }
+  }
+  const result = { requestId, importedCount: output.filter((row) => row.status === "imported").length, failedCount: output.filter((row) => row.status !== "imported").length, categoriesCreated, rows: output };
+  return commitIdempotent(tenantId, "catalog_import", requestId, payload, result, []);
+};
+
 
 const validateCategory = (input: { code: string; name: string; description: string; parentId?: string | null }, requireCode = true) => {
   const category = { code: input.code.trim().toUpperCase(), name: input.name.trim(), description: input.description.trim(), parentId: input.parentId?.trim() || null };
@@ -400,6 +578,27 @@ const sendPaymentReviewEmail = async (tenantId: string, approved: boolean, reaso
   });
 };
 
+const catalogItemFieldResolvers = {
+  itemType: (product: ProductRecord) => product.itemType ?? "product",
+  serviceComponents: (product: ProductRecord) => product.serviceComponents ?? [],
+  sellingPrice: (product: ProductRecord) => regularVariantPrice(product, product.saleVariants[0].id),
+  effectivePrice: (product: ProductRecord) => effectiveProductPrice(product),
+  onPromotion: (product: ProductRecord) => effectiveProductPrice(product) < regularVariantPrice(product, product.saleVariants[0].id),
+  pendingPriceAdjustment: (product: ProductRecord) => pendingPriceAdjustment(product),
+  saleVariants: (product: ProductRecord & { storeStock?: { quantity: number } | null; serviceAvailableQuantity?: number | null }) => product.saleVariants.map((variant) => ({ ...variant, sellingPrice: regularVariantPrice(product, variant.id), availableQuantity: (product.itemType ?? "product") === "service" ? product.serviceAvailableQuantity ?? null : product.storeStock ? Math.floor(product.storeStock.quantity / variant.quantityInBaseUnits) : null })),
+  productUnits: (product: ProductRecord & { storeStock?: { quantity: number; inventoryValue: number } | null }) => {
+    if ((product.itemType ?? "product") === "service") return [];
+    const fallbackBaseCost = product.buyingPrice / measurementUnit(product.stockUnit).baseUnits;
+    const baseCost = product.storeStock && product.storeStock.quantity > 0 ? product.storeStock.inventoryValue / product.storeStock.quantity : fallbackBaseCost;
+    return productUnitsOf(product).map((unit) => {
+      const estimatedCost = baseCost * unit.quantityInBaseUnits;
+      const sellingPrice = unit.sellingPrice == null ? null : regularVariantPrice(product, unit.id);
+      const marginAmount = sellingPrice == null ? null : sellingPrice - estimatedCost;
+      return { ...unit, unitRate: sellingPrice == null ? null : sellingPrice / unit.quantityInBaseUnits, estimatedCost, marginAmount, marginPercent: sellingPrice == null || sellingPrice === 0 ? null : marginAmount! / sellingPrice, belowCost: sellingPrice != null && sellingPrice < estimatedCost };
+    });
+  },
+};
+
 const baseResolvers = {
   BillingPayment: {
     billingInterval: (payment: { billingInterval?: string }) => payment.billingInterval ?? "monthly",
@@ -421,28 +620,12 @@ const baseResolvers = {
     vatEffectiveFrom: (settings: { vatEffectiveFrom?: string }) => settings.vatEffectiveFrom ?? "",
     withholdingVatAgent: (settings: { withholdingVatAgent?: boolean }) => settings.withholdingVatAgent ?? false,
   },
-  Product: {
-    sellingPrice: (product: ProductRecord) => regularVariantPrice(product, product.saleVariants[0].id),
-    effectivePrice: (product: ProductRecord) => effectiveProductPrice(product),
-    onPromotion: (product: ProductRecord) => effectiveProductPrice(product) < regularVariantPrice(product, product.saleVariants[0].id),
-    pendingPriceAdjustment: (product: ProductRecord) => pendingPriceAdjustment(product),
-    saleVariants: (product: ProductRecord) => product.saleVariants.map((variant) => ({ ...variant, sellingPrice: regularVariantPrice(product, variant.id) })),
-    productUnits: (product: ProductRecord & { storeStock?: { quantity: number; inventoryValue: number } | null }) => {
-      const fallbackBaseCost = product.buyingPrice / measurementUnit(product.stockUnit).baseUnits;
-      const baseCost = product.storeStock && product.storeStock.quantity > 0
-        ? product.storeStock.inventoryValue / product.storeStock.quantity
-        : fallbackBaseCost;
-      return productUnitsOf(product).map((unit) => {
-        const estimatedCost = baseCost * unit.quantityInBaseUnits;
-        const sellingPrice = unit.sellingPrice == null ? null : regularVariantPrice(product, unit.id);
-        const marginAmount = sellingPrice == null ? null : sellingPrice - estimatedCost;
-        return { ...unit, unitRate: sellingPrice == null ? null : sellingPrice / unit.quantityInBaseUnits, estimatedCost, marginAmount, marginPercent: sellingPrice == null || sellingPrice === 0 ? null : marginAmount! / sellingPrice, belowCost: sellingPrice != null && sellingPrice < estimatedCost };
-      });
-    },
-  },
+  Product: catalogItemFieldResolvers,
+  CatalogItem: catalogItemFieldResolvers,
   Sale: {
     receiptBranding: (sale: SaleRecord) => sale.receiptBranding,
   },
+  SaleItem: { consumedComponents: (item: SaleRecord["items"][number]) => item.consumedComponents ?? [] },
   Query: {
     me: async (_: unknown, _args: unknown, context: GraphQLContext) => {
       const auth = requireStaff(context);
@@ -470,6 +653,8 @@ const baseResolvers = {
       requireStaff(context);
       return listCategories(tenant(context));
     },
+    catalogItems: async (_: unknown, { storeId }: { storeId?: string }, context: GraphQLContext) => { requireStaff(context); const tenantId = tenant(context); const store = await selectedStore(context, storeId); return withStoreAvailability(tenantId, store.id, await listCatalogItems(tenantId)); },
+    catalogItemPage: async (_: unknown, args: { search?: string; limit?: number; cursor?: string; activeOnly?: boolean; storeId?: string }, context: GraphQLContext) => { requireStaff(context); const tenantId = tenant(context); const store = await selectedStore(context, args.storeId); const page = await getProductPage(tenantId, { ...args, includeServices: true }); return { ...page, items: await withStoreAvailability(tenantId, store.id, page.items) }; },
     products: async (_: unknown, { storeId }: { storeId?: string }, context: GraphQLContext) => {
       requireStaff(context);
       const tenantId = tenant(context); const store = await selectedStore(context, storeId); const [products, stock] = await Promise.all([listProducts(tenantId), storeStock(tenantId, store.id)]); const byProduct = new Map(stock.map((item) => [item.productId, item]));
@@ -481,8 +666,8 @@ const baseResolvers = {
       context: GraphQLContext,
     ) => {
       requireStaff(context);
-      const tenantId = tenant(context); const store = await selectedStore(context, args.storeId); const [page, stock] = await Promise.all([getProductPage(tenantId, args), storeStock(tenantId, store.id)]); const byProduct = new Map(stock.map((item) => [item.productId, item]));
-      return { ...page, items: page.items.map((product) => ({ ...product, storeStock: byProduct.get(product.id) ?? { storeId: store.id, productId: product.id, quantity: 0, inventoryValue: 0, reorderPoint: 0, targetQuantity: 0, lowStock: false } })) };
+      const tenantId = tenant(context); const store = await selectedStore(context, args.storeId); const page = await getProductPage(tenantId, args);
+      return { ...page, items: await withStoreAvailability(tenantId, store.id, page.items) };
     },
     product: async (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
       requireStaff(context);
@@ -493,7 +678,7 @@ const baseResolvers = {
     },
     productLookup: async (_: unknown, { term, storeId }: { term: string; storeId?: string }, context: GraphQLContext) => {
       requireStaff(context);
-      const tenantId = tenant(context); const [product, store] = await Promise.all([findProduct(tenantId, term), selectedStore(context, storeId)]); if (!product) return null; const stock = (await storeStock(tenantId, store.id)).find((item) => item.productId === product.id); return { ...product, storeStock: stock ?? { storeId: store.id, productId: product.id, quantity: 0, inventoryValue: 0, reorderPoint: 0, targetQuantity: 0, lowStock: false } };
+      const tenantId = tenant(context); const [product, store] = await Promise.all([findProduct(tenantId, term), selectedStore(context, storeId)]); if (!product) return null; return (await withStoreAvailability(tenantId, store.id, [product]))[0];
     },
     sales: async (
       _: unknown,
@@ -838,14 +1023,23 @@ const baseResolvers = {
     },
     createProduct: (
       _: unknown,
-      args: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "vatClass" | "stockUnit" | "tracksExpiry" | "saleVariants">,
+      args: Pick<ProductRecord, "name" | "description" | "sku" | "barcode" | "categoryId" | "sellingPrice" | "buyingPrice" | "vatClass" | "stockUnit" | "tracksExpiry" | "saleVariants"> & { requestId?: string | null },
       context: GraphQLContext,
     ) => {
       requireAdmin(context);
-      validateMoney(args.sellingPrice, "Selling price");
-      validateMoney(args.buyingPrice, "Buying price");
-      if (!args.stockUnit.trim()) throw new Error("Stock and pricing unit is required");
-      return createProduct(tenant(context), args, actor(context));
+      const { requestId, ...input } = args;
+      validateMoney(input.sellingPrice, "Selling price");
+      validateMoney(input.buyingPrice, "Buying price");
+      if (!input.stockUnit.trim()) throw new Error("Stock and pricing unit is required");
+      return createProduct(tenant(context), input, actor(context), requestId ?? undefined);
+    },
+    createService: (_: unknown, args: { name: string; description: string; sku: string; barcode: string; categoryId: string; sellingPrice: number; vatClass?: ProductRecord["vatClass"]; serviceComponents: Array<{ productId: string; quantity: number }> }, context: GraphQLContext) => {
+      requireAdmin(context); validateMoney(args.sellingPrice, "Service charge");
+      return createProduct(tenant(context), { ...args, itemType: "service", buyingPrice: 0, stockUnit: "each", tracksExpiry: false }, actor(context));
+    },
+    updateService: async (_: unknown, { id, ...args }: { id: string; name: string; description: string; sku: string; barcode: string; categoryId: string; sellingPrice: number; vatClass?: ProductRecord["vatClass"]; serviceComponents: Array<{ productId: string; quantity: number }>; status: "active" | "inactive" }, context: GraphQLContext) => {
+      requireAdmin(context); validateMoney(args.sellingPrice, "Service charge"); const current = await getProduct(tenant(context), id); if (!current || (current.itemType ?? "product") !== "service") throw new Error("Service not found");
+      return updateProduct(tenant(context), id, { ...args, saleVariants: [{ ...current.saleVariants[0], name: "Service", quantityInBaseUnits: 1, sellingPrice: args.sellingPrice }] }, actor(context));
     },
     updateProduct: async (
       _: unknown,
@@ -882,11 +1076,15 @@ const baseResolvers = {
     archiveProduct: (_: unknown, { id }: { id: string }, context: GraphQLContext) => {
       requireAdmin(context);
       const tenantId = tenant(context);
-      return listLots(tenantId).then((lots) => {
+      return Promise.all([listLots(tenantId), listCatalogItems(tenantId)]).then(([lots, items]) => {
+        if (items.some((item) => (item.itemType ?? "product") === "service" && item.status === "active" && (item.serviceComponents ?? []).some((component) => component.productId === id))) throw new Error("Remove this product from active services before archiving it");
         if (lots.some((lot) => lot.productId === id && lot.remainingQuantity > 0)) throw new Error("Transfer, sell, or write off this product's stock before archiving it");
         return updateProduct(tenantId, id, { status: "inactive" }, actor(context));
       });
     },
+    recordOpeningStock: (_: unknown, input: { storeId: string; effectiveDate?: string | null; notes: string; lines: Array<{ productId: string; quantity: number; unitCost?: number | null; batchNumber?: string | null; expiryDate?: string | null }>; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return recordOpeningStock(tenant(context), input, actor(context), input.requestId); },
+    validateCatalogImport: (_: unknown, input: { rows: CatalogImportRowInput[]; storeId?: string | null; effectiveDate?: string | null }, context: GraphQLContext) => { requireAdmin(context); return previewCatalogImport(tenant(context), input.rows, input.storeId, input.effectiveDate); },
+    executeCatalogImport: (_: unknown, input: { rows: CatalogImportRowInput[]; storeId?: string | null; effectiveDate?: string | null; requestId: string }, context: GraphQLContext) => { requireAdmin(context); return runCatalogImport(tenant(context), input.rows, input.storeId, input.effectiveDate, input.requestId, actor(context)); },
     saveMpesaConfiguration: async (_: unknown, input: { scope: "business" | "store"; storeId?: string | null; environment: "sandbox" | "production"; shortcode: string; transactionType: "CustomerPayBillOnline" | "CustomerBuyGoodsOnline"; stkEnabled: boolean; c2bEnabled: boolean; consumerKey: string; consumerSecret: string; passkey?: string | null }, context: GraphQLContext) => {
       requireAdmin(context); const capabilities = await mpesaCapabilities(context); if (!capabilities.eligible) throw new Error("M-Pesa integration requires Biashara Growth or Plus");
       if (input.scope !== "business" && input.scope !== "store") throw new Error("Select a valid M-Pesa configuration scope");

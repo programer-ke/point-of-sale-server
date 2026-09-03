@@ -5,6 +5,9 @@ const platform = require("../dist/repositories/platform-repository.js");
 
 let cognitoCalls = 0;
 cognito.getCognitoUser = async () => { cognitoCalls += 1; throw new Error("directory listing must not load Cognito users"); };
+const today = new Date().toISOString().slice(0, 10);
+const inThreeDays = (() => { const value = new Date(`${today}T00:00:00Z`); value.setUTCDate(value.getUTCDate() + 3); return value.toISOString().slice(0, 10); })();
+const thisMonth = `${today.slice(0, 8)}02T09:00:00Z`;
 
 const summary = (tenantId, tenantName, updates = {}) => ({
   partitionKey: `PLATFORM#BUSINESS#${tenantId}`, sortKey: "SUMMARY", accessPartition: "PLATFORM#BUSINESS", accessSort: `${tenantName.toLowerCase()}#${tenantId}`,
@@ -41,11 +44,11 @@ async function main() {
     const partition = command.input.ExpressionAttributeValues?.[":partition"];
     if (partition === "PLATFORM#BUSINESS") return { Items: [
       summary("tenant-1", "Active", { subscriptionStatus: "active", monthlyPriceKes: 5000 }),
-      summary("tenant-2", "Trial", { subscriptionStatus: "trialing", monthlyPriceKes: 2500, trialEndsOn: "2026-08-08", paidThrough: null }),
+      summary("tenant-2", "Trial", { subscriptionStatus: "trialing", monthlyPriceKes: 2500, trialEndsOn: inThreeDays, paidThrough: null }),
       summary("tenant-3", "Restricted", { subscriptionStatus: "restricted", monthlyPriceKes: 1000, paidThrough: null }),
     ] };
     if (partition === "PLATFORM#BILLING_PAYMENT#confirmed") return { Items: [
-      { entityType: "billing_payment", amountKes: 2500, reviewedAt: "2026-08-04T09:00:00Z" },
+      { entityType: "billing_payment", amountKes: 2500, reviewedAt: thisMonth },
       { entityType: "billing_payment", amountKes: 1000, reviewedAt: "2026-07-30T09:00:00Z" },
     ] };
     if (partition === "PLATFORM#BILLING_PAYMENT#submitted") return { Items: [{ entityType: "billing_payment", amountKes: 5000 }] };

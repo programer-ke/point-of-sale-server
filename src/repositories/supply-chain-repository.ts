@@ -158,7 +158,7 @@ export interface InventoryLotRecord {
   grossUnitCost?: number;
   receivedCostMinor?: number;
   remainingCostMinor?: number;
-  origin: "supplier_receipt" | "transfer";
+  origin: "supplier_receipt" | "transfer" | "opening_stock";
   status: "active" | "exhausted";
   receivedAt: string;
   updatedAt: string;
@@ -210,7 +210,7 @@ export interface SupplierInvoiceRecord {
   updatedAt: string;
 }
 
-export type StockMovementType = "receipt" | "sale" | "transfer_dispatch" | "transfer_receive" | "transfer_damage" | "transfer_shortage" | "damage" | "expiry" | "count_correction";
+export type StockMovementType = "receipt" | "opening_stock" | "sale" | "service_consumption" | "transfer_dispatch" | "transfer_receive" | "transfer_damage" | "transfer_shortage" | "damage" | "expiry" | "count_correction";
 export interface StockMovementRecord {
   id: string;
   type: StockMovementType;
@@ -224,6 +224,19 @@ export interface StockMovementRecord {
   referenceId?: string | null;
   actorId: string;
   actorName: string;
+  createdAt: string;
+}
+
+export interface OpeningStockRecord {
+  id: string;
+  openingStockNumber: string;
+  storeId: string;
+  storeName: string;
+  effectiveDate: string;
+  notes: string;
+  lines: Array<{ lotId: string; productId: string; productName: string; quantity: number; unitCost: number; batchNumber: string; expiryDate?: string | null }>;
+  createdBy: string;
+  createdByName: string;
   createdAt: string;
 }
 
@@ -284,6 +297,7 @@ const lotCostAfterCount = (lot: InventoryLotRecord, nextQuantity: number) => nex
   : lotRemainingCostMinor(lot) - allocatedLotCostMinor(lot, lot.remainingQuantity - nextQuantity);
 const normalized = (value: string) => value.trim().replace(/\s+/g, " ");
 const normalizedCode = (value: string) => normalized(value).toUpperCase();
+const validDateOnly = (value: string) => { const timestamp = Date.parse(`${value}T00:00:00.000Z`); return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === value; };
 const validOptionalEmail = (value: string) =>
   !value || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 const PURCHASE_UNITS: Record<string, Set<string>> = {
@@ -338,9 +352,9 @@ const get = async <T>(tenantId: string, kind: string, id: string, sortKey = "PRO
   return stripKeys<T>(result.Item);
 };
 
-type CatalogProduct = { id: string; name: string; sku: string; baseUnit: string; stockUnit: string; buyingPrice: number; vatClass?: VatClass | null; tracksExpiry: boolean; status: EntityStatus; productUnits?: Array<{ id: string; name: string; quantityInBaseUnits: number; purchasable: boolean; status: EntityStatus }>; saleVariants?: Array<{ id: string; name: string; quantityInBaseUnits: number; status: EntityStatus }> };
+type CatalogProduct = { id: string; itemType?: "product" | "service"; name: string; sku: string; baseUnit: string; stockUnit: string; buyingPrice: number; vatClass?: VatClass | null; tracksExpiry: boolean; status: EntityStatus; productUnits?: Array<{ id: string; name: string; quantityInBaseUnits: number; purchasable: boolean; status: EntityStatus }>; saleVariants?: Array<{ id: string; name: string; quantityInBaseUnits: number; status: EntityStatus }> };
 const purchasableProductUnits = (product: CatalogProduct) => product.productUnits?.length ? product.productUnits : (product.saleVariants ?? []).map((variant) => ({ ...variant, purchasable: true }));
-const getCatalogProduct = (tenantId: string, id: string) => get<CatalogProduct>(tenantId, "PRODUCT", id);
+const getCatalogProduct = async (tenantId: string, id: string) => { const product = await get<CatalogProduct>(tenantId, "PRODUCT", id); return product?.itemType === "service" ? null : product; };
 const getSupplierProduct = (tenantId: string, supplierId: string, productId: string) => get<SupplierProductRecord>(tenantId, "SUPPLIER_PRODUCT", `${supplierId}#${productId}`);
 
 export const stockMovementPut = (tenantId: string, movement: Omit<StockMovementRecord, "id" | "createdAt">, now: string) => {
@@ -446,7 +460,7 @@ export const upsertSupplierProduct = async (tenantId: string, input: Omit<Suppli
     dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: preferredKey })).then((value) => value.Item),
   ]);
   if (!supplier || supplier.status !== "active") throw new Error("Select an active supplier");
-  if (!product || product.status !== "active") throw new Error("Select an active product");
+  if (!product || product.status !== "active" || product.itemType === "service") throw new Error("Select an active physical product");
   const selectedProductUnit = input.productUnitId ? purchasableProductUnits(product).find((unit) => unit.id === input.productUnitId) : null;
   if (input.productUnitId && (!selectedProductUnit || !selectedProductUnit.purchasable || selectedProductUnit.status !== "active")) throw new Error("Select an active purchasable unit configured on the product");
   const unitsPerPurchaseUnit = selectedProductUnit?.quantityInBaseUnits ?? convertMeasurementToBaseUnits(input.purchaseQuantity, input.purchaseMeasurementUnit, product.baseUnit);
@@ -505,7 +519,7 @@ export const upsertStorePolicy = async (tenantId: string, input: Omit<StoreProdu
   if (input.targetQuantity < input.reorderPoint) throw new Error("Target quantity must be at least the reorder point");
   const [store, product] = await Promise.all([getStore(tenantId, input.storeId), getCatalogProduct(tenantId, input.productId)]);
   if (!store || store.status !== "active") throw new Error("Select an active store");
-  if (!product || product.status !== "active") throw new Error("Select an active product");
+  if (!product || product.status !== "active" || product.itemType === "service") throw new Error("Select an active physical product");
   const record = { ...input, updatedAt: new Date().toISOString() };
   await dynamoDB.send(new PutCommand({ TableName: TABLE_NAME, Item: { ...key(tenantId, "STORE_POLICY", `${input.storeId}#${input.productId}`), accessPartition: collection(tenantId, `STORE#${input.storeId}#POLICY`), accessSort: input.productId, entityType: "store_product_policy", tenantId, ...record } }));
   return record;
@@ -547,7 +561,7 @@ const resolvePurchaseOrderLines = async (tenantId: string, supplierId: string, i
   return Promise.all(inputs.map(async (input) => {
     validateCount(input.orderedPurchaseQuantity, "Ordered quantity", false);
     const [product, supplierProduct] = await Promise.all([getCatalogProduct(tenantId, input.productId), getSupplierProduct(tenantId, supplierId, input.productId)]);
-    if (!product || product.status !== "active") throw new Error("One or more purchase-order products are unavailable");
+    if (!product || product.status !== "active" || product.itemType === "service") throw new Error("One or more purchase-order products are unavailable");
     const existingLine = existing?.supplierId === supplierId ? existing.lines.find((line) => line.productId === input.productId) : undefined;
     if (!supplierProduct && !existingLine) throw new Error(`${product.name} is not configured for the selected supplier`);
     const source = supplierProduct ?? existingLine!;
@@ -701,6 +715,49 @@ export const lotDecrement = (tenantId: string, lot: InventoryLotRecord, quantity
 };
 
 export const listMovements = (tenantId: string, range?: { from?: string; to?: string }) => queryCollection<StockMovementRecord>(tenantId, "STOCK#MOVEMENT", range);
+export const recordOpeningStock = async (
+  tenantId: string,
+  input: { storeId: string; effectiveDate?: string | null; notes?: string; lines: Array<{ productId: string; quantity: number; unitCost?: number | null; batchNumber?: string | null; expiryDate?: string | null }> },
+  actor: Actor,
+  requestId: string,
+) => {
+  const payload = { ...input, effectiveDate: input.effectiveDate || new Date().toISOString().slice(0, 10), notes: input.notes?.trim() ?? "" };
+  const previous = await existingIdempotentResult<OpeningStockRecord>(tenantId, "opening_stock", requestId, payload);
+  if (previous) return previous;
+  if (!validDateOnly(payload.effectiveDate)) throw new Error("Opening stock date is invalid");
+  if (payload.effectiveDate > new Date().toISOString().slice(0, 10)) throw new Error("Opening stock date cannot be in the future");
+  if (!input.lines.length || input.lines.length > 40) throw new Error("Opening stock requires 1 to 40 lines");
+  const store = await getStore(tenantId, input.storeId);
+  if (!store || store.status !== "active") throw new Error("Select an active store");
+  const products = await Promise.all(input.lines.map((line) => getCatalogProduct(tenantId, line.productId)));
+  const postedAt = new Date().toISOString(); const effectiveAt = `${payload.effectiveDate}T00:00:00.000Z`; const id = randomUUID();
+  const openingStockNumber = `OPEN-${payload.effectiveDate.replaceAll("-", "")}-${id.slice(0, 8).toUpperCase()}`;
+  const lines: OpeningStockRecord["lines"] = [];
+  const transaction: NonNullable<TransactWriteCommandInput["TransactItems"]> = [];
+  input.lines.forEach((line, index) => {
+    const product = products[index];
+    if (!product || product.status !== "active" || product.itemType === "service") throw new Error("Opening stock lines must reference active physical products");
+    validateCount(line.quantity, "Opening quantity", false);
+    const unitCost = line.unitCost ?? product.buyingPrice / convertMeasurementToBaseUnits(1, product.stockUnit, product.baseUnit);
+    if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error("Opening unit cost must be a non-negative amount");
+    const expiryDate = line.expiryDate?.trim() || null;
+    if (product.tracksExpiry && !expiryDate) throw new Error(`${product.name} requires an expiry date`);
+    if (expiryDate && !validDateOnly(expiryDate)) throw new Error(`${product.name} has an invalid expiry date`);
+    const lotId = randomUUID(); const batchNumber = normalized(line.batchNumber ?? "") || `${openingStockNumber}-${index + 1}`;
+    const costMinor = Math.round(line.quantity * unitCost * 100);
+    const lot: InventoryLotRecord = { id: lotId, storeId: store.id, productId: product.id, productName: product.name, supplierId: null, receiptId: null, batchNumber, expiryDate, receivedQuantity: line.quantity, remainingQuantity: line.quantity, unitCost: costMinor / 100 / line.quantity, receivedCostMinor: costMinor, remainingCostMinor: costMinor, origin: "opening_stock", status: "active", receivedAt: effectiveAt, updatedAt: postedAt };
+    lines.push({ lotId, productId: product.id, productName: product.name, quantity: line.quantity, unitCost: lot.unitCost, batchNumber, expiryDate });
+    transaction.push(
+      { Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "LOT", lotId), accessPartition: collection(tenantId, `STORE#${store.id}#INVENTORY#ACTIVE`), accessSort: `${expiryDate ?? "9999-12-31"}#${effectiveAt}#${lotId}`, entityType: "inventory_lot", tenantId, ...lot }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+      stockMovementPut(tenantId, { type: "opening_stock", storeId: store.id, productId: product.id, productName: product.name, lotId, quantity: line.quantity, unitCost: lot.unitCost, reason: payload.notes || `Opening stock ${openingStockNumber}`, referenceId: id, actorId: actor.id, actorName: actor.name }, effectiveAt),
+    );
+  });
+  const record: OpeningStockRecord = { id, openingStockNumber, storeId: store.id, storeName: store.name, effectiveDate: payload.effectiveDate, notes: payload.notes, lines, createdBy: actor.id, createdByName: actor.name, createdAt: postedAt };
+  transaction.unshift({ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "OPENING_STOCK", id), accessPartition: collection(tenantId, "OPENING_STOCK"), accessSort: `${effectiveAt}#${id}`, entityType: "opening_stock", tenantId, ...record }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
+  transaction.push({ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "AUDIT", randomUUID(), "EVENT"), accessPartition: collection(tenantId, "AUDIT"), accessSort: `${postedAt}#${id}`, entityType: "audit", action: "stock.opening_recorded", entityId: id, reason: payload.notes || openingStockNumber, actorId: actor.id, actorName: actor.name, createdAt: postedAt } } });
+  if (transaction.length + 1 > 100) throw new Error("Opening stock is too large to post atomically");
+  return commitIdempotent(tenantId, "opening_stock", requestId, payload, record, transaction);
+};
 export const writeOffLot = async (tenantId: string, lotId: string, quantity: number, type: "damage" | "expiry", reason: string, actor: Actor, requestId: string) => {
   const payload = { lotId, quantity, type, reason }; const previous = await existingIdempotentResult<StockMovementRecord>(tenantId, "writeoff", requestId, payload); if (previous) return previous;
   validateCount(quantity, "Write-off quantity", false); if (reason.trim().length < 3) throw new Error("A write-off reason is required");
@@ -730,7 +787,7 @@ export const createTransfer = async (tenantId: string, input: { fromStoreId: str
   if (input.fromStoreId === input.toStoreId) throw new Error("Transfer stores must be different"); if (input.lines.length < 1 || input.lines.length > 40) throw new Error("A transfer must contain 1 to 40 lines"); input.lines.forEach((line) => validateCount(line.quantity, "Transfer quantity", false));
   if (new Set(input.lines.map((line) => line.productId)).size !== input.lines.length) throw new Error("Each product can appear only once on a transfer");
   const [from, to] = await Promise.all([getStore(tenantId, input.fromStoreId), getStore(tenantId, input.toStoreId)]); if (!from || !to || from.status !== "active" || to.status !== "active") throw new Error("Select two active stores");
-  const products = await Promise.all(input.lines.map((line) => getCatalogProduct(tenantId, line.productId))); if (products.some((product) => !product || product.status !== "active")) throw new Error("One or more transfer products are unavailable");
+  const products = await Promise.all(input.lines.map((line) => getCatalogProduct(tenantId, line.productId))); if (products.some((product) => !product || product.status !== "active" || product.itemType === "service")) throw new Error("One or more transfer products are unavailable");
   const lines = input.lines.map((line, index) => ({ ...line, productName: products[index]!.name, baseUnit: products[index]!.baseUnit, stockUnit: products[index]!.stockUnit }));
   const now = new Date().toISOString(); const id = randomUUID(); const transfer: StockTransferRecord = { id, transferNumber: `TR-${now.slice(0, 10).replaceAll("-", "")}-${id.slice(0, 8).toUpperCase()}`, fromStoreId: from.id, fromStoreName: from.name, toStoreId: to.id, toStoreName: to.name, status: "draft", notes: input.notes.trim(), lines, createdBy: actor.id, createdByName: actor.name, createdAt: now, updatedAt: now };
   return commitIdempotent(tenantId, "create_transfer", requestId, input, transfer, [{ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "TRANSFER", id), accessPartition: collection(tenantId, "TRANSFER"), accessSort: `${now}#${id}`, entityType: "stock_transfer", tenantId, ...transfer }, ConditionExpression: "attribute_not_exists(partitionKey)" } }]);

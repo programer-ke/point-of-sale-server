@@ -8,6 +8,7 @@ import {
 } from "../repositories/mpesa-repository";
 import { decryptMpesaCredentials, queryStkPush, requestStkPush } from "./mpesa";
 import { mpesaPhoneFingerprint } from "../domain/mpesa";
+import { allocateLots } from "../repositories/supply-chain-repository";
 
 export interface MpesaSaleInput {
   storeId: string;
@@ -26,6 +27,8 @@ const quoteSale = async (tenantId: string, input: MpesaSaleInput, actor: MpesaAc
   ]);
   const products = new Map(productRecords.filter(Boolean).map((product) => [product!.id, product!]));
   let total = 0;
+  const inventory = new Map<string, number>();
+  const serviceComponentIds = new Set<string>();
   const priceChanges: Array<{ productId: string; productName: string; variantId: string; variantName: string; previousPrice: number; currentPrice: number }> = [];
   for (const item of input.items) {
     if (!Number.isInteger(item.quantity) || item.quantity <= 0) throw new Error("Sale quantities must be positive whole numbers");
@@ -43,8 +46,13 @@ const quoteSale = async (tenantId: string, input: MpesaSaleInput, actor: MpesaAc
       if (actor.role !== "admin" && requested < minimum) throw new Error(`Staff markdown exceeds the ${checkoutSettings.maxStaffPriceDiscountPercent}% limit`);
     }
     total += (requested != null ? requested : authoritative) * item.quantity;
+    if ((product.itemType ?? "product") === "service") for (const component of product.serviceComponents ?? []) { serviceComponentIds.add(component.productId); inventory.set(component.productId, (inventory.get(component.productId) ?? 0) + component.quantity * item.quantity); }
+    else inventory.set(product.id, (inventory.get(product.id) ?? 0) + variant.quantityInBaseUnits * item.quantity);
   }
   if (priceChanges.length) throw new GraphQLError("One or more basket prices changed. Review the updated totals before requesting payment.", { extensions: { code: "PRICE_CHANGED", priceChanges } });
+  const componentProducts = await Promise.all([...serviceComponentIds].map((productId) => getProduct(tenantId, productId)));
+  if (componentProducts.some((product) => !product || (product.itemType ?? "product") !== "product" || product.status !== "active")) throw new Error("One or more service materials are unavailable");
+  if (inventory.size) await allocateLots(tenantId, input.storeId, [...inventory].map(([productId, quantity]) => ({ productId, quantity })));
   return Math.round(total * 100) / 100;
 };
 
