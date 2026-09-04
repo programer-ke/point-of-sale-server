@@ -9,8 +9,9 @@
     "dev": "tsx watch src/index.ts",
     "params": "node --import tsx src/scripts/params.ts",
     "seed:mvp": "yarn build && node dist/scripts/seed-mvp.js",
+    "migrate:billing-credits": "yarn build && node dist/scripts/migrate-billing-credits.js",
     "bundle:lambda": "yarn build && esbuild src/lambda.ts --bundle --platform=node --target=node24 --format=cjs --outfile=lambda-package/dist/lambda.js --sourcemap --sources-content=false",
-    "test": "yarn build && node dist/scripts/seed-mvp.js --validate-only && node test/measurements.js && node test/vat.js && node test/mpesa.js && node test/billing.js && node test/billing-promotions.js && node test/billing-repository.js && node test/platform-repository.js && node test/seed-catalog.js && node test/auth.js && node test/authorization.js && node test/tenant-repository.js && node test/code-generator.js && node test/pos-repository.js && node test/supply-chain-repository.js && node test/notification-repository.js && node test/notification-events.js && node test/billing-email.js && node test/purchase-order-email.js && node test/billing-worker.js && node test/observability.js && node test/lambda-smoke.js",
+    "test": "yarn build && node dist/scripts/seed-mvp.js --validate-only && node test/measurements.js && node test/vat.js && node test/mpesa.js && node test/billing.js && node test/billing-promotions.js && node test/billing-repository.js && node test/billing-credit-report.js && node test/account-lifecycle.js && node test/platform-repository.js && node test/seed-catalog.js && node test/auth.js && node test/authorization.js && node test/tenant-repository.js && node test/code-generator.js && node test/pos-repository.js && node test/supply-chain-repository.js && node test/notification-repository.js && node test/notification-events.js && node test/billing-email.js && node test/purchase-order-email.js && node test/billing-worker.js && node test/observability.js && node test/lambda-smoke.js",
     "build": "tsc",
     "watch": "tsc --watch"
   },

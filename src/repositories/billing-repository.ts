@@ -6,6 +6,7 @@ import {
   addBillingMonth,
   billingGraceDays,
   billingStatus,
+  billingStatusLabel,
   effectivePlan,
   kenyaDate,
   nextBillingPayment,
@@ -18,7 +19,7 @@ import {
 } from "../domain/billing";
 
 export type PaymentStatus = "submitted" | "confirmed" | "rejected";
-export type BillingDocumentKind = "invoice" | "receipt";
+export type BillingDocumentKind = "invoice" | "receipt" | "credit_notice";
 
 export interface BillingPayment {
   id: string;
@@ -31,6 +32,11 @@ export interface BillingPayment {
   baseAmountKes: number;
   annualDiscountKes: number;
   promotionCreditKes: number;
+  customPriceAdjustmentKes?: number;
+  creditAppliedKes?: number;
+  creditAllocations?: Array<{ creditId: string; amountKes: number; remainingBeforeKes: number }>;
+  chargeId?: string | null;
+  previousRejections?: Array<{ mpesaReference: string; paidOn: string; reviewedAt: string; reason: string }>;
   periodStartsOn: string;
   periodEndsOn: string;
   offerId: string | null;
@@ -59,6 +65,10 @@ export interface BillingDocument {
   baseAmountKes: number;
   annualDiscountKes: number;
   promotionCreditKes: number;
+  customPriceAdjustmentKes?: number;
+  creditAppliedKes?: number;
+  cashAmountKes?: number;
+  chargeId?: string | null;
   promotionLabel: string | null;
   subtotalKes: number;
   vatAmountKes: number;
@@ -80,8 +90,9 @@ export interface BillingAudit {
   createdAt: string;
 }
 
-const accountKey = (tenantId: string) => ({ partitionKey: `TENANT#${tenantId}`, sortKey: "BILLING#ACCOUNT" });
+export const accountKey = (tenantId: string) => ({ partitionKey: `TENANT#${tenantId}`, sortKey: "BILLING#ACCOUNT" });
 const paymentKey = (tenantId: string, id: string) => ({ partitionKey: `TENANT#${tenantId}`, sortKey: `BILLING#PAYMENT#${id}` });
+const pendingPaymentKey = (tenantId: string) => ({ partitionKey: `TENANT#${tenantId}`, sortKey: "BILLING#PAYMENT_PENDING" });
 const documentKey = (tenantId: string, id: string) => ({ partitionKey: `TENANT#${tenantId}`, sortKey: `BILLING#DOCUMENT#${id}` });
 const clean = <T>(item?: Record<string, unknown>): T | null => {
   if (!item) return null;
@@ -175,6 +186,14 @@ export const createBillingAccount = async (input: {
     acceptedAt: now,
     override: null,
     offer: null,
+    creditBalanceKes: 0,
+    workspaceState: "active",
+    delinquentSince: null,
+    archivedAt: null,
+    deletionScheduledOn: null,
+    suspendedAt: null,
+    suspendedBy: null,
+    suspensionReason: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -241,6 +260,14 @@ export const assignPlatformBillingPlan = async (input: {
     acceptedAt: now,
     override: null,
     offer: null,
+    creditBalanceKes: 0,
+    workspaceState: "active",
+    delinquentSince: null,
+    archivedAt: null,
+    deletionScheduledOn: null,
+    suspendedAt: null,
+    suspendedBy: null,
+    suspensionReason: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -298,11 +325,28 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
   submittedBy: string;
 }) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input.paidOn) || input.paidOn > kenyaDate()) throw new Error("Payment date must be a valid date that is not in the future");
-  if ((await listBillingPayments(account.tenantId)).some(({ status }) => status === "submitted")) throw new Error("A payment is already awaiting review");
+  const payments = await listBillingPayments(account.tenantId);
+  if (payments.some(({ status }) => status === "submitted")) throw new Error("A payment is already awaiting review");
   const charge = nextBillingPayment(account);
+  const reservedPayment = payments.find((payment) => payment.status === "rejected" && Boolean(payment.creditAllocations?.length) && payment.periodStartsOn === charge.periodStartsOn && payment.periodEndsOn === charge.periodEndsOn);
+  let creditRemaining = reservedPayment?.amountKes ?? charge.amountKes;
+  const creditAllocations: Array<{ creditId: string; amountKes: number; remainingBeforeKes: number }> = reservedPayment?.creditAllocations ? [...reservedPayment.creditAllocations] : [];
+  if (!reservedPayment) {
+    const credits = (await listByPrefix<{ id: string; remainingAmountKes: number; status: string; expiresOn: string | null; issuedAt: string }>(account.tenantId, "BILLING#CREDIT#"))
+      .filter((credit) => credit.remainingAmountKes > 0 && credit.status !== "voided" && credit.status !== "expired" && (!credit.expiresOn || credit.expiresOn >= kenyaDate()))
+      .sort((left, right) => (left.expiresOn ?? "9999-12-31").localeCompare(right.expiresOn ?? "9999-12-31") || left.issuedAt.localeCompare(right.issuedAt));
+    for (const credit of credits) {
+      if (creditRemaining <= 0) break;
+      const amountKes = Math.min(credit.remainingAmountKes, creditRemaining);
+      creditAllocations.push({ creditId: credit.id, amountKes, remainingBeforeKes: credit.remainingAmountKes });
+      creditRemaining -= amountKes;
+    }
+  }
+  const creditAppliedKes = reservedPayment?.creditAppliedKes ?? charge.amountKes - creditRemaining;
+  if (creditRemaining === 0) throw new Error("Available account credit can settle this charge automatically; refresh Billing");
   const mpesaReference = normalizeMpesaReference(input.mpesaReference);
   const now = new Date().toISOString();
-  const id = randomUUID();
+  const id = reservedPayment?.id ?? randomUUID();
   const invoiceId = randomUUID();
   const payment: BillingPayment = {
     id,
@@ -311,16 +355,20 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     planCode: charge.planCode,
     billingInterval: charge.billingInterval,
     billingMonths: charge.billingMonths,
-    amountKes: charge.amountKes,
+    amountKes: creditRemaining,
     baseAmountKes: charge.baseAmountKes,
     annualDiscountKes: charge.annualDiscountKes,
     promotionCreditKes: charge.promotionCreditKes,
+    customPriceAdjustmentKes: charge.customPriceAdjustmentKes,
+    creditAppliedKes,
+    creditAllocations,
+    chargeId: id,
     periodStartsOn: charge.periodStartsOn,
     periodEndsOn: charge.periodEndsOn,
     offerId: charge.offerId,
     offerPricePercent: charge.offerPricePercent,
     offerLabel: charge.offerLabel,
-    ...taxBreakdown(charge.amountKes),
+    ...taxBreakdown(creditRemaining),
     mpesaReference,
     paidOn: input.paidOn,
     status: "submitted",
@@ -329,6 +377,7 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     reviewedBy: null,
     reviewedAt: null,
     rejectionReason: null,
+    previousRejections: reservedPayment ? [...(reservedPayment.previousRejections ?? []), { mpesaReference: reservedPayment.mpesaReference, paidOn: reservedPayment.paidOn, reviewedAt: reservedPayment.reviewedAt ?? now, reason: reservedPayment.rejectionReason ?? "Payment evidence rejected" }] : [],
   };
   const invoice: BillingDocument = {
     id: invoiceId,
@@ -339,12 +388,16 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     planName: PLANS[charge.planCode].name,
     billingInterval: charge.billingInterval,
     billingMonths: charge.billingMonths,
-    amountKes: charge.amountKes,
+    amountKes: creditRemaining,
     baseAmountKes: charge.baseAmountKes,
     annualDiscountKes: charge.annualDiscountKes,
     promotionCreditKes: charge.promotionCreditKes,
+    customPriceAdjustmentKes: charge.customPriceAdjustmentKes,
+    creditAppliedKes,
+    cashAmountKes: creditRemaining,
+    chargeId: id,
     promotionLabel: charge.offerLabel,
-    ...taxBreakdown(charge.amountKes),
+    ...taxBreakdown(creditRemaining),
     issuedOn: kenyaDate(),
     paymentId: id,
     externalEtimsReference: null,
@@ -352,9 +405,15 @@ export const submitBillingPayment = async (account: BillingAccount, input: {
     createdAt: now,
   };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
-    { Put: { TableName: TABLE_NAME, Item: { ...paymentKey(account.tenantId, id), accessPartition: "PLATFORM#BILLING_PAYMENT#submitted", accessSort: `${now}#${id}`, entityType: "billing_payment", ...payment }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+    { Put: { TableName: TABLE_NAME, Item: { ...paymentKey(account.tenantId, id), accessPartition: "PLATFORM#BILLING_PAYMENT#submitted", accessSort: `${now}#${id}`, entityType: "billing_payment", ...payment }, ConditionExpression: reservedPayment ? "#status = :rejected AND creditAppliedKes = :expectedCredit" : "attribute_not_exists(partitionKey)", ...(reservedPayment ? { ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":rejected": "rejected", ":expectedCredit": reservedPayment.creditAppliedKes ?? 0 } } : {}) } },
     { Put: { TableName: TABLE_NAME, Item: { partitionKey: `BILLING_PAYMENT_REF#${mpesaReference}`, sortKey: "CLAIM", entityType: "billing_payment_reference", tenantId: account.tenantId, paymentId: id, createdAt: now }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
-    { Put: { TableName: TABLE_NAME, Item: { ...documentKey(account.tenantId, invoiceId), entityType: "billing_document", ...invoice }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+    ...(!reservedPayment ? [
+      { Put: { TableName: TABLE_NAME, Item: { ...documentKey(account.tenantId, invoiceId), entityType: "billing_document", ...invoice }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+      { Put: { TableName: TABLE_NAME, Item: { partitionKey: `TENANT#${account.tenantId}`, sortKey: `BILLING#CHARGE#${id}`, entityType: "billing_charge", id, tenantId: account.tenantId, tenantName: account.tenantName, status: "open", settlementKind: null, planCode: charge.planCode, planName: charge.planName, billingInterval: charge.billingInterval, billingMonths: charge.billingMonths, listAmountKes: charge.baseAmountKes + charge.customPriceAdjustmentKes, customPriceAdjustmentKes: charge.customPriceAdjustmentKes, annualDiscountKes: charge.annualDiscountKes, promotionDiscountKes: charge.promotionCreditKes, creditAppliedKes, cashAmountKes: creditRemaining, netRevenueKes: creditRemaining, periodStartsOn: charge.periodStartsOn, periodEndsOn: charge.periodEndsOn, dueOn: charge.dueOn, offerId: charge.offerId, promotionId: account.offer?.promotionId ?? null, promotionLabel: charge.offerLabel, paymentId: id, issuedAt: now, settledAt: null }, ConditionExpression: "attribute_not_exists(sortKey)" } },
+    ] : []),
+    { Put: { TableName: TABLE_NAME, Item: { ...pendingPaymentKey(account.tenantId), entityType: "billing_payment_lock", tenantId: account.tenantId, paymentId: id, createdAt: now }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+    ...creditAllocations.map(({ creditId, remainingBeforeKes }) => ({ ConditionCheck: { TableName: TABLE_NAME, Key: { partitionKey: `TENANT#${account.tenantId}`, sortKey: `BILLING#CREDIT#${creditId}` }, ConditionExpression: reservedPayment ? "remainingAmountKes = :remaining AND (#status = :available OR #status = :partial)" : "remainingAmountKes = :remaining AND (#status = :available OR #status = :partial) AND (attribute_not_exists(expiresOn) OR expiresOn = :none OR expiresOn >= :today)", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":remaining": remainingBeforeKes, ":available": "available", ":partial": "partially_applied", ...(!reservedPayment ? { ":none": null, ":today": kenyaDate() } : {}) } } })),
+    ...(!reservedPayment ? creditAllocations.map(({ creditId, amountKes }) => ({ Put: { TableName: TABLE_NAME, Item: { partitionKey: `TENANT#${account.tenantId}`, sortKey: `BILLING#CREDIT_EVENT#${now}#${randomUUID()}`, entityType: "billing_credit_event", id: randomUUID(), tenantId: account.tenantId, creditId, type: "reserved", amountKes, actorId: input.submittedBy, reason: "Reserved for submitted subscription payment", chargeId: id, paymentId: id, requestId: null, createdAt: now }, ConditionExpression: "attribute_not_exists(sortKey)" } })) : []),
   ] }));
   return payment;
 };
@@ -387,6 +446,10 @@ export const confirmBillingPayment = async (tenantId: string, paymentId: string,
     baseAmountKes: payment.baseAmountKes ?? payment.amountKes,
     annualDiscountKes: payment.annualDiscountKes ?? 0,
     promotionCreditKes: payment.promotionCreditKes ?? 0,
+    customPriceAdjustmentKes: payment.customPriceAdjustmentKes ?? 0,
+    creditAppliedKes: payment.creditAppliedKes ?? 0,
+    cashAmountKes: payment.amountKes,
+    chargeId: payment.chargeId ?? null,
     promotionLabel: payment.offerLabel ?? null,
     ...taxBreakdown(payment.amountKes),
     issuedOn: today,
@@ -395,22 +458,30 @@ export const confirmBillingPayment = async (tenantId: string, paymentId: string,
     notice: "Payment receipt only. This is not a KRA tax invoice and does not replace an eTIMS invoice.",
     createdAt: now,
   };
+  const creditAppliedKes = payment.creditAppliedKes ?? 0;
+  const lifecycleExpression = ", workspaceState = :active, delinquentSince = :none, archivedAt = :none, deletionScheduledOn = :none";
   const accountUpdate = payment.offerId ? {
     Update: {
       TableName: TABLE_NAME,
       Key: accountKey(tenantId),
-      UpdateExpression: "SET planCode = :plan, billingInterval = :interval, paidThrough = :paidThrough, pendingPlanCode = :none, pendingBillingInterval = :none, cancelledAt = :none, updatedAt = :now, #offer.#remaining = #offer.#remaining - :one",
-      ConditionExpression: "#offer.#id = :offerId AND #offer.#remaining > :zero",
+      UpdateExpression: `SET planCode = :plan, billingInterval = :interval, paidThrough = :paidThrough, pendingPlanCode = :none, pendingBillingInterval = :none, cancelledAt = :none, updatedAt = :now, creditBalanceKes = if_not_exists(creditBalanceKes, :credit) - :credit, #offer.#remaining = #offer.#remaining - :one${lifecycleExpression}`,
+      ConditionExpression: "#offer.#id = :offerId AND #offer.#remaining > :zero AND (attribute_not_exists(creditBalanceKes) OR creditBalanceKes >= :credit)",
       ExpressionAttributeNames: { "#offer": "offer", "#remaining": "remainingPayments", "#id": "id" },
-      ExpressionAttributeValues: { ":plan": payment.planCode, ":interval": payment.billingInterval ?? "monthly", ":paidThrough": paidThrough, ":none": null, ":now": now, ":one": 1, ":zero": 0, ":offerId": payment.offerId },
+      ExpressionAttributeValues: { ":plan": payment.planCode, ":interval": payment.billingInterval ?? "monthly", ":paidThrough": paidThrough, ":none": null, ":now": now, ":one": 1, ":zero": 0, ":offerId": payment.offerId, ":credit": creditAppliedKes, ":active": "active" },
     },
   } : {
-    Update: { TableName: TABLE_NAME, Key: accountKey(tenantId), UpdateExpression: "SET planCode = :plan, billingInterval = :interval, paidThrough = :paidThrough, pendingPlanCode = :none, pendingBillingInterval = :none, cancelledAt = :none, updatedAt = :now", ExpressionAttributeValues: { ":plan": payment.planCode, ":interval": payment.billingInterval ?? "monthly", ":paidThrough": paidThrough, ":none": null, ":now": now } },
+    Update: { TableName: TABLE_NAME, Key: accountKey(tenantId), UpdateExpression: `SET planCode = :plan, billingInterval = :interval, paidThrough = :paidThrough, pendingPlanCode = :none, pendingBillingInterval = :none, cancelledAt = :none, updatedAt = :now, creditBalanceKes = if_not_exists(creditBalanceKes, :credit) - :credit${lifecycleExpression}`, ConditionExpression: "attribute_not_exists(creditBalanceKes) OR creditBalanceKes >= :credit", ExpressionAttributeValues: { ":plan": payment.planCode, ":interval": payment.billingInterval ?? "monthly", ":paidThrough": paidThrough, ":none": null, ":now": now, ":credit": creditAppliedKes, ":active": "active" } },
   };
   await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
     { Put: { TableName: TABLE_NAME, Item: { ...paymentKey(tenantId, paymentId), accessPartition: "PLATFORM#BILLING_PAYMENT#confirmed", accessSort: `${payment.submittedAt}#${paymentId}`, entityType: "billing_payment", ...confirmed }, ConditionExpression: "#status = :submitted", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":submitted": "submitted" } } },
     accountUpdate,
     { Put: { TableName: TABLE_NAME, Item: { ...documentKey(tenantId, receiptId), entityType: "billing_document", ...receipt }, ConditionExpression: "attribute_not_exists(partitionKey)" } },
+    ...(payment.creditAllocations ?? []).flatMap(({ creditId, amountKes, remainingBeforeKes }) => [
+      { Update: { TableName: TABLE_NAME, Key: { partitionKey: `TENANT#${tenantId}`, sortKey: `BILLING#CREDIT#${creditId}` }, UpdateExpression: "SET remainingAmountKes = remainingAmountKes - :amount, #status = :nextStatus, updatedAt = :now", ConditionExpression: "remainingAmountKes = :expected", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":amount": amountKes, ":nextStatus": amountKes === (remainingBeforeKes ?? amountKes) ? "applied" : "partially_applied", ":now": now, ":expected": remainingBeforeKes ?? amountKes } } },
+      { Put: { TableName: TABLE_NAME, Item: { partitionKey: `TENANT#${tenantId}`, sortKey: `BILLING#CREDIT_EVENT#${now}#${randomUUID()}`, entityType: "billing_credit_event", id: randomUUID(), tenantId, creditId, type: "applied", amountKes, actorId: reviewerId, reason: "Applied when subscription payment was confirmed", chargeId: payment.chargeId ?? payment.id, paymentId, requestId: null, createdAt: now }, ConditionExpression: "attribute_not_exists(sortKey)" } },
+    ]),
+    ...(payment.chargeId ? [{ Update: { TableName: TABLE_NAME, Key: { partitionKey: `TENANT#${tenantId}`, sortKey: `BILLING#CHARGE#${payment.chargeId}` }, UpdateExpression: "SET #status = :settled, settlementKind = :kind, settledAt = :now", ConditionExpression: "#status = :open", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":settled": "settled", ":kind": creditAppliedKes > 0 ? "cash_and_credit" : "cash", ":now": now, ":open": "open" } } }] : []),
+    { Delete: { TableName: TABLE_NAME, Key: pendingPaymentKey(tenantId), ConditionExpression: "attribute_not_exists(paymentId) OR paymentId = :paymentId", ExpressionAttributeValues: { ":paymentId": paymentId } } },
   ] }));
   return confirmed;
 };
@@ -418,16 +489,17 @@ export const confirmBillingPayment = async (tenantId: string, paymentId: string,
 export const rejectBillingPayment = async (tenantId: string, paymentId: string, reviewerId: string, reason: string) => {
   const trimmed = reason.trim();
   if (trimmed.length < 3) throw new Error("Provide a rejection reason");
-  const response = await dynamoDB.send(new UpdateCommand({
-    TableName: TABLE_NAME,
-    Key: paymentKey(tenantId, paymentId),
-    UpdateExpression: "SET #status = :rejected, reviewedBy = :reviewer, reviewedAt = :now, rejectionReason = :reason, accessPartition = :accessPartition",
-    ConditionExpression: "#status = :submitted",
-    ExpressionAttributeNames: { "#status": "status" },
-    ExpressionAttributeValues: { ":submitted": "submitted", ":rejected": "rejected", ":reviewer": reviewerId, ":now": new Date().toISOString(), ":reason": trimmed, ":accessPartition": "PLATFORM#BILLING_PAYMENT#rejected" },
-    ReturnValues: "ALL_NEW",
-  }));
-  return clean<BillingPayment>(response.Attributes)!;
+  const payment = await getBillingPayment(tenantId, paymentId);
+  if (!payment) throw new Error("Payment submission was not found");
+  if (payment.status === "rejected") return payment;
+  if (payment.status !== "submitted") throw new Error("Only submitted payments can be rejected");
+  const now = new Date().toISOString();
+  const rejected: BillingPayment = { ...payment, status: "rejected", reviewedBy: reviewerId, reviewedAt: now, rejectionReason: trimmed };
+  await dynamoDB.send(new TransactWriteCommand({ TransactItems: [
+    { Put: { TableName: TABLE_NAME, Item: { ...paymentKey(tenantId, paymentId), accessPartition: "PLATFORM#BILLING_PAYMENT#rejected", accessSort: `${payment.submittedAt}#${paymentId}`, entityType: "billing_payment", ...rejected }, ConditionExpression: "#status = :submitted", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":submitted": "submitted" } } },
+    { Delete: { TableName: TABLE_NAME, Key: pendingPaymentKey(tenantId), ConditionExpression: "attribute_not_exists(paymentId) OR paymentId = :paymentId", ExpressionAttributeValues: { ":paymentId": paymentId } } },
+  ] }));
+  return rejected;
 };
 
 export const cancelBillingSubscription = async (tenantId: string) => {
@@ -583,6 +655,16 @@ export const billingAccountView = (account: BillingAccount) => ({
   billingContactEmail: account.billingContactEmail || account.ownerUsername,
   billingContactPhone: account.billingContactPhone || "",
   status: billingStatus(account),
+  statusLabel: billingStatusLabel(account),
+  creditBalanceKes: account.creditBalanceKes ?? 0,
+  creditReservedKes: 0,
+  workspaceState: account.workspaceState ?? "active",
+  delinquentSince: account.delinquentSince ?? null,
+  archivedAt: account.archivedAt ?? null,
+  deletionScheduledOn: account.deletionScheduledOn ?? null,
+  suspendedAt: account.suspendedAt ?? null,
+  suspendedBy: account.suspendedBy ?? null,
+  suspensionReason: account.suspensionReason ?? null,
   plan: effectivePlan(account),
   customTerms: Boolean(account.override && (!account.override.expiresOn || account.override.expiresOn >= kenyaDate())),
   graceEndsOn: addBillingDays(account.paidThrough ?? account.trialEndsOn, billingGraceDays(account)),

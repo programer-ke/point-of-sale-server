@@ -50,7 +50,7 @@ async function main() {
     console.error = originalError;
   }
 
-  assert.deepEqual(commands, ["PutCommand", "DeleteCommand"]);
+  assert.deepEqual(commands, ["QueryCommand", "QueryCommand", "QueryCommand", "PutCommand", "DeleteCommand"], "credit expiry and settlement checks run before reminder delivery");
   assert.equal(records.length, 1);
   assert.equal(records[0].event, "critical_operation_failed");
   assert.equal(records[0].operation, "billing_reminder_delivery");

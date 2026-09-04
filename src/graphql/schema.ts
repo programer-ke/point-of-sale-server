@@ -275,22 +275,27 @@ export const typeDefs = `#graphql
   }
 
   type BillingUsage { activeUsers: Int!, activeStores: Int! }
-  type BillingPayment { id: ID!, tenantId: ID!, tenantName: String!, planCode: String!, billingInterval: String!, billingMonths: Int!, amountKes: Int!, baseAmountKes: Int, annualDiscountKes: Int!, promotionCreditKes: Int!, periodStartsOn: String, periodEndsOn: String, offerId: ID, offerPricePercent: Int, offerLabel: String, mpesaReference: String!, paidOn: String!, status: String!, submittedBy: String!, submittedAt: String!, reviewedBy: String, reviewedAt: String, rejectionReason: String }
-  type BillingDocument { id: ID!, number: String!, tenantId: ID!, kind: String!, planCode: String!, planName: String!, billingInterval: String!, billingMonths: Int!, amountKes: Int!, baseAmountKes: Int!, annualDiscountKes: Int!, promotionCreditKes: Int!, promotionLabel: String, subtotalKes: Int, vatAmountKes: Int, issuedOn: String!, paymentId: ID!, externalEtimsReference: String, notice: String!, createdAt: String! }
+  type BillingPayment { id: ID!, tenantId: ID!, tenantName: String!, planCode: String!, billingInterval: String!, billingMonths: Int!, amountKes: Int!, baseAmountKes: Int, annualDiscountKes: Int!, promotionCreditKes: Int!, customPriceAdjustmentKes: Int!, creditAppliedKes: Int!, chargeId: ID, periodStartsOn: String, periodEndsOn: String, offerId: ID, offerPricePercent: Int, offerLabel: String, mpesaReference: String!, paidOn: String!, status: String!, submittedBy: String!, submittedAt: String!, reviewedBy: String, reviewedAt: String, rejectionReason: String }
+  type BillingDocument { id: ID!, number: String!, tenantId: ID!, kind: String!, planCode: String!, planName: String!, billingInterval: String!, billingMonths: Int!, amountKes: Int!, baseAmountKes: Int!, annualDiscountKes: Int!, promotionCreditKes: Int!, customPriceAdjustmentKes: Int!, creditAppliedKes: Int!, cashAmountKes: Int!, chargeId: ID, promotionLabel: String, subtotalKes: Int, vatAmountKes: Int, issuedOn: String!, paymentId: ID!, externalEtimsReference: String, notice: String!, createdAt: String! }
   type BillingAudit { id: ID!, tenantId: ID!, action: String!, actorId: String!, reason: String!, before: String!, after: String!, createdAt: String! }
+  type BillingCredit { id: ID!, tenantId: ID!, originalAmountKes: Int!, remainingAmountKes: Int!, status: String!, expiresOn: String, customerMessage: String!, issuedBy: String!, requestId: String!, issuedAt: String!, updatedAt: String! }
+  type BillingCreditEvent { id: ID!, tenantId: ID!, creditId: ID!, type: String!, amountKes: Int!, actorId: String!, reason: String!, chargeId: ID, paymentId: ID, requestId: String, createdAt: String! }
+  type BillingCharge { id: ID!, tenantId: ID!, tenantName: String!, status: String!, settlementKind: String, planCode: String!, planName: String!, billingInterval: String!, billingMonths: Int!, listAmountKes: Int!, customPriceAdjustmentKes: Int!, annualDiscountKes: Int!, promotionDiscountKes: Int!, creditAppliedKes: Int!, cashAmountKes: Int!, netRevenueKes: Int!, recognizedListAmountKes: Int, recognizedCustomPriceAdjustmentKes: Int, recognizedAnnualDiscountKes: Int, recognizedPromotionDiscountKes: Int, recognizedCreditImpactKes: Int, recognizedRevenueKes: Int, periodStartsOn: String!, periodEndsOn: String!, dueOn: String!, offerId: ID, promotionId: ID, promotionLabel: String, paymentId: ID, issuedAt: String!, settledAt: String }
   type BillingAccount {
-    tenantId: ID!, tenantName: String!, ownerUserId: ID!, ownerUsername: String!, billingContactName: String!, billingContactEmail: String!, billingContactPhone: String!, planCode: String!, status: String!, plan: BillingPlan!,
+    tenantId: ID!, tenantName: String!, ownerUserId: ID!, ownerUsername: String!, billingContactName: String!, billingContactEmail: String!, billingContactPhone: String!, planCode: String!, status: String!, statusLabel: String!, plan: BillingPlan!,
     trialStartedOn: String!, trialEndsOn: String!, paidThrough: String, graceEndsOn: String!, cancelledAt: String, pendingPlanCode: String, billingInterval: String!, pendingBillingInterval: String,
-    termsVersion: String!, privacyVersion: String!, acceptedAt: String!, createdAt: String!, updatedAt: String!, customTerms: Boolean!, offer: BillingOffer
+    termsVersion: String!, privacyVersion: String!, acceptedAt: String!, createdAt: String!, updatedAt: String!, customTerms: Boolean!, offer: BillingOffer, creditBalanceKes: Int!, creditReservedKes: Int!, workspaceState: String!, delinquentSince: String, archivedAt: String, deletionScheduledOn: String, suspendedAt: String, suspendedBy: String, suspensionReason: String
   }
   type BillingOffer { id: ID!, promotionId: ID, label: String!, pricePercent: Int!, durationMonths: Int!, remainingPayments: Int!, billingInterval: String!, planCode: String, startsOn: String!, reason: String!, assignedAt: String!, assignedBy: String! }
   type BillingPromotion { id: ID!, name: String!, description: String!, pricePercent: Int!, durationMonths: Int!, audience: String!, planCodes: [String!]!, billingIntervals: [String!]!, startsOn: String!, endsOn: String!, enabled: Boolean!, createdAt: String!, createdBy: String!, updatedAt: String!, updatedBy: String! }
-  type NextBillingPayment { planCode: String!, planName: String!, billingInterval: String!, billingMonths: Int!, dueOn: String!, periodStartsOn: String!, periodEndsOn: String!, baseAmountKes: Int!, amountKes: Int!, savingsKes: Int!, annualDiscountKes: Int!, promotionCreditKes: Int!, offerId: ID, offerLabel: String, offerPricePercent: Int, offerRemainingPayments: Int!, paymentPending: Boolean! }
+  type NextBillingPayment { planCode: String!, planName: String!, billingInterval: String!, billingMonths: Int!, dueOn: String!, periodStartsOn: String!, periodEndsOn: String!, baseAmountKes: Int!, amountKes: Int!, savingsKes: Int!, annualDiscountKes: Int!, promotionCreditKes: Int!, customPriceAdjustmentKes: Int!, creditAvailableKes: Int!, creditToApplyKes: Int!, cashDueKes: Int!, offerId: ID, offerLabel: String, offerPricePercent: Int, offerRemainingPayments: Int!, paymentPending: Boolean! }
   type BillingConfiguration { enforcementEnabled: Boolean!, vendorLegalName: String!, vendorKraPin: String!, vendorVatRegistered: Boolean!, vendorVatRate: Float!, billingAddress: String!, supportEmail: String!, supportPhone: String!, tillNumber: String!, paymentInstructions: String! }
-  type BillingOverview { account: BillingAccount!, nextPayment: NextBillingPayment!, usage: BillingUsage!, payments: [BillingPayment!]!, documents: [BillingDocument!]!, audits: [BillingAudit!]!, configuration: BillingConfiguration!, availablePromotions: [BillingPromotion!]! }
+  type BillingOverview { account: BillingAccount!, nextPayment: NextBillingPayment!, usage: BillingUsage!, payments: [BillingPayment!]!, documents: [BillingDocument!]!, audits: [BillingAudit!]!, credits: [BillingCredit!]!, creditEvents: [BillingCreditEvent!]!, charges: [BillingCharge!]!, configuration: BillingConfiguration!, availablePromotions: [BillingPromotion!]! }
   type PlatformBusinessSummary { tenantId: ID!, tenantName: String!, planCode: String!, planName: String!, subscriptionStatus: String!, monthlyPriceKes: Int!, activeUsers: Int!, activeStores: Int!, pendingPayments: Int!, pendingPaymentAmountKes: Int!, trialEndsOn: String, paidThrough: String, billingContactEmail: String!, createdAt: String!, updatedAt: String! }
   type PlatformBusinessConnection { items: [PlatformBusinessSummary!]!, nextCursor: String }
   type PlatformMetrics { activeBusinesses: Int!, trialingBusinesses: Int!, expiringTrials: Int!, pastDueBusinesses: Int!, restrictedBusinesses: Int!, projectedMrrKes: Int!, trialPipelineKes: Int!, collectedThisMonthKes: Int!, collectedAllTimeKes: Int!, pendingPayments: Int!, pendingPaymentAmountKes: Int!, calculatedAt: String! }
+  type PlatformRevenueSummary { listPriceRevenueKes: Int!, customPriceAdjustmentKes: Int!, annualDiscountKes: Int!, promotionDiscountKes: Int!, creditImpactKes: Int!, recognizedRevenueKes: Int!, cashCollectedKes: Int!, deferredRevenueKes: Int!, creditsIssuedKes: Int!, creditsAppliedKes: Int!, creditsExpiredOrVoidedKes: Int!, outstandingCreditKes: Int!, promotionRedemptions: Int! }
+  type PlatformRevenueReport { from: String!, to: String!, summary: PlatformRevenueSummary!, rows: [BillingCharge!]!, calculatedAt: String! }
   type PlatformContact { name: String!, email: String!, phone: String!, address: String! }
   type PlatformAdminContact { id: ID!, name: String!, email: String!, status: String! }
   type PlatformStore { id: ID!, code: String!, name: String!, address: String!, status: String! }
@@ -298,7 +303,7 @@ export const typeDefs = `#graphql
   type PlatformBusinessDetail { metadata: PlatformBusinessMetadata!, billing: BillingOverview! }
   type PlatformPaymentConnection { items: [BillingPayment!]!, nextCursor: String }
   type PlatformAdminUser { id: ID!, username: String!, email: String!, name: String!, firstName: String!, lastName: String!, status: String!, emailVerified: Boolean!, createdAt: String!, updatedAt: String! }
-  type SubscriptionAccess { status: String!, planCode: String!, planName: String!, trialEndsOn: String, paidThrough: String, graceEndsOn: String, staffAccessAllowed: Boolean! }
+  type SubscriptionAccess { status: String!, statusLabel: String!, workspaceState: String!, suspended: Boolean!, planCode: String!, planName: String!, trialEndsOn: String, paidThrough: String, graceEndsOn: String, archivedAt: String, deletionScheduledOn: String, staffAccessAllowed: Boolean! }
 
   type StandardMeasurementUnit { code: String!, dimension: String!, baseUnit: String!, baseUnits: Int! }
   type PackageUnitLabel { code: String!, name: String!, pluralName: String!, symbol: String!, status: String! }
@@ -748,6 +753,7 @@ export const typeDefs = `#graphql
     billingOverview: BillingOverview!
     platformBusinesses(first: Int = 25, after: String, search: String, planCode: String, status: String): PlatformBusinessConnection!
     platformMetrics: PlatformMetrics!
+    platformRevenueReport(from: String!, to: String!, tenantId: ID, promotionId: ID): PlatformRevenueReport!
     platformPayments(first: Int = 25, after: String, status: String = "submitted", from: String, to: String, tenantId: ID, reference: String): PlatformPaymentConnection!
     platformBusiness(tenantId: ID!): PlatformBusinessDetail!
     platformAdmins: [PlatformAdminUser!]!
@@ -850,6 +856,9 @@ export const typeDefs = `#graphql
     claimBillingPromotion(promotionId: ID!): BillingAccount!
     attachBillingEtimsReference(tenantId: ID!, documentId: ID!, reference: String!): BillingDocument!
     updateBillingContact(tenantId: ID, name: String!, email: String!, phone: String = ""): BillingAccount!
+    issueBillingCredit(tenantId: ID!, amountKes: Int!, expiresOn: String, reason: String!, customerMessage: String = "", requestId: ID!): BillingCredit!
+    voidBillingCredit(tenantId: ID!, creditId: ID!, reason: String!): BillingCredit!
+    setPlatformBusinessSuspended(tenantId: ID!, suspended: Boolean!, reason: String!): BillingAccount!
     invitePlatformAdmin(email: String!, firstName: String!, lastName: String!): PlatformAdminUser!
     resendPlatformAdminInvitation(username: String!): PlatformAdminUser!
     setPlatformAdminEnabled(username: String!, enabled: Boolean!): PlatformAdminUser!

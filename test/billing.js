@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { buildSchema } = require("graphql");
-const { addBillingMonth, addBillingMonths, billingGraceDays, billingStatus, effectivePlan, nextBillingPayment, PLANS } = require("../dist/domain/billing");
+const { addBillingMonth, addBillingMonths, billingGraceDays, billingStatus, billingStatusLabel, effectivePlan, nextBillingPayment, PLANS } = require("../dist/domain/billing");
 const { MUTATION_POLICY, applyBillingPolicies } = require("../dist/domain/billing-policy");
 const { typeDefs } = require("../dist/graphql/schema");
 
@@ -28,6 +28,9 @@ assert.equal(addBillingMonths("2028-02-29", 12), "2029-02-28");
 assert.equal(billingStatus(account(), "2026-08-14"), "trialing");
 assert.equal(billingStatus(account(), "2026-08-15"), "past_due");
 assert.equal(billingStatus(account(), "2026-08-16"), "restricted");
+assert.equal(billingStatusLabel(account(), "2026-08-16"), "Payment Defaulted");
+assert.equal(billingStatusLabel(account({ workspaceState: "archived" }), "2026-08-16"), "Archived");
+assert.equal(billingStatusLabel(account({ suspendedAt: "2026-08-16T00:00:00Z" }), "2026-08-16"), "Suspended by BiasharaKit");
 const annualTrial = account({ billingInterval: "annual" });
 assert.equal(billingGraceDays(annualTrial), 7);
 assert.equal(billingGraceDays(account({ pendingBillingInterval: "annual" })), 7, "the grace period follows the frequency selected for the payment due");
@@ -46,6 +49,9 @@ assert.equal(trialCharge.dueOn, "2026-08-15");
 assert.equal(trialCharge.periodStartsOn, "2026-08-15");
 assert.equal(trialCharge.periodEndsOn, "2026-09-14");
 assert.equal(trialCharge.amountKes, 2000);
+const creditedCharge = nextBillingPayment(account({ planCode: "biashara_growth", creditBalanceKes: 750 }), "2026-08-04");
+assert.equal(creditedCharge.creditToApplyKes, 750);
+assert.equal(creditedCharge.cashDueKes, 1250);
 const annualCharge = nextBillingPayment(account({ planCode: "biashara_growth", pendingBillingInterval: "annual" }), "2026-08-04");
 assert.equal(annualCharge.billingInterval, "annual");
 assert.equal(annualCharge.billingMonths, 12);
@@ -103,6 +109,10 @@ async function policyTests() {
   await assert.rejects(() => wrapped.Query.products(null, {}, staff), (error) => error.extensions?.code === "SUBSCRIPTION_RESTRICTED");
   assert.deepEqual(await wrapped.Query.products(null, {}, admin), ["ok"], "restricted admins retain read access");
   await assert.rejects(() => wrapped.Mutation.completeSale(null, {}, admin), (error) => error.extensions?.code === "SUBSCRIPTION_RESTRICTED");
+  currentAccount = account({ workspaceState: "archived" });
+  await assert.rejects(() => wrapped.Query.products(null, {}, admin), (error) => error.extensions?.code === "SUBSCRIPTION_RESTRICTED");
+  currentAccount = account({ suspendedAt: "2026-09-03T00:00:00Z" });
+  await assert.rejects(() => wrapped.Query.products(null, {}, admin), (error) => error.extensions?.code === "WORKSPACE_SUSPENDED");
   currentAccount = account({ trialStartedOn: kenyaDate(), trialEndsOn: addBillingMonth(kenyaDate()) });
   await assert.rejects(() => wrapped.Mutation.updateBusinessDetails(null, { vatRegistered: true }, admin), (error) => error.extensions?.code === "FEATURE_NOT_INCLUDED");
   await assert.rejects(() => wrapped.Mutation.createStore(null, {}, admin), (error) => error.extensions?.code === "PLAN_LIMIT_REACHED");

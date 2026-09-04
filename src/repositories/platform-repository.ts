@@ -14,7 +14,7 @@ export interface PlatformBusinessSummary {
   normalizedName: string;
   planCode: PlanCode;
   planName: string;
-  subscriptionStatus: BillingStatus;
+  subscriptionStatus: BillingStatus | "suspended" | "archived" | "deleting" | "deleted";
   monthlyPriceKes: number;
   activeUsers: number;
   activeStores: number;
@@ -80,7 +80,7 @@ export const refreshPlatformBusinessSummary = async (tenantId: string) => {
     normalizedName: normalizeName(tenantName),
     planCode: account.planCode,
     planName: plan.name,
-    subscriptionStatus: billingStatus(account),
+    subscriptionStatus: account.suspendedAt ? "suspended" : (account.workspaceState ?? "active") !== "active" ? (account.workspaceState ?? "archived") : billingStatus(account),
     monthlyPriceKes: Math.round(upcomingPayment.amountKes / upcomingPayment.billingMonths),
     activeUsers: users.filter((user) => user.status !== "DISABLED").length,
     activeStores: stores.filter((store) => store.status === "active").length,

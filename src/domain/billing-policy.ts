@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../auth";
+import { GraphQLError } from "graphql";
 import { forbiddenError } from "../auth";
 import { getCognitoUser } from "../services/cognito";
 import { getBusinessSettings } from "../repositories/pos-repository";
@@ -30,9 +31,10 @@ export const MUTATION_POLICY: Record<string, MutationClass> = {
   submitBillingPayment: "billing", scheduleBillingPlan: "billing", scheduleBillingInterval: "billing", cancelBillingSubscription: "billing", claimBillingPromotion: "billing",
   confirmBillingPayment: "platform", rejectBillingPayment: "platform", assignPlatformBillingPlan: "platform", updateBillingOverride: "platform", setBillingOffer: "platform", clearBillingOffer: "platform", attachBillingEtimsReference: "platform",
   updateBillingContact: "platform", invitePlatformAdmin: "platform", resendPlatformAdminInvitation: "platform", setPlatformAdminEnabled: "platform", saveBillingPromotion: "platform", setBillingPromotionEnabled: "platform",
+  issueBillingCredit: "platform", voidBillingCredit: "platform", setPlatformBusinessSuspended: "platform",
 };
 
-const platformQueries = new Set(["platformBusinesses", "platformMetrics", "platformPayments", "platformBusiness", "platformAdmins", "platformBillingPromotions", "platformBillingAccount", "platformBillingConfiguration"]);
+const platformQueries = new Set(["platformBusinesses", "platformMetrics", "platformRevenueReport", "platformPayments", "platformBusiness", "platformAdmins", "platformBillingPromotions", "platformBillingAccount", "platformBillingConfiguration"]);
 const accessQueries = new Set(["subscriptionAccess"]);
 const billingQueries = new Set(["billingOverview"]);
 const accountingQueries = new Set(["accountingSummary", "supplierInvoices", "unbilledGoodsReceipts"]);
@@ -56,6 +58,9 @@ const enforceSubscriptionAccess = async (context: GraphQLContext, allowRestricte
   if (!billingEnforcementEnabled()) return null;
   const account = await requireBillingAccount(tenantId(context));
   const status = billingStatus(account);
+  if (account.suspendedAt) throw new GraphQLError("This workspace has been suspended by BiasharaKit. Contact support for assistance.", { extensions: { code: "WORKSPACE_SUSPENDED" } });
+  if (["deleting", "deleted"].includes(account.workspaceState ?? "active")) throw new GraphQLError("This workspace has been deleted and is no longer available.", { extensions: { code: "WORKSPACE_DELETED" } });
+  if ((account.workspaceState ?? "active") === "archived" && !(allowRestrictedAdmin && context.auth.activeRole === "admin")) throw subscriptionError();
   if ((status === "restricted" || status === "cancelled") && !(allowRestrictedAdmin && context.auth.activeRole === "admin")) {
     throw subscriptionError();
   }
@@ -104,6 +109,7 @@ export const applyBillingPolicies = <T extends ResolverCollection>(resolvers: T)
     if (!platformQueries.has(field) && !accessQueries.has(field)) {
       const account = await enforceSubscriptionAccess(context, true);
       if (billingQueries.has(field) && context.auth.activeRole !== "admin") throw forbiddenError();
+      if (account && (account.workspaceState ?? "active") === "archived" && !billingQueries.has(field)) throw subscriptionError();
       if (account && accountingQueries.has(field) && !effectivePlan(account).vatAccounting) throw featureError("VAT and accounting");
     }
     return resolver(parent, args, context, info);
@@ -117,6 +123,7 @@ export const applyBillingPolicies = <T extends ResolverCollection>(resolvers: T)
       let release: (() => Promise<void>) | null = null;
       try {
         if (resource) release = await acquireBillingCapacityLock(tenantId(context), resource);
+        if (field === "updateBillingContact" && context.auth.activeRole !== "superadmin") await enforceSubscriptionAccess(context, true);
         if (classification === "operational") await enforceSubscriptionAccess(context, false);
         if (classification === "safe_settings" || classification === "billing") await enforceSubscriptionAccess(context, true);
         if (classification === "operational" || classification === "safe_settings") await enforceCapabilities(field, args, context);

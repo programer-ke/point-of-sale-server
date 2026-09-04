@@ -168,6 +168,15 @@ import {
   updateBillingContact,
 } from "../repositories/billing-repository";
 import {
+  issueBillingCredit,
+  listBillingCharges,
+  listBillingCreditEvents,
+  listBillingCredits,
+  platformRevenueReport,
+  setWorkspaceSuspension,
+  voidBillingCredit,
+} from "../repositories/billing-credit-repository";
+import {
   getPlatformMetrics,
   listPlatformBusinessPage,
   listPlatformPaymentPage,
@@ -558,13 +567,25 @@ const billingUsage = async (tenantId: string) => {
   return { activeUsers: users.filter((user) => user.status !== "DISABLED").length, activeStores: stores.filter((store) => store.status === "active").length };
 };
 
-const billingOverview = async (tenantId: string) => {
-  const [account, usage, payments, documents, audits] = await Promise.all([
-    requireBillingAccount(tenantId), billingUsage(tenantId), listBillingPayments(tenantId), listBillingDocuments(tenantId), listBillingAudits(tenantId),
+const billingOverview = async (tenantId: string, includeInternalCreditReasons = false) => {
+  const [account, usage, payments, documents, audits, credits, creditEvents, charges] = await Promise.all([
+    requireBillingAccount(tenantId), billingUsage(tenantId), listBillingPayments(tenantId), listBillingDocuments(tenantId), listBillingAudits(tenantId), listBillingCredits(tenantId), listBillingCreditEvents(tenantId), listBillingCharges(tenantId),
   ]);
   const billingInterval = account.pendingBillingInterval ?? account.billingInterval ?? "monthly";
   const availablePromotions = account.offer?.remainingPayments ? [] : await listEligibleBillingPromotions("existing_accounts", account.pendingPlanCode ?? account.planCode, billingInterval);
-  return { account: billingAccountView(account), nextPayment: { ...nextBillingPayment(account), paymentPending: payments.some(({ status }) => status === "submitted") }, usage, payments, documents, audits, configuration: billingConfiguration(), availablePromotions };
+  const creditReservedKes = payments.filter((payment) => payment.status === "submitted" || (payment.status === "rejected" && Boolean(payment.creditAllocations?.length))).reduce((total, payment) => total + (payment.creditAppliedKes ?? 0), 0);
+  const visibleCreditEvents = includeInternalCreditReasons ? creditEvents : creditEvents.map((event) => ({ ...event, reason: "Account credit activity" }));
+  const visibleAudits = includeInternalCreditReasons ? audits : audits.map((audit) => audit.action.startsWith("billing_credit") ? { ...audit, reason: "Account credit activity", before: "{}", after: "{}" } : audit);
+  return { account: { ...billingAccountView(account), creditReservedKes }, nextPayment: { ...nextBillingPayment(account), paymentPending: payments.some(({ status }) => status === "submitted") }, usage, payments, documents, audits: visibleAudits, credits, creditEvents: visibleCreditEvents, charges, configuration: billingConfiguration(), availablePromotions };
+};
+
+const sendBusinessBillingNotice = async (tenantId: string, eventKey: string, subject: string, message: string) => {
+  const [account, memberships] = await Promise.all([requireBillingAccount(tenantId), listTenantMemberships(tenantId)]);
+  const admins = memberships.filter(({ roles }) => roles.includes("admin"));
+  const users = await Promise.all(admins.map(({ username }) => getCognitoUser(username)));
+  const emails = [...new Set([account.billingContactEmail || account.ownerUsername, ...users.map(({ email }) => email)].filter(Boolean).map((email) => email.toLowerCase()))];
+  await Promise.allSettled(emails.map((to) => sendBillingEmail({ to, subject, heading: subject, message })));
+  await Promise.allSettled(admins.map(({ userId }) => createNotification(tenantId, userId, { eventKey: `billing:${eventKey}`, type: "billing", title: subject, message, actionPath: "/dashboard/billing" })));
 };
 
 const sendPaymentReviewEmail = async (tenantId: string, approved: boolean, reason = "") => {
@@ -605,6 +626,8 @@ const baseResolvers = {
     billingMonths: (payment: { billingMonths?: number }) => payment.billingMonths ?? 1,
     annualDiscountKes: (payment: { annualDiscountKes?: number }) => payment.annualDiscountKes ?? 0,
     promotionCreditKes: (payment: { promotionCreditKes?: number }) => payment.promotionCreditKes ?? 0,
+    customPriceAdjustmentKes: (payment: { customPriceAdjustmentKes?: number }) => payment.customPriceAdjustmentKes ?? 0,
+    creditAppliedKes: (payment: { creditAppliedKes?: number }) => payment.creditAppliedKes ?? 0,
   },
   BillingDocument: {
     billingInterval: (document: { billingInterval?: string }) => document.billingInterval ?? "monthly",
@@ -612,6 +635,9 @@ const baseResolvers = {
     baseAmountKes: (document: { baseAmountKes?: number; amountKes: number }) => document.baseAmountKes ?? document.amountKes,
     annualDiscountKes: (document: { annualDiscountKes?: number }) => document.annualDiscountKes ?? 0,
     promotionCreditKes: (document: { promotionCreditKes?: number }) => document.promotionCreditKes ?? 0,
+    customPriceAdjustmentKes: (document: { customPriceAdjustmentKes?: number }) => document.customPriceAdjustmentKes ?? 0,
+    creditAppliedKes: (document: { creditAppliedKes?: number }) => document.creditAppliedKes ?? 0,
+    cashAmountKes: (document: { cashAmountKes?: number; amountKes: number }) => document.cashAmountKes ?? document.amountKes,
   },
   BillingOffer: { billingInterval: (offer: { billingInterval?: string }) => offer.billingInterval ?? "monthly" },
   BusinessSettings: {
@@ -812,6 +838,7 @@ const baseResolvers = {
       return listPlatformBusinessPage({ ...args, planCode: args.planCode ? validatePlanCode(args.planCode) : null });
     },
     platformMetrics: (_: unknown, _args: unknown, context: GraphQLContext) => { requirePlatformAdmin(context); return getPlatformMetrics(); },
+    platformRevenueReport: (_: unknown, { from, to, tenantId, promotionId }: { from: string; to: string; tenantId?: string | null; promotionId?: string | null }, context: GraphQLContext) => { requirePlatformAdmin(context); return platformRevenueReport(from, to, { tenantId, promotionId }); },
     platformPayments: (_: unknown, args: { first?: number; after?: string; status?: string; from?: string; to?: string; tenantId?: string; reference?: string }, context: GraphQLContext) => {
       requirePlatformAdmin(context);
       const status = args.status ?? "submitted";
@@ -820,18 +847,19 @@ const baseResolvers = {
     },
     platformBusiness: async (_: unknown, { tenantId }: { tenantId: string }, context: GraphQLContext) => {
       requirePlatformAdmin(context);
-      const [metadata, billing] = await Promise.all([platformBusinessMetadata(tenantId), billingOverview(tenantId)]);
+      const [metadata, billing] = await Promise.all([platformBusinessMetadata(tenantId), billingOverview(tenantId, true)]);
       return { metadata, billing };
     },
     platformAdmins: (_: unknown, _args: unknown, context: GraphQLContext) => { requirePlatformAdmin(context); return listPlatformAdmins(); },
     platformBillingPromotions: (_: unknown, _args: unknown, context: GraphQLContext) => { requirePlatformAdmin(context); return listBillingPromotions(); },
-    platformBillingAccount: (_: unknown, { tenantId }: { tenantId: string }, context: GraphQLContext) => { requirePlatformAdmin(context); return billingOverview(tenantId); },
+    platformBillingAccount: (_: unknown, { tenantId }: { tenantId: string }, context: GraphQLContext) => { requirePlatformAdmin(context); return billingOverview(tenantId, true); },
     subscriptionAccess: async (_: unknown, _args: unknown, context: GraphQLContext) => {
       requireStaff(context);
       const account = await getBillingAccount(tenant(context));
-      if (!account) return { status: "exempt", planCode: "biashara_plus", planName: "Biashara Plus", trialEndsOn: null, paidThrough: null, graceEndsOn: null, staffAccessAllowed: true };
+      if (!account) return { status: "exempt", statusLabel: "Billing Exempt", workspaceState: "active", suspended: false, planCode: "biashara_plus", planName: "Biashara Plus", trialEndsOn: null, paidThrough: null, graceEndsOn: null, archivedAt: null, deletionScheduledOn: null, staffAccessAllowed: true };
       const view = billingAccountView(account);
-      return { status: view.status, planCode: account.planCode, planName: view.plan.name, trialEndsOn: account.trialEndsOn, paidThrough: account.paidThrough, graceEndsOn: view.graceEndsOn, staffAccessAllowed: view.status !== "restricted" && view.status !== "cancelled" };
+      const workspaceState = account.workspaceState ?? "active";
+      return { status: view.status, statusLabel: view.statusLabel, workspaceState, suspended: Boolean(account.suspendedAt), planCode: account.planCode, planName: view.plan.name, trialEndsOn: account.trialEndsOn, paidThrough: account.paidThrough, graceEndsOn: view.graceEndsOn, archivedAt: account.archivedAt ?? null, deletionScheduledOn: account.deletionScheduledOn ?? null, staffAccessAllowed: !account.suspendedAt && workspaceState === "active" && view.status !== "restricted" && view.status !== "cancelled" };
     },
   },
 
@@ -1213,7 +1241,7 @@ const baseResolvers = {
       return result;
     },
     cancelBillingSubscription: async (_: unknown, _args: unknown, context: GraphQLContext) => { requireAdmin(context); const tenantId = tenant(context); const result = billingAccountView(await cancelBillingSubscription(tenantId)); await syncPlatformBusinessMetrics(tenantId); return result; },
-    confirmBillingPayment: async (_: unknown, { tenantId, paymentId }: { tenantId: string; paymentId: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const submitted = await getBillingPayment(tenantId, paymentId); const current = await requireBillingAccount(tenantId); if (submitted && submitted.planCode !== current.planCode) await validatePlanChange(tenantId, submitted.planCode); const payment = await observeCriticalOperation("billing_receipt_creation", operationContext(context, undefined, tenantId), () => confirmBillingPayment(tenantId, paymentId, admin.id)); await sendPaymentReviewEmail(tenantId, true).catch((error) => logEvent("error", "billing_confirmation_email_failed", { tenantId, errorName: error instanceof Error ? error.name : "UnknownError" })); await syncPlatformBusinessMetrics(tenantId, submitted?.status === "submitted" ? submitted.amountKes : 0); return payment; },
+    confirmBillingPayment: async (_: unknown, { tenantId, paymentId }: { tenantId: string; paymentId: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const submitted = await getBillingPayment(tenantId, paymentId); const current = await requireBillingAccount(tenantId); if (submitted && submitted.planCode !== current.planCode) await validatePlanChange(tenantId, submitted.planCode); const payment = await observeCriticalOperation("billing_receipt_creation", operationContext(context, undefined, tenantId), () => confirmBillingPayment(tenantId, paymentId, admin.id)); await sendPaymentReviewEmail(tenantId, true).catch((error) => logEvent("error", "billing_confirmation_email_failed", { tenantId, errorName: error instanceof Error ? error.name : "UnknownError" })); if ((payment.creditAppliedKes ?? 0) > 0) await sendBusinessBillingNotice(tenantId, `credit:payment:${payment.id}`, "Account credit applied", `KES ${(payment.creditAppliedKes ?? 0).toLocaleString("en-KE")} of account credit was applied when your subscription payment was confirmed.`); await syncPlatformBusinessMetrics(tenantId, submitted?.status === "submitted" ? submitted.amountKes : 0); return payment; },
     rejectBillingPayment: async (_: unknown, { tenantId, paymentId, reason }: { tenantId: string; paymentId: string; reason: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const payment = await rejectBillingPayment(tenantId, paymentId, admin.id, reason); await sendPaymentReviewEmail(tenantId, false, reason).catch((error) => logEvent("error", "billing_rejection_email_failed", { tenantId, errorName: error instanceof Error ? error.name : "UnknownError" })); await syncPlatformBusinessMetrics(tenantId); return payment; },
     assignPlatformBillingPlan: async (_: unknown, { tenantId, planCode: value, reason }: { tenantId: string; planCode: string; reason: string }, context: GraphQLContext) => {
       const admin = requirePlatformAdmin(context);
@@ -1285,6 +1313,30 @@ const baseResolvers = {
       const result = await updateBillingContact(tenantId, input, context.auth.id);
       await refreshPlatformBusinessSummary(tenantId);
       return result;
+    },
+    issueBillingCredit: async (_: unknown, input: { tenantId: string; amountKes: number; expiresOn?: string | null; reason: string; customerMessage?: string; requestId: string }, context: GraphQLContext) => {
+      const admin = requirePlatformAdmin(context);
+      const result = await issueBillingCredit(input.tenantId, input, admin.id);
+      if (!result.idempotent) {
+        const balance = (await requireBillingAccount(input.tenantId)).creditBalanceKes ?? 0;
+        const settlementMessage = result.settlement ? ` It automatically settled service through ${result.settlement.periodEndsOn}.` : " It will be applied automatically to subscription billing.";
+        await sendBusinessBillingNotice(input.tenantId, `credit:${result.credit.id}:issued`, "BiasharaKit account credit issued", `KES ${result.credit.originalAmountKes.toLocaleString("en-KE")} was added to your account. Available balance: KES ${balance.toLocaleString("en-KE")}.${result.credit.expiresOn ? ` It expires on ${result.credit.expiresOn}.` : ""}${settlementMessage}${result.credit.customerMessage ? ` ${result.credit.customerMessage}` : ""}`);
+      }
+      await syncPlatformBusinessMetrics(input.tenantId);
+      return result.credit;
+    },
+    voidBillingCredit: async (_: unknown, { tenantId, creditId, reason }: { tenantId: string; creditId: string; reason: string }, context: GraphQLContext) => {
+      const admin = requirePlatformAdmin(context);
+      const result = await voidBillingCredit(tenantId, creditId, reason, admin.id);
+      await syncPlatformBusinessMetrics(tenantId);
+      return result;
+    },
+    setPlatformBusinessSuspended: async (_: unknown, { tenantId, suspended, reason }: { tenantId: string; suspended: boolean; reason: string }, context: GraphQLContext) => {
+      const admin = requirePlatformAdmin(context);
+      const account = await setWorkspaceSuspension(tenantId, suspended, reason, admin.id);
+      await sendBusinessBillingNotice(tenantId, `workspace:${suspended ? "suspended" : "reactivated"}:${account.updatedAt}`, suspended ? "BiasharaKit workspace suspended" : "BiasharaKit workspace reactivated", suspended ? "Workspace access has been suspended by BiasharaKit. Contact support for assistance." : "The administrative suspension has been removed. Access now follows the workspace billing status.");
+      await syncPlatformBusinessMetrics(tenantId);
+      return billingAccountView(account);
     },
     invitePlatformAdmin: async (_: unknown, input: { email: string; firstName: string; lastName: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const invited = await invitePlatformAdmin(input); await recordPlatformAudit({ action: "platform_admin_invited", actorId: admin.id, target: invited.username, reason: "Platform administrator invited" }); return invited; },
     resendPlatformAdminInvitation: async (_: unknown, { username }: { username: string }, context: GraphQLContext) => { const admin = requirePlatformAdmin(context); const admins = await listPlatformAdmins(); if (!admins.some((candidate) => candidate.username === username)) throw new Error("Platform administrator was not found"); const result = await resendCognitoInvitation(username); await recordPlatformAudit({ action: "platform_admin_invitation_resent", actorId: admin.id, target: username, reason: "Platform administrator invitation resent" }); return result; },

@@ -4,6 +4,7 @@ export type PlanCode = "biashara" | "biashara_growth" | "biashara_plus";
 export type BillingInterval = "monthly" | "annual";
 export type PlanCapability = "multi_store" | "vat_accounting" | "mpesa_api" | "mpesa_store_overrides";
 export type BillingStatus = "trialing" | "active" | "past_due" | "restricted" | "exempt" | "cancelled";
+export type WorkspaceState = "active" | "archived" | "deleting" | "deleted";
 
 export interface PlanDefinition {
   code: PlanCode;
@@ -66,12 +67,20 @@ export interface BillingAccount {
   acceptedBy: string;
   override: BillingOverride | null;
   offer: BillingOffer | null;
+  creditBalanceKes?: number;
+  workspaceState?: WorkspaceState;
+  delinquentSince?: string | null;
+  archivedAt?: string | null;
+  deletionScheduledOn?: string | null;
+  suspendedAt?: string | null;
+  suspendedBy?: string | null;
+  suspensionReason?: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-export const TERMS_VERSION = "2026-08-03";
-export const PRIVACY_VERSION = "2026-08-04";
+export const TERMS_VERSION = "2026-09-03";
+export const PRIVACY_VERSION = "2026-09-03";
 
 export const PLANS: Record<PlanCode, PlanDefinition> = {
   biashara: {
@@ -185,6 +194,23 @@ export const billingStatus = (account: BillingAccount, today = kenyaDate()): Bil
   return account.cancelledAt ? "cancelled" : "restricted";
 };
 
+export const BILLING_STATUS_LABELS: Record<BillingStatus, string> = {
+  trialing: "On Trial",
+  active: "Active",
+  past_due: "Payment Due",
+  restricted: "Payment Defaulted",
+  exempt: "Billing Exempt",
+  cancelled: "Subscription Ended",
+};
+
+export const billingStatusLabel = (account: BillingAccount, today = kenyaDate()) => {
+  if (account.suspendedAt) return "Suspended by BiasharaKit";
+  if ((account.workspaceState ?? "active") === "archived") return "Archived";
+  if ((account.workspaceState ?? "active") === "deleting") return "Pending Deletion";
+  if ((account.workspaceState ?? "active") === "deleted") return "Deleted";
+  return BILLING_STATUS_LABELS[billingStatus(account, today)];
+};
+
 export interface NextBillingPayment {
   planCode: PlanCode;
   planName: string;
@@ -198,6 +224,10 @@ export interface NextBillingPayment {
   savingsKes: number;
   annualDiscountKes: number;
   promotionCreditKes: number;
+  customPriceAdjustmentKes: number;
+  creditAvailableKes: number;
+  creditToApplyKes: number;
+  cashDueKes: number;
   offerId: string | null;
   offerLabel: string | null;
   offerPricePercent: number | null;
@@ -216,11 +246,14 @@ export const nextBillingPayment = (account: BillingAccount, today = kenyaDate())
   const periodEndsOn = addBillingDays(addBillingMonths(periodStartsOn, billingMonths), -1);
   const offerInterval = account.offer?.billingInterval ?? "monthly";
   const offer = account.offer && account.offer.remainingPayments > 0 && offerInterval === billingInterval && (!account.offer.planCode || account.offer.planCode === planCode) && periodStartsOn >= account.offer.startsOn ? account.offer : null;
+  const listAmountKes = PLANS[planCode].monthlyPriceKes * billingMonths;
   const baseAmountKes = plan.monthlyPriceKes * billingMonths;
   const intervalAmountKes = billingInterval === "annual" ? annualPriceKes(plan.monthlyPriceKes) : plan.monthlyPriceKes;
   const annualDiscountKes = baseAmountKes - intervalAmountKes;
   const amountKes = offer ? Math.round(intervalAmountKes * offer.pricePercent / 100) : intervalAmountKes;
   const promotionCreditKes = intervalAmountKes - amountKes;
+  const creditAvailableKes = Math.max(0, account.creditBalanceKes ?? 0);
+  const creditToApplyKes = Math.min(amountKes, creditAvailableKes);
   return {
     planCode,
     planName: plan.name,
@@ -234,6 +267,10 @@ export const nextBillingPayment = (account: BillingAccount, today = kenyaDate())
     savingsKes: baseAmountKes - amountKes,
     annualDiscountKes,
     promotionCreditKes,
+    customPriceAdjustmentKes: listAmountKes - baseAmountKes,
+    creditAvailableKes,
+    creditToApplyKes,
+    cashDueKes: amountKes - creditToApplyKes,
     offerId: offer?.id ?? null,
     offerLabel: offer?.label ?? null,
     offerPricePercent: offer?.pricePercent ?? null,
@@ -247,7 +284,7 @@ export const validatePlanCode = (value: string): PlanCode => {
 };
 
 export const subscriptionError = () => new GraphQLError(
-  "This workspace is restricted because its trial or subscription has expired. A business administrator can renew it from Billing.",
+  "This workspace is Payment Defaulted because its trial or subscription has expired. A business administrator can renew it from Billing.",
   { extensions: { code: "SUBSCRIPTION_RESTRICTED" } },
 );
 
