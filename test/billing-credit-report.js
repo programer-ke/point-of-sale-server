@@ -56,13 +56,17 @@ async function main() {
 
   const input = { amountKes: 100, expiresOn: null, reason: "Service recovery", customerMessage: "Welcome back", requestId: "request-1234" };
   const requestHash = JSON.stringify({ amountKes: 100, expiresOn: null, reason: "Service recovery", customerMessage: "Welcome back" });
+  const existingCredit = { partitionKey: "TENANT#tenant-1", sortKey: "BILLING#CREDIT#credit-id", entityType: "billing_credit", id: "credit-id", tenantId: "tenant-1", originalAmountKes: 100, remainingAmountKes: 100, status: "available", expiresOn: null, reason: "Service recovery", customerMessage: "Welcome back", issuedBy: "admin", requestId: "request-1234", issuedAt: "2026-01-01T08:00:00.000Z", updatedAt: "2026-01-01T08:00:00.000Z" };
   dynamoDB.send = async (command) => {
+    if (command.constructor.name === "QueryCommand") return { Items: [existingCredit] };
     if (command.constructor.name !== "GetCommand") throw new Error(`Unexpected ${command.constructor.name}`);
     if (command.input.Key.sortKey.startsWith("BILLING#CREDIT_REQUEST#")) return { Item: { creditId: "credit-id", requestHash } };
-    return { Item: { partitionKey: "TENANT#tenant-1", sortKey: "BILLING#CREDIT#credit-id", entityType: "billing_credit", id: "credit-id", tenantId: "tenant-1", originalAmountKes: 100, remainingAmountKes: 100, status: "available", expiresOn: null, reason: "Service recovery", customerMessage: "Welcome back", issuedBy: "admin", requestId: "request-1234", issuedAt: "2026-01-01T08:00:00.000Z", updatedAt: "2026-01-01T08:00:00.000Z" } };
+    if (command.input.Key.sortKey === "BILLING#ACCOUNT") return { Item: { ...account, tenantName: "Market", paidThrough: "2099-01-01", trialEndsOn: "2026-01-01", workspaceState: "active" } };
+    return { Item: existingCredit };
   };
   const retried = await issueBillingCredit("tenant-1", input, "admin");
   assert.equal(retried.idempotent, true);
+  assert.equal(retried.recoveryAttempted, false, "an already-settled active account must not purchase another period on retry");
   assert.equal(retried.credit.id, "credit-id");
   await assert.rejects(() => issueBillingCredit("tenant-1", { ...input, amountKes: 101 }, "admin"), /already used with different details/, "an idempotency key cannot be reused for different credit details");
   await assert.rejects(() => issueBillingCredit("tenant-1", { ...input, amountKes: 10.5, requestId: "request-5678" }, "admin"), /whole-KES|between KES/, "credits require a positive whole-KES amount");

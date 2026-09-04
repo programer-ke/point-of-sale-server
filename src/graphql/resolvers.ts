@@ -1317,7 +1317,7 @@ const baseResolvers = {
     issueBillingCredit: async (_: unknown, input: { tenantId: string; amountKes: number; expiresOn?: string | null; reason: string; customerMessage?: string; requestId: string }, context: GraphQLContext) => {
       const admin = requirePlatformAdmin(context);
       const result = await issueBillingCredit(input.tenantId, input, admin.id);
-      if (!result.idempotent) {
+      if (!result.idempotent || result.recoveryAttempted) {
         const balance = (await requireBillingAccount(input.tenantId)).creditBalanceKes ?? 0;
         const settlementMessage = result.settlement ? ` It automatically settled service through ${result.settlement.periodEndsOn}.` : " It will be applied automatically to subscription billing.";
         await sendBusinessBillingNotice(input.tenantId, `credit:${result.credit.id}:issued`, "BiasharaKit account credit issued", `KES ${result.credit.originalAmountKes.toLocaleString("en-KE")} was added to your account. Available balance: KES ${balance.toLocaleString("en-KE")}.${result.credit.expiresOn ? ` It expires on ${result.credit.expiresOn}.` : ""}${settlementMessage}${result.credit.customerMessage ? ` ${result.credit.customerMessage}` : ""}`);

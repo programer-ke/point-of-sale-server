@@ -115,7 +115,12 @@ export const issueBillingCredit = async (tenantId: string, input: { amountKes: n
     if (existingRequest.Item.requestHash !== requestHash) throw new Error("Credit request ID was already used with different details");
     const existing = await dynamoDB.send(new GetCommand({ TableName: TABLE_NAME, Key: creditKey(tenantId, String(existingRequest.Item.creditId)) }));
     const credit = clean<BillingCredit>(existing.Item);
-    if (credit) return { credit, settlement: null as BillingCharge | null, idempotent: true };
+    if (credit) {
+      const account = await requireBillingAccount(tenantId);
+      const recoveryAttempted = ["restricted", "cancelled"].includes(billingStatus(account)) || (account.workspaceState ?? "active") === "archived";
+      const settlement = recoveryAttempted ? await attemptCreditSettlement(tenantId, actorId, account) : null;
+      return { credit: (await listBillingCredits(tenantId)).find((item) => item.id === credit.id) ?? credit, settlement, idempotent: true, recoveryAttempted };
+    }
   }
   const account = await requireBillingAccount(tenantId);
   if (["deleting", "deleted"].includes(account.workspaceState ?? "active")) throw new Error("Credits cannot be issued after workspace deletion has started");
@@ -134,7 +139,7 @@ export const issueBillingCredit = async (tenantId: string, input: { amountKes: n
     { Update: { TableName: TABLE_NAME, Key: accountKey(tenantId), UpdateExpression: "SET creditBalanceKes = if_not_exists(creditBalanceKes, :zero) + :amount, updatedAt = :now", ExpressionAttributeValues: { ":zero": 0, ":amount": input.amountKes, ":now": now } } },
   ] }));
   const settlement = await attemptCreditSettlement(tenantId, actorId);
-  return { credit: (await listBillingCredits(tenantId)).find((item) => item.id === id) ?? credit, settlement, idempotent: false };
+  return { credit: (await listBillingCredits(tenantId)).find((item) => item.id === id) ?? credit, settlement, idempotent: false, recoveryAttempted: false };
 };
 
 async function applyCreditsToOpenCharge(account: BillingAccount, payment: BillingPayment, allCredits: BillingCredit[], actorId: string) {
