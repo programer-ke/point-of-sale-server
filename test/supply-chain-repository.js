@@ -208,6 +208,9 @@ async function main() {
   assert.equal(opening.lines[0].quantity, 4);
   assert.equal(transaction.find((item) => item.Put?.Item?.entityType === "inventory_lot").Put.Item.origin, "opening_stock");
   assert.equal(transaction.find((item) => item.Put?.Item?.entityType === "stock_movement").Put.Item.type, "opening_stock");
+  const openingAudit = transaction.find((item) => item.Put?.Item?.recordType === "audit").Put.Item;
+  assert.ok(openingAudit.id, "opening stock must persist the audit ID required by GraphQL");
+  assert.equal(openingAudit.entityType, "opening_stock");
   assert.equal(transaction.some((item) => item.Put?.Item?.entityType === "supplier_invoice"), false, "opening stock must not create a payable");
   assert.equal(transaction.length, 5, "opening record, lot, movement, audit, and idempotency must be atomic");
 

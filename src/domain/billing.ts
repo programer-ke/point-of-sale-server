@@ -86,7 +86,7 @@ export const PLANS: Record<PlanCode, PlanDefinition> = {
   biashara: {
     code: "biashara",
     name: "Biashara",
-    monthlyPriceKes: 800,
+    monthlyPriceKes: 500,
     activeUserLimit: 5,
     activeStoreLimit: 1,
     vatAccounting: false,
@@ -96,7 +96,7 @@ export const PLANS: Record<PlanCode, PlanDefinition> = {
   biashara_growth: {
     code: "biashara_growth",
     name: "Biashara Growth",
-    monthlyPriceKes: 2_000,
+    monthlyPriceKes: 1_500,
     activeUserLimit: 10,
     activeStoreLimit: 3,
     vatAccounting: true,

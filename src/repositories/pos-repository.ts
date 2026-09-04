@@ -367,7 +367,16 @@ const productAliases = (product: ProductRecord) => {
 
 const stripKeys = <T>(item: Record<string, unknown> | undefined): T | null => {
   if (!item) return null;
-  const { partitionKey: _partitionKey, sortKey: _sortKey, accessPartition: _accessPartition, accessSort: _accessSort, entityType: _type, recordType: _recordType, ...record } = item;
+  const { partitionKey, sortKey: _sortKey, accessPartition: _accessPartition, accessSort: _accessSort, entityType, recordType, ...record } = item;
+  if (recordType === "audit") return { ...record, entityType } as T;
+  if (entityType === "audit" && typeof record.id !== "string") {
+    const marker = "#AUDIT#";
+    const storedKey = typeof partitionKey === "string" ? partitionKey : "";
+    const markerIndex = storedKey.lastIndexOf(marker);
+    const id = markerIndex >= 0 ? storedKey.slice(markerIndex + marker.length) : "";
+    if (!id) throw new Error("Audit record is missing an identifier");
+    return { ...record, id, entityType: record.action === "stock.opening_recorded" ? "opening_stock" : "audit" } as T;
+  }
   return record as T;
 };
 

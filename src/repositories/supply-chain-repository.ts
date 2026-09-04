@@ -753,8 +753,9 @@ export const recordOpeningStock = async (
     );
   });
   const record: OpeningStockRecord = { id, openingStockNumber, storeId: store.id, storeName: store.name, effectiveDate: payload.effectiveDate, notes: payload.notes, lines, createdBy: actor.id, createdByName: actor.name, createdAt: postedAt };
+  const auditId = randomUUID();
   transaction.unshift({ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "OPENING_STOCK", id), accessPartition: collection(tenantId, "OPENING_STOCK"), accessSort: `${effectiveAt}#${id}`, entityType: "opening_stock", tenantId, ...record }, ConditionExpression: "attribute_not_exists(partitionKey)" } });
-  transaction.push({ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "AUDIT", randomUUID(), "EVENT"), accessPartition: collection(tenantId, "AUDIT"), accessSort: `${postedAt}#${id}`, entityType: "audit", action: "stock.opening_recorded", entityId: id, reason: payload.notes || openingStockNumber, actorId: actor.id, actorName: actor.name, createdAt: postedAt } } });
+  transaction.push({ Put: { TableName: TABLE_NAME, Item: { ...key(tenantId, "AUDIT", auditId, "EVENT"), accessPartition: collection(tenantId, "AUDIT"), accessSort: `${postedAt}#${auditId}`, recordType: "audit", id: auditId, action: "stock.opening_recorded", entityType: "opening_stock", entityId: id, reason: payload.notes || openingStockNumber, actorId: actor.id, actorName: actor.name, createdAt: postedAt } } });
   if (transaction.length + 1 > 100) throw new Error("Opening stock is too large to post atomically");
   return commitIdempotent(tenantId, "opening_stock", requestId, payload, record, transaction);
 };

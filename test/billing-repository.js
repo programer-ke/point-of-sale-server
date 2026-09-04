@@ -89,9 +89,9 @@ async function main() {
     if (command.constructor.name === "TransactWriteCommand") return {};
     throw new Error(`Unexpected ${command.constructor.name}`);
   };
-  const creditedPayment = await repository.submitBillingPayment({ ...existing, planCode: "biashara", pendingPlanCode: null, paidThrough: "2099-09-30", pendingBillingInterval: null, billingInterval: "monthly", override: null, offer: null, creditBalanceKes: 1700 }, { mpesaReference: "SAMPLE5678", paidOn: "2026-08-04", submittedBy: "owner" });
+  const creditedPayment = await repository.submitBillingPayment({ ...existing, planCode: "biashara_growth", pendingPlanCode: null, paidThrough: "2099-09-30", pendingBillingInterval: null, billingInterval: "monthly", override: null, offer: null, creditBalanceKes: 1700 }, { mpesaReference: "SAMPLE5678", paidOn: "2026-08-04", submittedBy: "owner" });
   assert.equal(creditedPayment.creditAppliedKes, 700);
-  assert.equal(creditedPayment.amountKes, 100, "cash submission is only for the balance after credit");
+  assert.equal(creditedPayment.amountKes, 800, "cash submission is only for the balance after credit");
   assert.deepEqual(creditedPayment.creditAllocations.map(({ creditId }) => creditId), ["early-expiry", "later-expiry", "no-expiry"], "credits apply by earliest expiry and then issue date");
   const creditedTransaction = commands.find((command) => command.constructor.name === "TransactWriteCommand").input.TransactItems;
   assert.equal(creditedTransaction.filter((item) => item.ConditionCheck).length, 3, "credit snapshots are conditionally checked to prevent concurrent double application");
@@ -117,7 +117,7 @@ async function main() {
     if (command.constructor.name === "TransactWriteCommand") return {};
     throw new Error(`Unexpected ${command.constructor.name}`);
   };
-  const corrected = await repository.submitBillingPayment({ ...existing, planCode: "biashara", pendingPlanCode: null, paidThrough: "2099-09-30", pendingBillingInterval: null, billingInterval: "monthly", override: null, offer: null, creditBalanceKes: 1700 }, { mpesaReference: "SAMPLE9012", paidOn: "2026-08-04", submittedBy: "owner" });
+  const corrected = await repository.submitBillingPayment({ ...existing, planCode: "biashara_growth", pendingPlanCode: null, paidThrough: "2099-09-30", pendingBillingInterval: null, billingInterval: "monthly", override: null, offer: null, creditBalanceKes: 1700 }, { mpesaReference: "SAMPLE9012", paidOn: "2026-08-04", submittedBy: "owner" });
   assert.equal(corrected.id, rejected.id, "corrected evidence reuses the original charge and invoice");
   assert.equal(corrected.previousRejections.length, 1, "the rejected evidence remains recorded on the payment fact");
   const correctionTransaction = commands.find((command) => command.constructor.name === "TransactWriteCommand").input.TransactItems;

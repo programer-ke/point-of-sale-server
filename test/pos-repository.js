@@ -560,6 +560,7 @@ async function main() {
   assert.equal(staffDashboard.revenue, 125);
   assert.equal(staffDashboard.salesCount, 1);
   assert.equal(staffDashboard.cashierPerformance.length, 1);
+
   const staffSales = await repository.listSalesByStaff(tenantId, "cashier-1", 100);
   assert.deepEqual(staffSales.map(({ createdBy }) => createdBy), ["cashier-1"]);
   await repository.listSales(tenantId, 100, { to: "2026-07-20" });
@@ -568,6 +569,27 @@ async function main() {
   await repository.listSalesByStaff(tenantId, "cashier-1", 100, { to: "2026-07-20" });
   assert.match(lastQuery.KeyConditionExpression, /accessSort <= :to/);
   assertExpressionBindingsMatch(lastQuery, "upper-bounded staff sales query");
+
+  const legacyOpeningAudit = {
+    partitionKey: "TENANT#tenant-1#AUDIT#legacy-opening-audit",
+    sortKey: "EVENT",
+    accessPartition: "TENANT#tenant-1#AUDIT",
+    accessSort: "2026-08-01T10:00:00.000Z#opening-1",
+    entityType: "audit",
+    action: "stock.opening_recorded",
+    entityId: "opening-1",
+    reason: "Existing stock",
+    actorId: "admin",
+    actorName: "Admin",
+    createdAt: "2026-08-01T10:00:00.000Z",
+  };
+  const currentAudit = { ...legacyOpeningAudit, partitionKey: "TENANT#tenant-1#AUDIT#current-audit", recordType: "audit", id: "current-audit", entityType: "product", action: "product.created", entityId: "product-1" };
+  dynamoDB.send = async (command) => command.constructor.name === "QueryCommand" ? { Items: [legacyOpeningAudit, currentAudit] } : Promise.reject(new Error(`Unexpected command ${command.constructor.name}`));
+  const compatibleAudits = await repository.listAudits(tenantId, 8);
+  assert.equal(compatibleAudits[0].id, "legacy-opening-audit", "legacy opening-stock audits derive their stable ID from the stored key");
+  assert.equal(compatibleAudits[0].entityType, "opening_stock");
+  assert.equal(compatibleAudits[1].id, "current-audit");
+  assert.equal(compatibleAudits[1].entityType, "product", "current audit domain types survive storage metadata removal");
 }
 
 main().catch((error) => {
