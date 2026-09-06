@@ -138,7 +138,7 @@ export const issueBillingCredit = async (tenantId: string, input: { amountKes: n
     { Put: { TableName: TABLE_NAME, Item: { ...requestKey(tenantId, input.requestId), entityType: "billing_credit_request", creditId: id, requestHash, createdAt: now }, ConditionExpression: "attribute_not_exists(sortKey)" } },
     { Update: { TableName: TABLE_NAME, Key: accountKey(tenantId), UpdateExpression: "SET creditBalanceKes = if_not_exists(creditBalanceKes, :zero) + :amount, updatedAt = :now", ExpressionAttributeValues: { ":zero": 0, ":amount": input.amountKes, ":now": now } } },
   ] }));
-  const settlement = await attemptCreditSettlement(tenantId, actorId);
+  const settlement = await attemptCreditSettlement(tenantId, actorId, undefined, { allowEarlyRenewal: true });
   return { credit: (await listBillingCredits(tenantId)).find((item) => item.id === id) ?? credit, settlement, idempotent: false, recoveryAttempted: false };
 };
 
@@ -207,14 +207,19 @@ async function applyCreditsToOpenCharge(account: BillingAccount, payment: Billin
   return record;
 }
 
-export const attemptCreditSettlement = async (tenantId: string, actorId = "billing-worker", suppliedAccount?: BillingAccount) => {
+export const attemptCreditSettlement = async (tenantId: string, actorId = "billing-worker", suppliedAccount?: BillingAccount, options: { allowEarlyRenewal?: boolean; today?: string } = {}) => {
   const [account, pending, allCredits] = await Promise.all([suppliedAccount ?? requireBillingAccount(tenantId), listBillingPayments(tenantId), listBillingCredits(tenantId)]);
   if (!account.planCode) return null;
   if (account.suspendedAt || ["deleting", "deleted"].includes(account.workspaceState ?? "active") || pending.some((payment) => payment.status === "submitted")) return null;
   const openPayment = pending.find((payment) => payment.status === "rejected" && Boolean(payment.creditAllocations?.length) && payment.chargeId);
   if (openPayment) return applyCreditsToOpenCharge(account, openPayment, allCredits, actorId);
+  const today = options.today ?? kenyaDate();
   const credits = eligibleCredits(allCredits);
-  const charge = nextBillingPayment(account);
+  const charge = nextBillingPayment(account, today);
+  // Issuing a credit may fund one upcoming service period immediately. Scheduled
+  // processing must wait until that period is due, otherwise every worker retry
+  // consumes another month from the same wallet balance.
+  if (!options.allowEarlyRenewal && charge.dueOn > today) return null;
   const allocation = creditAllocations(credits, charge.amountKes);
   if (!allocation.covered) return null;
   const now = new Date().toISOString();

@@ -14,6 +14,7 @@ const charge = (updates) => ({
   paymentId: "payment-1", issuedAt: "2026-01-01T08:00:00.000Z", settledAt: "2026-01-01T09:00:00.000Z", ...updates,
 });
 const event = (id, type, amountKes, createdAt) => ({ partitionKey: "TENANT#tenant-1", sortKey: `BILLING#CREDIT_EVENT#${createdAt}#${id}`, entityType: "billing_credit_event", id, tenantId: "tenant-1", creditId: "credit-1", type, amountKes, actorId: "admin", reason: "test", chargeId: null, paymentId: null, requestId: null, createdAt });
+const billingAccount = (updates = {}) => ({ tenantId: "tenant-1", tenantName: "Market", ownerUserId: "owner", ownerUsername: "owner@example.com", billingContactName: "Owner", billingContactEmail: "owner@example.com", billingContactPhone: "", planCode: "biashara", billingInterval: "monthly", trialStartedOn: "2025-01-01", trialEndsOn: "2025-01-14", paidThrough: null, cancelledAt: null, pendingPlanCode: null, pendingBillingInterval: null, termsVersion: "v1", privacyVersion: "v1", acceptedAt: "2025-01-01", acceptedBy: "owner", override: null, offer: null, creditBalanceKes: 500, workspaceState: "active", delinquentSince: null, archivedAt: null, deletionScheduledOn: null, suspendedAt: null, createdAt: "2025-01-01", updatedAt: "2026-01-01", ...updates });
 
 async function main() {
   dynamoDB.send = async (command) => {
@@ -71,6 +72,20 @@ async function main() {
   await assert.rejects(() => issueBillingCredit("tenant-1", { ...input, amountKes: 101 }, "admin"), /already used with different details/, "an idempotency key cannot be reused for different credit details");
   await assert.rejects(() => issueBillingCredit("tenant-1", { ...input, amountKes: 10.5, requestId: "request-5678" }, "admin"), /whole-KES|between KES/, "credits require a positive whole-KES amount");
 
+  billingRepository.listBillingPayments = async () => [];
+  let futureSettlementTransaction = false;
+  dynamoDB.send = async (command) => {
+    if (command.constructor.name === "QueryCommand") return { Items: [{ ...existingCredit, originalAmountKes: 500, remainingAmountKes: 500 }] };
+    if (command.constructor.name === "TransactWriteCommand") { futureSettlementTransaction = true; return {}; }
+    throw new Error(`Unexpected ${command.constructor.name}`);
+  };
+  const futureSettlement = await attemptCreditSettlement("tenant-1", "billing-worker", billingAccount({ paidThrough: "2026-10-31" }), { today: "2026-09-06" });
+  assert.equal(futureSettlement, null, "scheduled processing must not repeatedly purchase future periods from one credit");
+  assert.equal(futureSettlementTransaction, false);
+  const issuanceSettlement = await attemptCreditSettlement("tenant-1", "admin", billingAccount({ paidThrough: "2026-10-31" }), { allowEarlyRenewal: true, today: "2026-09-06" });
+  assert.equal(issuanceSettlement.periodStartsOn, "2026-11-01", "new credit may still fund exactly one upcoming period immediately");
+  assert.equal(futureSettlementTransaction, true);
+
   const openPayment = { id: "payment-open", tenantId: "tenant-1", tenantName: "Market", planCode: "biashara", billingInterval: "monthly", billingMonths: 1, amountKes: 500, baseAmountKes: 800, annualDiscountKes: 0, promotionCreditKes: 0, customPriceAdjustmentKes: 0, creditAppliedKes: 300, creditAllocations: [{ creditId: "credit-old", amountKes: 300, remainingBeforeKes: 300 }], chargeId: "charge-open", periodStartsOn: "2026-01-01", periodEndsOn: "2026-01-31", offerId: null, offerPricePercent: null, offerLabel: null, mpesaReference: "REJECTED1", paidOn: "2026-01-01", status: "rejected", submittedBy: "owner", submittedAt: "2026-01-01T08:00:00.000Z", reviewedBy: "admin", reviewedAt: "2026-01-01T09:00:00.000Z", rejectionReason: "Not found" };
   billingRepository.listBillingPayments = async () => [openPayment];
   const creditItems = [
@@ -83,7 +98,7 @@ async function main() {
     if (command.constructor.name === "TransactWriteCommand") { settlementTransaction = command.input.TransactItems; return {}; }
     throw new Error(`Unexpected ${command.constructor.name}`);
   };
-  const settled = await attemptCreditSettlement("tenant-1", "admin", { tenantId: "tenant-1", tenantName: "Market", ownerUserId: "owner", ownerUsername: "owner@example.com", billingContactName: "Owner", billingContactEmail: "owner@example.com", billingContactPhone: "", planCode: "biashara", billingInterval: "monthly", trialStartedOn: "2025-01-01", trialEndsOn: "2025-01-14", paidThrough: null, cancelledAt: null, pendingPlanCode: null, pendingBillingInterval: null, termsVersion: "v1", privacyVersion: "v1", acceptedAt: "2025-01-01", acceptedBy: "owner", override: null, offer: null, creditBalanceKes: 800, workspaceState: "archived", delinquentSince: "2025-01-16", archivedAt: "2025-02-15", deletionScheduledOn: "2026-12-01", suspendedAt: null, createdAt: "2025-01-01", updatedAt: "2026-01-01" });
+  const settled = await attemptCreditSettlement("tenant-1", "admin", billingAccount({ creditBalanceKes: 800, workspaceState: "archived", delinquentSince: "2025-01-16", archivedAt: "2025-02-15", deletionScheduledOn: "2026-12-01" }), { today: "2026-09-06" });
   assert.equal(settled.id, "charge-open", "new credit settles the existing open charge instead of creating a duplicate");
   assert.equal(settled.creditAppliedKes, 800);
   assert.equal(settled.cashAmountKes, 0);
