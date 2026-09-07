@@ -180,10 +180,10 @@
     "@smithy/types" "^4.17.2"
     tslib "^2.6.2"
 
-"@aws-sdk/client-kms@^3.1125.0":
-  version "3.1125.0"
-  resolved "https://registry.yarnpkg.com/@aws-sdk/client-kms/-/client-kms-3.1125.0.tgz#85179470c561d2df10cf0a9e3a0f9d3fb9cfb2b2"
-  integrity sha512-gzxhtJ95jkv00XmPlSgZwiqdI+7JqPULfP0Ozywp10diB34OT5Fn1q086rfec4MXZXZMwOHCkNV+UCHA1cTkyQ==
+"@aws-sdk/client-kms@^3.1126.0":
+  version "3.1126.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/client-kms/-/client-kms-3.1126.0.tgz#36c8880c488e891383523f577c95fc3abdd7fca0"
+  integrity sha512-/QzFvLQmw8csPLfNDTBNT0uJUhFVqKfVSPWyyI7f7FRuyOV1YBY0XVChfBd7qHjvJM/3kcjAaCkhfz+T120eOg==
   dependencies:
     "@aws-sdk/core" "^3.977.9"
     "@aws-sdk/credential-provider-node" "^3.972.82"
