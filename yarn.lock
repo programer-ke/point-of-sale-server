@@ -164,10 +164,10 @@
     "@smithy/types" "^4.17.2"
     tslib "^2.6.2"
 
-"@aws-sdk/client-dynamodb@^3.1125.0":
-  version "3.1125.0"
-  resolved "https://registry.yarnpkg.com/@aws-sdk/client-dynamodb/-/client-dynamodb-3.1125.0.tgz#b9d2dc8733fe40139cf6d9c9d020dc44a9f2d1f2"
-  integrity sha512-BEXrd0w1mZ8SHeHcendBOZNk5D7/IlbqJgj1qFmKyC+/SV6tP6MqKoeDpKDecx96yYigLDta7gpAnIH2B+N+2g==
+"@aws-sdk/client-dynamodb@^3.1126.0":
+  version "3.1126.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/client-dynamodb/-/client-dynamodb-3.1126.0.tgz#67fbf407cdddc1856888b28c737a0ba1ee75dbd6"
+  integrity sha512-JJquheUb1DCcY4p2cejC5HBDC45UEMIlIBHXkKJnIhDj132fEFOgSOdlEdu+tbXxNi/SybFiVezydVvqfKDjGQ==
   dependencies:
     "@aws-sdk/core" "^3.977.9"
     "@aws-sdk/credential-provider-node" "^3.972.82"
