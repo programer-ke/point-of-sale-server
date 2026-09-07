@@ -150,10 +150,10 @@
   dependencies:
     "@types/aws-lambda" "^8.10.152"
 
-"@aws-sdk/client-cognito-identity-provider@^3.1125.0":
-  version "3.1125.0"
-  resolved "https://registry.yarnpkg.com/@aws-sdk/client-cognito-identity-provider/-/client-cognito-identity-provider-3.1125.0.tgz#2d529117fe0fa6f61db46ab0f2a5752dfea831d4"
-  integrity sha512-9FhvbIK9KrkLtpQo/mc8jSD9lQL+StUbeAFnLm99QObnlzXDAnSZpklSKH0fVWjrqPnwGe0vIdHF3A2iQ1KyzA==
+"@aws-sdk/client-cognito-identity-provider@^3.1126.0":
+  version "3.1126.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/client-cognito-identity-provider/-/client-cognito-identity-provider-3.1126.0.tgz#82cbd01c334bff0c0cd8e640f5df6397357a7900"
+  integrity sha512-hVFUDBXS5xwBfxfzatfnNEW46YXd+bHwEkq2mRs9TLgF+TAojICi0sCiENyeciqyNOpHTKN+hLHm/tOCM0kGQg==
   dependencies:
     "@aws-sdk/core" "^3.977.9"
     "@aws-sdk/credential-provider-node" "^3.972.82"
